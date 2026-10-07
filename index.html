@@ -1,0 +1,1432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<meta name="color-scheme" content="dark light"/>
+<link rel="icon" href="data:,"/>
+<title>Video/Audio Syncer</title>
+<script src="assets/ffmpeg/ffmpeg.js"></script>
+<script src="assets/ffmpeg/util.js"></script>
+<style>
+:root{
+  --bg:#0f1115; --card:#171a21; --card2:#1e222c; --line:#2a2f3d; --text:#f2f3f5; --muted:#9aa3b2; --accent:#ff5a3c; --ok:#3dd68c; --radius:12px;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f6f6f4;--card:#ffffff;--card2:#f0efe9;--line:#e2ddd2;--text:#181713;--muted:#6b675e;--accent:#e84525;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.4}
+.wrap{max-width:760px;margin:0 auto;padding:16px 14px 36px}
+h1{font-size:22px;margin:2px 0 4px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:13.5px;margin:0 0 14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:560px){.grid{grid-template-columns:1fr 1fr;gap:8px}}
+.drop{background:var(--card);border:1.5px dashed var(--line);border-radius:var(--radius);padding:14px;min-height:86px;cursor:pointer}
+.drop.over{border-color:var(--accent);background:var(--card2)}
+.drop.has{border-style:solid;border-color:var(--ok)}
+.drop h3{margin:0 0 2px;font-size:15px}
+.drop p{margin:0;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.note{font-size:12px;color:var(--muted);margin:6px 2px 0}
+button{appearance:none;border:0;border-radius:999px;padding:11px 16px;font-weight:700;cursor:pointer;font-size:14px;font-family:inherit}
+.primary{background:var(--accent);color:#fff;width:100%;margin-top:12px;padding:13px}
+.primary:disabled{opacity:.45;cursor:not-allowed}
+.secondary{background:var(--card2);color:var(--text);border:1px solid var(--line)}
+.status{margin-top:12px;font-size:13px;color:var(--muted);min-height:18px}
+.status.err{color:#ff8a75}
+#logDetails{margin-top:12px}
+#logDetails summary{cursor:pointer;font-size:13px;color:var(--muted);padding:2px 0}
+#log{margin-top:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--muted);white-space:pre-wrap;max-height:170px;overflow:auto;min-height:42px}
+.diagBar{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
+.diagBar .secondary{padding:8px 14px;font-size:13px}
+#diagCopyStatus{font-size:12.5px;color:var(--ok)}
+#diagFallback{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;pointer-events:none}
+.errline{color:#ff8a75;font-size:13px;margin-top:8px;display:none}
+.errline.show{display:block}
+.progress{margin-top:10px;display:none}
+.progress .barTrack{position:relative;flex:1;height:22px;background:var(--card2);border-radius:999px;overflow:hidden}
+.progress i{display:block;height:100%;background:var(--accent);width:0%;transition:width .45s ease;border-radius:999px}
+#progText{position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7),0 0 3px rgba(0,0,0,.55);white-space:nowrap;pointer-events:none}
+.steps{display:none;justify-content:space-between;gap:4px;margin-top:6px;font-size:11.5px;color:var(--muted)}
+.steps.show{display:flex}
+.steps span{flex:1;text-align:center;white-space:nowrap}
+.steps span:first-child{text-align:left}.steps span:last-child{text-align:right}
+.steps span.active{color:var(--text);font-weight:700}
+.steps span.done{color:var(--ok);font-weight:700}
+.result{margin-top:10px;display:none;align-items:center;gap:10px;flex-wrap:wrap}
+.result.show{display:flex}
+.bigoffset{font-size:22px;font-weight:800;letter-spacing:-.02em}
+.cands{display:flex;gap:6px;flex-wrap:wrap}
+.cand{background:var(--card2);color:var(--text);border:1px solid var(--line);padding:7px 12px;font-size:13px}
+.playerSec{margin-top:14px;display:none}
+.playerSec.show{display:block}
+video.main{width:100%;border-radius:12px;background:#000;max-height:52vh;display:block}
+video.main.sourceHidden{display:none!important}
+#resultArea{display:none}
+#resultArea.show{display:block}
+.offsetRow{display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:nowrap}
+.offlabel{font-size:12.5px;color:var(--muted);white-space:nowrap;flex:none}
+.offBtn{width:30px;height:30px;flex:none;padding:0;border-radius:50%;background:var(--card2);color:var(--text);border:1px solid var(--line);font-size:11px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.offInput{flex:0 1 100px;min-width:9.5ch;width:100px;padding:7px 2px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-family:ui-monospace,Menlo,monospace;font-size:14px;text-align:center}
+.offsetRow .secondary{padding:6px 10px;font-size:12.5px;margin-left:auto;flex:none;white-space:nowrap}
+.offsetRow .secondary:disabled{opacity:.45;cursor:not-allowed}
+/* ---- timeline ---- */
+.timeline{margin-top:10px;display:none;user-select:none;-webkit-user-select:none;padding:0 28px;box-sizing:border-box}
+.timeline.show{display:block}
+.tl-read{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;margin-bottom:6px}
+.tl-stack{position:relative}
+.lane{position:relative;height:56px;border-radius:8px;background:var(--card2);overflow:hidden;touch-action:none}
+.lane.audio{height:48px;margin-top:8px;background:var(--card)}
+#filmstrip{position:absolute;inset:0;display:flex}
+#filmstrip canvas{flex:none;height:100%;display:block}
+.dim{position:absolute;top:0;bottom:0;background:rgba(0,0,0,.62);pointer-events:none;z-index:2}
+.handle{position:absolute;top:0;height:56px;width:44px;margin-left:-22px;z-index:6;cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center}
+.handle:active{cursor:grabbing}
+.handle::before{content:"";width:8px;height:38px;border-radius:4px;background:var(--accent);box-shadow:0 0 0 1.5px #fff3}
+.selborder{position:absolute;top:0;bottom:0;border-top:2.5px solid var(--accent);border-bottom:2.5px solid var(--accent);pointer-events:none;z-index:3}
+#audioBlock{position:absolute;top:3px;bottom:3px;border-radius:6px;background:#2b3550;border:1px solid #46598a;cursor:grab;touch-action:none;overflow:hidden;z-index:2}
+@media (prefers-color-scheme:light){#audioBlock{background:#dbe4f5;border-color:#93a7cf}}
+#audioBlock:active{cursor:grabbing}
+#wave{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+/* ---- settings ---- */
+.settings{margin-top:16px;display:none}
+.settings.show{display:block}
+.setrow{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
+.setlabel{font-size:13px;color:var(--muted);min-width:74px}
+.pills{display:flex;gap:6px;flex-wrap:wrap}
+.pill{position:relative;cursor:pointer}
+.pill input{position:absolute;opacity:0;inset:0;cursor:pointer;margin:0}
+.pill span{display:inline-block;padding:7px 14px;border-radius:999px;border:1px solid var(--line);background:var(--card2);font-weight:700;font-size:13px}
+.pill input:checked+span{background:var(--accent);border-color:var(--accent);color:#fff}
+input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
+.blendval{font-family:ui-monospace,Menlo,monospace;font-size:13px;min-width:38px;text-align:right}
+#historyWrap{margin-top:16px;display:none}
+#historyWrap.show{display:block}
+#historyWrap h4{margin:0 0 8px;font-size:13px;color:var(--muted);font-weight:700}
+.histRow{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-top:6px;color:var(--text);font-size:12.5px;font-weight:400;cursor:pointer;font-family:ui-monospace,Menlo,monospace}
+.histRow .unavail{color:#ff8a75}
+.resultvid{width:100%;border-radius:12px;background:#000;margin-top:10px;max-height:60vh;display:block}
+.download{display:inline-block;margin-top:10px;margin-right:8px;background:var(--ok);color:#06281a;padding:11px 16px;border-radius:999px;font-weight:800;text-decoration:none;font-size:14px;cursor:pointer}
+#newWrap{margin-top:14px;display:none}
+.dlstatus{margin-top:12px;font-size:13px;background:#14231c;border:1px solid #24543e;border-radius:10px;padding:9px 12px;color:#e6f7ee}
+@media (prefers-color-scheme:light){.dlstatus{background:#e7f5ec;border-color:#bfe3cd;color:#14402a}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Video/Audio Syncer</h1>
+  <p class="sub">Upload a video with the music playing in the background, plus the clean audio (a music file, video, or screen recording), and get your video back with the music auto-synced on top.</p>
+  <div class="grid">
+    <div class="drop" id="dropDance" tabindex="0">
+      <h3>Video</h3><p id="metaDance">Upload</p>
+      <input type="file" id="fileDance" accept="video/*,.mp4,.mov,.webm,.m4v,.mkv" hidden>
+    </div>
+    <div class="drop" id="dropSong" tabindex="0">
+      <h3>Audio</h3><p id="metaSong">Upload (video, screen recording, or audio)</p>
+      <input type="file" id="fileSong" accept="video/*,audio/*,.mp4,.mov,.webm,.m4v,.mkv,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" hidden>
+    </div>
+  </div>
+
+  <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
+  <div class="steps" id="stepsRow"><span id="step1" data-label="Video">Video</span><span id="step2" data-label="Audio">Audio</span><span id="step3" data-label="Sync">Sync</span><span id="step4" data-label="Generate">Generate</span></div>
+  <div class="errline" id="errLine"></div>
+  <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
+
+  <div class="result" id="resultBox">
+    <span class="bigoffset" id="offsetBig"></span>
+    <div class="cands" id="candRow"></div>
+  </div>
+
+  <section class="playerSec" id="playerSec">
+    <video class="main sourceHidden" id="vid" playsinline preload="metadata"></video>
+    <div id="resultArea"></div>
+
+    <div class="timeline" id="timeline">
+      <div class="tl-read"><span id="trimRead"></span><span id="offRead"></span></div>
+      <div class="tl-stack" id="tlStack">
+        <div class="lane" id="videoLane">
+          <div id="filmstrip"></div>
+          <div class="dim" id="dimL"></div>
+          <div class="dim" id="dimR"></div>
+          <div class="selborder" id="selBorder"></div>
+        </div>
+        <div class="handle" id="hL"></div>
+        <div class="handle" id="hR"></div>
+        <div class="lane audio" id="audioLane">
+          <div id="audioBlock"><canvas id="wave"></canvas></div>
+        </div>
+      </div>
+      <div class="offsetRow">
+        <span class="offlabel">Audio offset (s):</span>
+        <button type="button" class="offBtn" id="offMinus" aria-label="Offset minus 0.02 seconds">◀</button>
+        <input type="text" class="offInput" id="offInput" value="0.000" inputmode="decimal" autocomplete="off" aria-label="Offset from detected sync, in seconds">
+        <button type="button" class="offBtn" id="offPlus" aria-label="Offset plus 0.02 seconds">▶</button>
+        <button type="button" class="secondary" id="btnResync" disabled>Re-sync</button>
+      </div>
+    </div>
+
+    <div class="settings" id="settingsSec">
+      <div class="setrow">
+        <span class="setlabel">Quality</span>
+        <div class="pills" role="radiogroup" aria-label="Quality">
+          <label class="pill"><input type="radio" name="quality" value="full" checked><span>Full</span></label>
+          <label class="pill"><input type="radio" name="quality" value="1080"><span>1080p</span></label>
+          <label class="pill"><input type="radio" name="quality" value="720"><span>720p</span></label>
+          <label class="pill"><input type="radio" name="quality" value="480"><span>480p</span></label>
+        </div>
+      </div>
+      <div class="setrow">
+        <span class="setlabel">Room audio</span>
+        <input type="range" id="blend" min="0" max="100" step="1" value="0" aria-label="Room audio">
+        <span class="blendval" id="blendVal">0%</span>
+      </div>
+      <div class="setrow">
+        <button class="primary" id="btnGenerate" style="width:auto;margin-top:0">Generate</button>
+        <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
+      </div>
+      <div id="downloadWrap"></div>
+      <div id="newWrap"><button type="button" class="secondary" id="btnNew">New</button></div>
+    </div>
+  </section>
+  <div id="historyWrap"><h4>History</h4><div id="historyList"></div></div>
+</div>
+
+<script>
+(function(){
+"use strict";
+var TARGET_SR=22050, FFT_SIZE=2048, HOP=1024;
+var danceFile=null, songFile=null;
+var dancePCM=null, songPCM=null;
+var danceDur=0, songDur=0;
+var detectedOffset=0;
+var trimStartSec=0, trimEndSec=null; // null = full duration
+var audioPos=0; // video-timeline position (sec) of the song block's left edge; effOffset = -audioPos
+var blendVal=0;
+var ffmpeg=null, ffmpegLoaded=false, ffmpegProgressCb=null;
+var danceURL=null;
+
+// ================= DIAGNOSTICS =================
+// One copyable plain-text dump (see buildDiagnosticsText). The Details log
+// feeds it: every log() line is timestamped (page elapsed + run elapsed)
+// and kept in diagEntries (last 200). Errors go through logError() so the
+// dump carries name + message + stack + stage.
+var PAGE_T0=Date.now();
+var diagRunT0=0;
+var diagStage='boot';
+var diagEntries=[];
+var diagEnvAtLoad=null;
+var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:'',coreURL:'',workerURL:'',wasmURL:'',wasmGzURL:'',wasmViaBlob:false,loadStartIso:'',loadDurationMs:null,loadErrors:[],coreBytes:null};
+var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
+var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
+var diagLastEncodeMilestone=-1;
+function $(id){return document.getElementById(id)}
+function effOffset(){ return -audioPos; }
+function fmtT(s){ s=Math.max(0,s||0); var m=Math.floor(s/60), sec=Math.floor(s%60); return m+":"+(sec<10?"0":"")+sec; }
+function fmtSize(b){ if(b==null||!isFinite(b)) return '?'; return b>1048576?(b/1048576).toFixed(1)+" MB":Math.round(b/1024)+" KB"; }
+function fmtBytesMB(b){ if(b==null||!isFinite(b)) return 'n/a'; return b+' bytes ('+(b/1048576).toFixed(3)+' MB)'; }
+function diagStamp(){
+  var pageMs=Date.now()-PAGE_T0;
+  var runMs=diagRunT0?(Date.now()-diagRunT0):null;
+  return '[+'+pageMs+'ms page'+(runMs!=null?(' / +'+runMs+'ms run'):' / run n/a')+']['+diagStage+']';
+}
+function diagErrText(err){
+  if(!err) return 'unknown error';
+  var name=err.name||'Error', msg=err.message||String(err), stack=err.stack||'(no stack)';
+  return name+': '+msg+'\nStack: '+stack;
+}
+function log(msg){
+  var line=diagStamp()+' '+String(msg);
+  diagEntries.push(line);
+  if(diagEntries.length>200) diagEntries=diagEntries.slice(diagEntries.length-200);
+  var el=$('log'); if(!el) return;
+  el.textContent=diagEntries.join('\n');
+  el.scrollTop=el.scrollHeight;
+}
+function logError(stage,err){
+  diagStage=stage||diagStage;
+  log('ERROR in stage "'+diagStage+'": '+diagErrText(err));
+}
+function collectEnvProbes(){
+  var p={};
+  try{ p.inIframe=(window.self!==window.top)?'yes':'no'; }catch(e){ p.inIframe='threw '+(e.name||'Error')+': '+(e.message||e); }
+  try{ p.windowOrigin=String(window.origin); }catch(e){ p.windowOrigin='threw '+(e.message||e); }
+  try{ p.locationOrigin=String(location.origin); }catch(e){ p.locationOrigin='threw '+(e.message||e); }
+  try{ p.locationHref=String(location.href); }catch(e){ p.locationHref=''; }
+  p.crossOriginIsolated=(typeof window.crossOriginIsolated!=='undefined')?String(window.crossOriginIsolated):'undefined';
+  p.sharedArrayBufferType=typeof SharedArrayBuffer;
+  p.decompressionStreamType=typeof DecompressionStream;
+  p.sharePresent=(typeof navigator!=='undefined'&&typeof navigator.share==='function')?'yes (function)':((typeof navigator!=='undefined'&&'share' in navigator)?'present but not a function':'no');
+  p.canSharePresent=(typeof navigator!=='undefined'&&typeof navigator.canShare==='function')?'yes (function)':'no';
+  p.canShareTest='not run';
+  if(typeof navigator!=='undefined'&&typeof navigator.canShare==='function'){
+    var tf=null;
+    try{ tf=new File([new Uint8Array([0])],'diag-test.mp4',{type:'video/mp4'}); }catch(fe){ p.canShareTest='File construction threw '+(fe.name||'Error')+': '+(fe.message||fe); }
+    if(tf){
+      try{ var r=navigator.canShare({files:[tf]}); p.canShareTest='returned '+String(r)+' for 1-byte File (name=diag-test.mp4, type=video/mp4)'; }
+      catch(ce){ p.canShareTest='threw '+(ce.name||'Error')+': '+(ce.message||ce)+(ce.stack?(' | stack: '+String(ce.stack).split('\n')[0]):''); }
+    }
+  } else { p.canShareTest='skipped — navigator.canShare unavailable'; }
+  try{ p.downloadAttrSupport=('download' in document.createElement('a'))?"yes ('download' in HTMLAnchorElement)":'no'; }catch(e){ p.downloadAttrSupport='threw '+(e.message||e); }
+  p.mediaSourceType=typeof MediaSource;
+  p.videoDecoderType=typeof VideoDecoder;
+  p.audioDecoderType=typeof AudioDecoder;
+  try{ p.maxTouchPoints=String(navigator.maxTouchPoints); }catch(e){ p.maxTouchPoints='unknown'; }
+  p.userAgent=String((typeof navigator!=='undefined'&&navigator.userAgent)||'');
+  p.platform=String((typeof navigator!=='undefined'&&navigator.platform)||'');
+  p.vendor=String((typeof navigator!=='undefined'&&navigator.vendor)||'');
+  p.language=String((typeof navigator!=='undefined'&&navigator.language)||'')+((typeof navigator!=='undefined'&&navigator.languages)?' (languages: '+navigator.languages.join(', ')+')':'');
+  p.screenSize=(typeof screen!=='undefined')?(screen.width+'x'+screen.height+' avail '+screen.availWidth+'x'+screen.availHeight):'unknown';
+  p.innerSize=(typeof window!=='undefined')?(window.innerWidth+'x'+window.innerHeight):'unknown';
+  p.devicePixelRatio=String((typeof window!=='undefined'&&window.devicePixelRatio)||1);
+  var dm='browser';
+  try{ if(window.matchMedia('(display-mode: standalone)').matches) dm='standalone'; else if(window.matchMedia('(display-mode: fullscreen)').matches) dm='fullscreen'; else if(window.matchMedia('(display-mode: minimal-ui)').matches) dm='minimal-ui'; }catch(e){}
+  var sa='unknown'; try{ sa=String(window.navigator.standalone); }catch(e){}
+  p.displayMode=dm; p.standaloneFlag=sa;
+  return p;
+}
+function probesToText(p){
+  if(!p) return '(probes not collected)';
+  return [
+    'In iframe (window.self !== window.top): '+p.inIframe,
+    'window.origin: '+p.windowOrigin,
+    'location.origin: '+p.locationOrigin,
+    'location.href: '+p.locationHref,
+    'crossOriginIsolated: '+p.crossOriginIsolated,
+    'typeof SharedArrayBuffer: '+p.sharedArrayBufferType,
+    'typeof DecompressionStream: '+p.decompressionStreamType,
+    'navigator.share present: '+p.sharePresent,
+    'navigator.canShare present: '+p.canSharePresent,
+    'navigator.canShare test (1-byte mp4 File): '+p.canShareTest,
+    "'download' attribute support: "+p.downloadAttrSupport,
+    'typeof MediaSource: '+p.mediaSourceType,
+    'typeof VideoDecoder (WebCodecs): '+p.videoDecoderType,
+    'typeof AudioDecoder (WebCodecs): '+p.audioDecoderType,
+    'navigator.maxTouchPoints: '+p.maxTouchPoints,
+    'User agent: '+p.userAgent,
+    'navigator.platform: '+p.platform,
+    'navigator.vendor: '+p.vendor,
+    'Language: '+p.language,
+    'Screen: '+p.screenSize+' | viewport (inner): '+p.innerSize+' | devicePixelRatio: '+p.devicePixelRatio,
+    'Display mode: '+p.displayMode+' | navigator.standalone: '+p.standaloneFlag
+  ].join('\n');
+}
+function fileDiagText(d){
+  return d.role+':\n'+
+    '  name: '+d.name+'\n'+
+    '  size: '+fmtBytesMB(d.sizeBytes)+'\n'+
+    '  MIME type: '+(d.type||'(empty)')+'\n'+
+    '  duration: '+(d.durationSec!=null&&isFinite(d.durationSec)?Number(d.durationSec).toFixed(3)+' s':'unknown')+'\n'+
+    '  decode route: '+d.decodeRoute+'\n'+
+    '  decode duration: '+(d.decodeDurationMs!=null?d.decodeDurationMs+' ms':'n/a')+'\n'+
+    '  extracted audio: '+(d.sampleCount!=null?d.sampleCount+' samples @ '+(d.sampleRate||'?')+' Hz':'n/a')+(d.rms!=null?('\n  RMS: '+d.rms+' | peak: '+d.peak):'');
+}
+function buildDiagnosticsText(){
+  var probesNow=null;
+  try{ probesNow=collectEnvProbes(); }catch(e){ probesNow=null; logError('diagnostics-probes',e); }
+  var now=new Date();
+  // Refresh live file/result facts so the dump is accurate even if a diag
+  // field was missed at assignment time.
+  try{
+    if(typeof danceFile!=='undefined'&&danceFile){ diagFiles.video.name=danceFile.name; diagFiles.video.sizeBytes=danceFile.size; diagFiles.video.type=danceFile.type||''; if(typeof danceDur!=='undefined'&&danceDur) diagFiles.video.durationSec=danceDur; if(typeof dancePCM!=='undefined'&&dancePCM){ diagFiles.video.sampleCount=dancePCM.length; diagFiles.video.sampleRate=TARGET_SR; } }
+    if(typeof songFile!=='undefined'&&songFile){ diagFiles.audio.name=songFile.name; diagFiles.audio.sizeBytes=songFile.size; diagFiles.audio.type=songFile.type||''; if(typeof songDur!=='undefined'&&songDur) diagFiles.audio.durationSec=songDur; if(typeof songPCM!=='undefined'&&songPCM){ diagFiles.audio.sampleCount=songPCM.length; diagFiles.audio.sampleRate=TARGET_SR; } }
+    if(typeof resultBlob!=='undefined'&&resultBlob){ diagResult.blobSize=resultBlob.size; diagResult.blobType=resultBlob.type||'video/mp4'; }
+    if(typeof resultURL!=='undefined'){ diagResult.hasObjectURL=!!resultURL; diagResult.urlPrefix=resultURL?(String(resultURL).split(':')[0]+': (blob URL, full URL omitted)'):'none'; }
+    if(typeof resultCanShare!=='undefined') diagResult.canShare=resultCanShare;
+    if(typeof resultFile!=='undefined') diagResult.shareFileBuilt=!!resultFile;
+  }catch(e){}
+  var histCount=0; try{ histCount=(typeof historyEntries!=='undefined'&&historyEntries)?historyEntries.length:0; }catch(e){}
+  var qNow='unknown'; try{ var qe=document.querySelector('input[name=quality]:checked'); qNow=qe?qe.value:'unknown'; }catch(e){}
+  var settingsText='(no generation yet)';
+  if(diagResult.settings){ var s=diagResult.settings; settingsText='quality='+s.q+(s.height?(' ('+s.height+'p)'):' (full)')+' | trim='+Number(s.tStart).toFixed(3)+'s to '+Number(s.tEnd).toFixed(3)+'s (duration '+Number(s.tDur).toFixed(3)+'s) | effective offset='+Number(s.eff).toFixed(3)+'s | detected offset='+(typeof detectedOffset!=='undefined'?Number(detectedOffset).toFixed(3)+'s':'?')+' | room audio blend='+Math.round(Number(s.blend)*100)+'%'; }
+  else { try{ settingsText='current editor (no completed generation captured): quality='+qNow+' | trim='+(typeof trimStartSec!=='undefined'?Number(trimStartSec).toFixed(3):'?')+'s to '+(typeof trimEnd==='function'?Number(trimEnd()).toFixed(3):'?')+'s | effective offset='+(typeof effOffset==='function'?Number(effOffset()).toFixed(3):'?')+'s | blend='+(typeof blendVal!=='undefined'?Math.round(blendVal*100):'?')+'%'; }catch(e){} }
+  var convLines=[
+    'Loaded (ffmpegLoaded flag): '+String((typeof ffmpegLoaded!=='undefined')?ffmpegLoaded:false),
+    'Load attempted: '+String(diagConverter.attempted),
+    'Version: '+diagConverter.version,
+    'FFmpegWASM global present: '+String(typeof window!=='undefined'&&!!window.FFmpegWASM)+' | FFmpegUtil global present: '+String(typeof window!=='undefined'&&!!window.FFmpegUtil),
+    'Base URL: '+(diagConverter.base||'(not recorded yet — converter not loaded)'),
+    'Core JS: '+(diagConverter.coreURL||'assets/ffmpeg/ffmpeg-core.js (relative)'),
+    'Class worker: '+(diagConverter.workerURL||'assets/ffmpeg/814.ffmpeg.js (relative)'),
+    'Wasm: '+(diagConverter.wasmURL||'assets/ffmpeg/ffmpeg-core.wasm (fallback name)'),
+    'Compressed wasm source: '+(diagConverter.wasmGzURL||'assets/ffmpeg/ffmpeg-core.wasm.gz (relative)'),
+    'Wasm loaded via blob URL after gzip decompress: '+String(diagConverter.wasmViaBlob)+(diagConverter.coreBytes!=null?(' | decompressed core size: '+fmtBytesMB(diagConverter.coreBytes)):''),
+    'Load started: '+(diagConverter.loadStartIso||'n/a'),
+    'Load duration: '+(diagConverter.loadDurationMs!=null?diagConverter.loadDurationMs+' ms':'n/a'),
+    'Load errors: '+(diagConverter.loadErrors.length?('\n'+diagConverter.loadErrors.join('\n')):'none recorded')
+  ].join('\n');
+  var resultLines=[
+    'Output blob size: '+fmtBytesMB(diagResult.blobSize),
+    'Output blob MIME type: '+(diagResult.blobType||'n/a'),
+    'Object URL created: '+(diagResult.hasObjectURL?'yes':'no'),
+    'Object URL prefix/scheme: '+(diagResult.urlPrefix||'none'),
+    'Share File pre-built at generation: '+String(diagResult.shareFileBuilt),
+    'resultCanShare (canShare with real output File): '+(diagResult.canShare==null?'unknown':String(diagResult.canShare)),
+    'Settings used: '+settingsText,
+    'History count: '+histCount,
+    'Analysis state: '+String((typeof analysisState!=='undefined')?analysisState:'?')+' | confidence: '+String((typeof confidence!=='undefined')?confidence:'?')
+  ].join('\n');
+  var headerLines=[
+    'Video/Audio Syncer — Diagnostics dump',
+    'Timestamp (ISO): '+now.toISOString(),
+    'Timestamp (local): '+now.toString(),
+    'Page URL: '+String(location.href),
+    'User agent: '+String(navigator.userAgent||''),
+    'Platform: '+String(navigator.platform||''),
+    'Vendor: '+String(navigator.vendor||''),
+    'Screen: '+((typeof screen!=='undefined')?(screen.width+'x'+screen.height):'unknown')+' | viewport: '+window.innerWidth+'x'+window.innerHeight+' | devicePixelRatio: '+String(window.devicePixelRatio||1),
+    'Standalone / display-mode: '+((probesNow)?(probesNow.displayMode+' (navigator.standalone='+probesNow.standaloneFlag+')'):'unknown'),
+    'Language: '+String(navigator.language||'')+((navigator.languages)?' ['+navigator.languages.join(', ')+']':'')
+  ].join('\n');
+  var parts=[];
+  parts.push('--- HEADER ---'); parts.push(headerLines);
+  parts.push('--- ENVIRONMENT (AT LOAD) ---'); parts.push(probesToText(diagEnvAtLoad));
+  parts.push('--- ENVIRONMENT (AT COPY TIME) ---'); parts.push(probesToText(probesNow));
+  parts.push('--- CONVERTER ---'); parts.push(convLines);
+  parts.push('--- FILES ---'); parts.push(fileDiagText(diagFiles.video)); parts.push(fileDiagText(diagFiles.audio));
+  parts.push('--- RESULT ---'); parts.push(resultLines);
+  parts.push('--- PIPELINE LOG ---'); parts.push(diagEntries.length?diagEntries.join('\n'):'(no log lines yet)');
+  parts.push('--- END ---');
+  return parts.join('\n');
+}
+async function copyDiagnostics(){
+  var statusEl=$('diagCopyStatus');
+  function setDiagStatus(t){ if(statusEl) statusEl.textContent=t; }
+  // Log the tap first, then rebuild so the dump itself contains this line.
+  try{ log('Copy diagnostics tapped — building dump…'); }catch(e){}
+  var text='';
+  try{ text=buildDiagnosticsText(); }catch(e){ try{ logError('diagnostics-build',e); }catch(_){} text='Diagnostics build failed: '+diagErrText(e); }
+  try{ log('Diagnostics dump built: '+text.length+' chars, '+diagEntries.length+' log lines.'); text=buildDiagnosticsText(); }catch(e){}
+  var copied=false, copyMethod='', copyErr=null;
+  if(typeof navigator!=='undefined'&&navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){
+    try{ await navigator.clipboard.writeText(text); copied=true; copyMethod='navigator.clipboard.writeText'; }
+    catch(e){ copyErr=e; try{ logError('diagnostics-copy-clipboard',e); }catch(_){} }
+  }
+  if(!copied){
+    // Textarea-select fallback (also the only route in insecure contexts).
+    try{
+      var ta=$('diagFallback');
+      if(!ta) throw new Error('fallback textarea missing');
+      ta.value=text;
+      var det=$('logDetails'); if(det&&!det.open) det.open=true;
+      ta.focus(); ta.select(); ta.setSelectionRange(0,ta.value.length);
+      var ok=false;
+      try{ ok=document.execCommand('copy'); }catch(e2){ copyErr=e2; }
+      if(ok){ copied=true; copyMethod='textarea select + document.execCommand(copy)'; }
+      else if(!copyErr) copyErr=new Error('document.execCommand(copy) returned false');
+    }catch(e3){ copyErr=e3; try{ logError('diagnostics-copy-fallback',e3); }catch(_){} }
+  }
+  if(copied){
+    setDiagStatus('Copied ✓ — paste it anywhere to share.');
+    try{ log('Diagnostics copied via '+copyMethod+' ('+text.length+' chars).'); }catch(e){}
+  } else {
+    setDiagStatus('Copy failed — diagnostics are selected in the box; press Copy, or open Details and copy the log.');
+    try{ log('Diagnostics copy FAILED via all methods. Last error: '+diagErrText(copyErr||new Error('unknown'))); var ta2=$('diagFallback'); if(ta2){ ta2.value=buildDiagnosticsText(); ta2.focus(); ta2.select(); } }catch(e){}
+  }
+  setTimeout(function(){ setDiagStatus(''); },6000);
+  return copied;
+}
+function setStatus(t,err){ if(t) log(t); }
+function showError(msg){ var el=$('errLine'); if(!el) return; el.textContent=msg; el.classList.add('show'); try{ log('UI error shown: '+msg); }catch(e){} }
+function clearError(){ var el=$('errLine'); if(!el) return; el.textContent=''; el.classList.remove('show'); }
+var stepState={1:false,2:false,3:false,4:false};
+var barPct=0;
+// Progress advances ONLY on discrete verifiable events (step start / step end);
+// it never moves backwards within a run. Event ladder:
+//   converter load starts 2% · converter ready 6%
+//   dance decode starts 9% · dance decode ends 26%
+//   song decode starts 29% · song decode ends 46%
+//   analysis starts 49% · coarse match ends 56% · fine offset ends 63%
+//   encode starts 66% · ffmpeg encode progress 66%->97% · encode ends 100%
+// Persistent progress readout: ONE element (#progText), created in the markup,
+// updated in place via textContent only — never created/destroyed or
+// hidden/shown on value changes, so the percentage can't flicker. It shows
+// "<pct>% · <elapsed>", overlaid inside the bar track itself.
+var runT0=0, runClockTimer=null;
+function fmtClock(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
+function renderProgText(){ var el=$('progText'); if(!el) return; if(barPct>=100){ el.textContent='Done'; return; } var t=runT0?fmtClock(Date.now()-runT0):'0:00'; el.textContent=Math.round(barPct)+'% · '+t; }
+function startRunClock(){ runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(renderProgText,1000); renderProgText(); }
+function stopRunClock(){ if(runClockTimer){ clearInterval(runClockTimer); runClockTimer=null; } renderProgText(); }
+function setBarPct(pct){ pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; var w=$('progWrap'); w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); $('progBar').style.width=pct+"%"; renderProgText(); }
+function markStepDone(n){ stepState[n]=true; var el=$('step'+n); if(el){ el.classList.remove('active'); el.classList.add('done'); el.textContent='\u2713 '+el.dataset.label; } var next=$('step'+(n+1)); if(next&&!stepState[n+1]) next.classList.add('active'); }
+function markStepActive(n){ var el=$('step'+n); if(el&&!stepState[n]) el.classList.add('active'); }
+function resetProgress(full){ clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; $('progBar').style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=66; $('progBar').style.width="66%"; } startRunClock(); }
+function progressForGenerate(ratio){ if(ratio==null) return; setBarPct(66+Math.max(0,Math.min(1,ratio))*31); }
+var analysisState="idle", analysisPromise=null, filesVersion=0, analysisVersion=-1, confidence=0, lastCandidates=[];
+var filmstripBuiltFor=null, filmstripBuilding=false, filmstripPending=false, stripCache={};
+var pcmCache={}, pcmPromiseCache={}, ffmpegChain=Promise.resolve(), generatedOnce=false;
+// ---------- cancel ----------
+// Every run captures runToken; Cancel bumps it, rejects the run's cancel
+// signal (so in-flight awaits abort promptly), and terminates the ffmpeg
+// worker. ensureFFmpeg() re-creates the worker on the next run.
+var runToken=0, cancelReject=null, cancelPromise=null;
+function newCancelSignal(){ cancelPromise=new Promise(function(_,rej){ cancelReject=rej; }); cancelPromise.catch(function(){}); }
+function cancellable(p){ return cancelPromise?Promise.race([p,cancelPromise]):p; }
+function isCancelErr(e){ return e&&e.message==='Cancelled'; }
+function setCancelVisible(v){ var b=$('btnCancel'); if(b) b.style.display=v?'':'none'; }
+function fileKey(f){ return f.name+'|'+f.size+'|'+(f.lastModified||0); }
+function withTimeout(promise,ms,label){
+  var timer=null;
+  var timeout=new Promise(function(_,rej){ timer=setTimeout(function(){ rej(new Error(label+' timed out after '+Math.round(ms/1000)+'s')); },ms); });
+  return Promise.race([promise,timeout]).then(function(v){ clearTimeout(timer); return v; },function(e){ clearTimeout(timer); throw e; });
+}
+function startHeartbeat(label,file,t0){
+  return setInterval(function(){ log(label+': still working on '+file.name+' ('+fmtSize(file.size)+') … '+Math.round((Date.now()-t0)/1000)+'s'); },6000);
+}
+function withFFmpegLock(fn){
+  var run=ffmpegChain.then(fn,fn);
+  ffmpegChain=run.then(function(){},function(){});
+  return run;
+}
+// Edits NEVER touch the generated result: once a result video exists it stays
+// visible until a new Generate/auto-run completes and replaces it.
+function invalidateDownload(){ if(generatedOnce) log('Edits changed — generated video stays until you tap Generate.'); }
+function trimEnd(){ return trimEndSec==null?danceDur:trimEndSec; }
+
+// ---------- files ----------
+function setupDrop(dropId,inputId,which){
+  var drop=$(dropId), input=$(inputId);
+  drop.addEventListener('click',function(){input.click()});
+  drop.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();input.click()}});
+  ['dragenter','dragover'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.add('over')})});
+  ['dragleave','drop'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('over')})});
+  drop.addEventListener('drop',function(e){ var f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) handleFile(f,which); });
+  input.addEventListener('change',function(){ if(input.files[0]) handleFile(input.files[0],which); });
+}
+function handleFile(f,which){
+  diagStage='file-select';
+  filesVersion++; analysisState="idle"; analysisPromise=null; try{ autoGenForVersion=-1; }catch(e){}
+  try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
+  if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
+  detectedOffset=0; audioPos=0; generatedOnce=false;
+  var rb=$('btnResync'); if(rb) rb.disabled=true;
+  $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show');
+  $(which==='dance'?'metaDance':'metaSong').textContent=f.name+' · '+fmtSize(f.size);
+  $(which==='dance'?'dropDance':'dropSong').classList.add('has');
+  log((which==='dance'?'Video: ':'Audio: ')+f.name+' · '+fmtSize(f.size));
+  var url=URL.createObjectURL(f);
+  var isVideo=/video/.test(f.type)||/\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name);
+  var el=document.createElement(isVideo?'video':'audio'); el.preload='metadata'; el.src=url;
+  el.onloadedmetadata=function(){
+    if(which==='dance'){ danceDur=el.duration; }
+    else songDur=el.duration;
+    try{ var dd2=(which==='dance')?diagFiles.video:diagFiles.audio; dd2.durationSec=el.duration; log('File metadata ['+dd2.role+']: duration='+(isFinite(el.duration)?Number(el.duration).toFixed(3):String(el.duration))+'s'); }catch(e){}
+    URL.revokeObjectURL(url); checkReady();
+  };
+  el.onerror=function(){ checkReady(); };
+  if(which==='dance'){
+    if(danceURL) URL.revokeObjectURL(danceURL);
+    danceURL=URL.createObjectURL(f);
+    $('vid').src=danceURL;
+    $('playerSec').classList.add('show');
+    $('settingsSec').classList.add('show');
+  }
+  updateNewBtn();
+  checkReady();
+}
+function checkReady(){
+  var gen=$('btnGenerate'); if(gen) gen.disabled=!(danceFile&&songFile);
+  if(danceDur>0){ $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); }
+  if(danceFile&&songFile&&analysisState==="idle"){ runAutoPipeline(); }
+}
+setupDrop('dropDance','fileDance','dance');
+setupDrop('dropSong','fileSong','song');
+
+// ---------- FFT ----------
+function fft(re,im,inverse){
+  var n=re.length, j=0;
+  for(var i=1;i<n;i++){ var bit=n>>1; for(;j&bit;bit>>=1) j^=bit; j^=bit;
+    if(i<j){ var tr=re[i]; re[i]=re[j]; re[j]=tr; var ti=im[i]; im[i]=im[j]; im[j]=ti; } }
+  for(var len=2;len<=n;len<<=1){
+    var ang=2*Math.PI/len*(inverse?1:-1), wr=Math.cos(ang), wi=Math.sin(ang);
+    for(var i=0;i<n;i+=len){
+      var cwr=1,cwi=0;
+      for(var k=0;k<len/2;k++){
+        var ur=re[i+k], ui=im[i+k];
+        var vr=re[i+k+len/2]*cwr - im[i+k+len/2]*cwi;
+        var vi=re[i+k+len/2]*cwi + im[i+k+len/2]*cwr;
+        re[i+k]=ur+vr; im[i+k]=ui+vi; re[i+k+len/2]=ur-vr; im[i+k+len/2]=ui-vi;
+        var nwr=cwr*wr - cwi*wi; cwi=cwr*wi + cwi*wr; cwr=nwr;
+      }
+    }
+  }
+  if(inverse){ for(var i=0;i<n;i++){re[i]/=n; im[i]/=n;} }
+}
+function nextPow2(x){ var p=1; while(p<x) p<<=1; return p; }
+
+// ---------- decoding (ffmpeg extraction only — there is no Web Audio path) ----------
+function parseWavToMonoFloat32(data){
+  if(!data||data.length<44) throw new Error('Extracted WAV too small ('+(data?data.length:0)+' bytes)');
+  var view=new DataView(data.buffer, data.byteOffset, data.byteLength);
+  function chunkId(off){ var s=''; for(var i=0;i<4;i++) s+=String.fromCharCode(view.getUint8(off+i)); return s; }
+  if(chunkId(0)!=='RIFF'||chunkId(8)!=='WAVE') throw new Error('Extracted file is not a WAV');
+  var fmt=null, dataStart=-1, dataSize=0;
+  var off=12;
+  while(off+8<=data.length){
+    var id=chunkId(off);
+    var size=view.getUint32(off+4,true);
+    var start=off+8;
+    if(id==='fmt '){
+      fmt={ format:view.getUint16(start,true), channels:view.getUint16(start+2,true), sampleRate:view.getUint32(start+4,true), bitsPerSample:view.getUint16(start+14,true) };
+    } else if(id==='data'){
+      dataStart=start; dataSize=Math.min(size, data.length-start);
+    }
+    if(dataStart>=0&&fmt) break;
+    off=start+size+(size%2);
+  }
+  if(!fmt) throw new Error('WAV missing fmt chunk');
+  if(dataStart<0) throw new Error('WAV missing data chunk');
+  var channels=Math.max(1,fmt.channels||1);
+  var sr=fmt.sampleRate||TARGET_SR;
+  var bytesPerSample=(fmt.bitsPerSample||16)/8;
+  var frameSize=bytesPerSample*channels;
+  if(frameSize<=0) throw new Error('Invalid WAV format');
+  var frames=Math.floor(dataSize/frameSize);
+  var pcm=new Float32Array(frames);
+  var isFloat=(fmt.format===3);
+  for(var f=0;f<frames;f++){
+    var base=dataStart+f*frameSize, sum=0;
+    for(var ch=0;ch<channels;ch++){
+      var o=base+ch*bytesPerSample, v=0;
+      if(isFloat&&fmt.bitsPerSample===32){ v=view.getFloat32(o,true); }
+      else if(fmt.bitsPerSample===16){ v=view.getInt16(o,true)/32768; }
+      else if(fmt.bitsPerSample===8){ v=(view.getUint8(o)-128)/128; }
+      else if(fmt.bitsPerSample===32){ v=view.getInt32(o,true)/2147483648; }
+      else if(fmt.bitsPerSample===24){ var b0=view.getUint8(o),b1=view.getUint8(o+1),b2=view.getUint8(o+2); var iv=(b0|(b1<<8)|(b2<<16)); if(iv&0x800000) iv-=0x1000000; v=iv/8388608; }
+      else { v=view.getInt16(o,true)/32768; }
+      sum+=v;
+    }
+    pcm[f]=sum/channels;
+  }
+  if(sr!==TARGET_SR){
+    var outLen=Math.floor(frames*TARGET_SR/sr);
+    var resampled=new Float32Array(outLen);
+    for(var j=0;j<outLen;j++){
+      var pos=j*sr/TARGET_SR, i0=Math.floor(pos), i1=Math.min(frames-1,i0+1), frac=pos-i0;
+      resampled[j]=pcm[i0]*(1-frac)+pcm[i1]*frac;
+    }
+    pcm=resampled; sr=TARGET_SR;
+  }
+  return { pcm:pcm, sampleRate:sr, duration:pcm.length/sr };
+}
+async function ensureFFmpeg(onProgress){
+  if(onProgress) ffmpegProgressCb=onProgress;
+  if(ffmpegLoaded) return ffmpeg;
+  diagStage='converter-load';
+  var diagLoadT0=Date.now();
+  diagConverter.attempted=true; diagConverter.loadStartIso=new Date(diagLoadT0).toISOString();
+  if(!window.FFmpegWASM||!window.FFmpegUtil){ var missErr=new Error('Converter failed to load — reload the page.'); diagConverter.loadErrors.push(diagStamp()+' '+diagErrText(missErr)); logError('converter-load',missErr); throw missErr; }
+  setBarPct(2); // event: converter load starts
+  log('Converter load starts: FFmpegWASM present='+!!window.FFmpegWASM+' | FFmpegUtil present='+!!window.FFmpegUtil);
+  ffmpeg=new FFmpegWASM.FFmpeg();
+  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
+  ffmpeg.on('progress', function(p){ if(ffmpegProgressCb&&p&&isFinite(p.progress)) ffmpegProgressCb(Math.max(0,Math.min(1,p.progress))); });
+  var base=new URL('assets/ffmpeg/', document.baseURI).href;
+  diagConverter.base=base; diagConverter.coreURL=base+'ffmpeg-core.js'; diagConverter.workerURL=base+'814.ffmpeg.js'; diagConverter.wasmGzURL=base+'ffmpeg-core.wasm.gz'; diagConverter.wasmURL=base+'ffmpeg-core.wasm'; diagConverter.version='ffmpeg.wasm wrapper assets/ffmpeg/ffmpeg.js + core assets/ffmpeg/ffmpeg-core.js (ffmpeg-core.wasm.gz '+ '9.8 MB compressed, same-origin) — exact core -version line appears as "ffmpeg>" lines in this log once the worker runs';
+  var wasmURL=base+'ffmpeg-core.wasm';
+  if(!window.__wasmBlobURL){
+    try{
+      log('Loading converter core (compressed, same-origin): fetching '+diagConverter.wasmGzURL+' …');
+      var wresp=await fetch(base+'ffmpeg-core.wasm.gz');
+      if(!wresp.ok) throw new Error('HTTP '+wresp.status);
+      if(typeof DecompressionStream==='undefined'||!wresp.body) throw new Error('DecompressionStream unavailable in this browser');
+      var ds=new DecompressionStream('gzip');
+      var decomp=wresp.body.pipeThrough(ds);
+      var wbuf=await new Response(decomp).arrayBuffer();
+      diagConverter.coreBytes=wbuf.byteLength;
+      var wblob=new Blob([wbuf],{type:'application/wasm'});
+      window.__wasmBlobURL=URL.createObjectURL(wblob);
+      diagConverter.wasmViaBlob=true;
+      log('Converter core decompressed ('+fmtSize(wbuf.byteLength)+') — wasm will load via blob URL.');
+    }catch(werr){ var wrapped=new Error('Could not load compressed converter core: '+(werr.message||werr)); diagConverter.loadErrors.push(diagStamp()+' '+diagErrText(werr)); logError('converter-load-wasm',werr); throw wrapped; }
+    wasmURL=window.__wasmBlobURL;
+  } else { wasmURL=window.__wasmBlobURL; diagConverter.wasmViaBlob=true; }
+  diagConverter.wasmURL=wasmURL;
+  log('Converter load: coreURL='+diagConverter.coreURL+' | classWorkerURL='+diagConverter.workerURL+' | wasmURL='+(wasmURL.indexOf('blob:')===0?'blob: (decompressed ffmpeg-core.wasm)':wasmURL));
+  try{ await ffmpeg.load({ classWorkerURL: base+'814.ffmpeg.js', coreURL: base+'ffmpeg-core.js', wasmURL: wasmURL }); }
+  catch(loadErr){ diagConverter.loadErrors.push(diagStamp()+' '+diagErrText(loadErr)); diagConverter.loadDurationMs=Date.now()-diagLoadT0; logError('converter-load',loadErr); throw loadErr; }
+  diagConverter.loadDurationMs=Date.now()-diagLoadT0; diagConverter.loaded=true;
+  ffmpegLoaded=true; setBarPct(6); log('Converter ready in '+diagConverter.loadDurationMs+'ms.'); return ffmpeg; // event: converter ready
+}
+async function decodeViaFFmpeg(file,startPct){
+  return withFFmpegLock(async function(){
+    log('Loading ffmpeg (audio-only extraction)…');
+    var ff=await withTimeout(ensureFFmpeg(null),60000,'Loading ffmpeg for '+file.name);
+    if(startPct) setBarPct(startPct); // event: decode starts (converter ready, extraction begins)
+    var ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,'')||'bin';
+    var inName='in.'+ext, outName='out.wav';
+    log('ffmpeg: writing '+file.name+' ('+fmtSize(file.size)+')…');
+    await withTimeout(ff.writeFile(inName, await FFmpegUtil.fetchFile(file)),90000,'Writing '+file.name+' to converter');
+    log('ffmpeg: extracting audio only (mono '+TARGET_SR+' Hz, PCM WAV, no video decode)…');
+    var execCode=null;
+    try{ execCode=await withTimeout(ff.exec(['-y','-i',inName,'-vn','-ac','1','-ar',String(TARGET_SR),'-c:a','pcm_s16le', outName]),180000,'ffmpeg audio extraction of '+file.name+' ('+fmtSize(file.size)+')'); }catch(e){ throw new Error('Could not extract audio from '+file.name+' ('+fmtSize(file.size)+') — '+(e.message||e)+'. The file may exceed what the in-browser converter can handle.'); }
+    var data; try{ data=await ff.readFile(outName); }catch(e){ throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')'); }
+    if(!data||!data.length) throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')');
+    log('ffmpeg: extracted '+fmtSize(data.length)+' of audio — reading WAV samples directly…');
+    var parsed;
+    try{ parsed=parseWavToMonoFloat32(data); }catch(pe){ throw new Error('Could not parse extracted WAV from '+file.name+': '+(pe.message||pe)); }
+    log('ffmpeg: parsed WAV '+parsed.duration.toFixed(2)+'s · '+parsed.sampleRate+' Hz · '+parsed.pcm.length+' samples');
+    try{ await ff.deleteFile(inName); await ff.deleteFile(outName); }catch(e){}
+    return parsed;
+  });
+}
+async function decodeFileAudio(file,label,startPct){
+  var t0=Date.now();
+  diagStage='decode';
+  var isVideoFile=(typeof danceFile!=='undefined'&&danceFile&&fileKey(file)===fileKey(danceFile));
+  var dd=isVideoFile?diagFiles.video:diagFiles.audio;
+  dd.decodeRoute='ffmpeg wasm — extract audio only (-vn -ac 1 -ar '+TARGET_SR+' pcm_s16le WAV) then parseWavToMonoFloat32';
+  log('Decode starts ['+dd.role+']: '+file.name+' | route=ffmpeg-wasm audio extraction | target mono '+TARGET_SR+' Hz');
+  var hb=startHeartbeat(label,file,t0);
+  try{
+    log(label+': extracting audio with ffmpeg (mono '+TARGET_SR+' Hz WAV)…');
+    var parsed=await decodeViaFFmpeg(file,startPct);
+    var pcm=parsed.pcm, duration=parsed.duration;
+    var decMs=Date.now()-t0;
+    dd.decodeDurationMs=decMs; dd.sampleCount=pcm.length; dd.sampleRate=parsed.sampleRate; dd.durationSec=duration;
+    log('Decode ends ['+dd.role+']: '+duration.toFixed(3)+'s | '+pcm.length+' samples @ '+parsed.sampleRate+' Hz | decode took '+decMs+'ms');
+    log(label+': '+duration.toFixed(2)+'s ready for analysis');
+    var sum=0, peak=0; for(var i=0;i<pcm.length;i+=10){ var a=Math.abs(pcm[i]); sum+=a*a; if(a>peak)peak=a; }
+    var rms=Math.sqrt(sum/Math.max(1,Math.floor(pcm.length/10)));
+    dd.rms=Number(rms.toFixed(6)); dd.peak=Number(peak.toFixed(6));
+    return {pcm:pcm, duration:duration, rms:rms, peak:peak};
+  } catch(decodeErr){ dd.decodeRoute+=' | FAILED: '+(decodeErr.message||decodeErr); logError('decode-'+dd.role,decodeErr); throw decodeErr; }
+  finally { clearInterval(hb); }
+}
+async function fileToMono22050(file,label,startPct){
+  var key=fileKey(file);
+  if(pcmCache[key]){ log((label||'Decode')+': using cached audio for '+file.name); return pcmCache[key]; }
+  if(pcmPromiseCache[key]){ log((label||'Decode')+': decode already in progress for '+file.name+' — reusing it'); return pcmPromiseCache[key]; }
+  var p=(async function(){ return decodeFileAudio(file,label||'Decode',startPct); })();
+  pcmPromiseCache[key]=p;
+  try{ var r=await p; pcmCache[key]=r; return r; }
+  catch(e){ delete pcmPromiseCache[key]; throw e; }
+}
+
+// ---------- mel spectrogram + alignment ----------
+function melFilterbank(){
+  var numBands=32, numBins=FFT_SIZE/2+1;
+  function hzToMel(hz){return 2595*Math.log10(1+hz/700)} function melToHz(m){return 700*(Math.pow(10,m/2595)-1)}
+  var low=hzToMel(20), high=hzToMel(TARGET_SR/2), points=[];
+  for(var b=0;b<numBands+2;b++) points.push(melToHz(low+(high-low)*b/(numBands+1)));
+  var filters=[];
+  for(var b=0;b<numBands;b++){
+    var f=new Float32Array(numBins), left=points[b], center=points[b+1], right=points[b+2];
+    for(var k=0;k<numBins;k++){ var hz=k*TARGET_SR/FFT_SIZE; if(hz>left&&hz<center) f[k]=(hz-left)/(center-left); else if(hz>=center&&hz<right) f[k]=(right-hz)/(right-center); }
+    filters.push(f);
+  }
+  return filters;
+}
+var FILTERS=melFilterbank();
+var WINDOW=new Float32Array(FFT_SIZE); for(var wi=0;wi<FFT_SIZE;wi++) WINDOW[wi]=0.5-0.5*Math.cos(2*Math.PI*wi/(FFT_SIZE-1));
+function melSpectrogram(pcm){
+  var frames=Math.max(1, Math.floor((pcm.length-FFT_SIZE)/HOP)+1); if(pcm.length<FFT_SIZE) frames=1;
+  var bands=32, spec=[]; for(var b=0;b<bands;b++) spec.push(new Float32Array(frames));
+  var re=new Float32Array(FFT_SIZE), im=new Float32Array(FFT_SIZE);
+  for(var fr=0;fr<frames;fr++){
+    re.fill(0); im.fill(0); var off=fr*HOP;
+    for(var i=0;i<FFT_SIZE;i++){ var s=(off+i<pcm.length)?pcm[off+i]:0; re[i]=s*WINDOW[i]; }
+    fft(re,im,false);
+    var mag=new Float32Array(FFT_SIZE/2+1); for(var k=0;k<mag.length;k++) mag[k]=re[k]*re[k]+im[k]*im[k];
+    for(var b=0;b<bands;b++){ var filt=FILTERS[b], sum=0; for(var k2=0;k2<mag.length;k2++) sum+=mag[k2]*filt[k2]; spec[b][fr]=Math.log(sum+1e-6); }
+  }
+  for(var b2=0;b2<bands;b2++){ var arr=spec[b2], mean=0; for(var i2=0;i2<arr.length;i2++) mean+=arr[i2]; mean/=arr.length; var v=0; for(var i3=0;i3<arr.length;i3++){arr[i3]-=mean; v+=arr[i3]*arr[i3];} var sd=Math.sqrt(v/arr.length)||1; for(var i4=0;i4<arr.length;i4++) arr[i4]/=sd; }
+  return spec;
+}
+function bandCorrelation(danceBand, songBand){
+  var n=nextPow2(danceBand.length+songBand.length);
+  var dr=new Float32Array(n), di=new Float32Array(n), sr=new Float32Array(n), si=new Float32Array(n);
+  for(var i=0;i<danceBand.length;i++) dr[i]=danceBand[i];
+  for(var i2=0;i2<songBand.length;i2++) sr[i2]=songBand[i2];
+  fft(dr,di,false); fft(sr,si,false);
+  var cr=new Float32Array(n), ci=new Float32Array(n);
+  for(var k=0;k<n;k++){ var a=dr[k], b=-di[k]; cr[k]=a*sr[k]-b*si[k]; ci[k]=a*si[k]+b*sr[k]; }
+  fft(cr,ci,true);
+  return cr;
+}
+function coarseAlign(danceSpec, songSpec){
+  var danceFrames=danceSpec[0].length, songFrames=songSpec[0].length;
+  var maxLag=Math.max(0, songFrames-danceFrames);
+  var total=new Float32Array(nextPow2(danceFrames+songFrames));
+  for(var b=0;b<32;b++){ var c=bandCorrelation(danceSpec[b], songSpec[b]); for(var i=0;i<total.length;i++) total[i]+=c[i]; }
+  var limit=(maxLag>0?maxLag:songFrames-1), scores=[];
+  for(var lag=0;lag<=limit;lag++) scores.push({lag:lag, score:total[lag]});
+  scores.sort(function(a,b){return b.score-a.score});
+  var cands=[];
+  for(var s=0;s<scores.length&&cands.length<3;s++){ var cand=scores[s], ok=true; for(var c2=0;c2<cands.length;c2++){ if(Math.abs(cands[c2].lag-cand.lag)<=43){ok=false;break;} } if(ok) cands.push(cand); }
+  return {candidates:cands, top:scores[0]};
+}
+function fineAlign(dancePCM, songPCM, coarseSec){
+  var winSec=4, danceSegLen=Math.min(Math.floor(winSec*TARGET_SR), dancePCM.length);
+  var startSong=Math.max(0, Math.floor((coarseSec-0.5)*TARGET_SR));
+  var endSong=Math.min(songPCM.length, Math.ceil((coarseSec+winSec+0.5)*TARGET_SR));
+  var songSeg=songPCM.slice(startSong, endSong), danceSeg=dancePCM.slice(0, danceSegLen);
+  var n=nextPow2(danceSeg.length+songSeg.length);
+  var dr=new Float32Array(n), di=new Float32Array(n), sr=new Float32Array(n), si=new Float32Array(n);
+  for(var i=0;i<danceSeg.length;i++) dr[i]=danceSeg[i];
+  for(var i2=0;i2<songSeg.length;i2++) sr[i2]=songSeg[i2];
+  fft(dr,di,false); fft(sr,si,false);
+  var cr=new Float32Array(n), ci=new Float32Array(n);
+  for(var k=0;k<n;k++){ var a=dr[k], b=-di[k]; cr[k]=a*sr[k]-b*si[k]; ci[k]=a*si[k]+b*sr[k]; }
+  fft(cr,ci,true);
+  var bestLag=0, bestVal=-Infinity, maxLag=songSeg.length-danceSeg.length; if(maxLag<0) maxLag=songSeg.length-1;
+  for(var lag=0;lag<=maxLag;lag++){ if(cr[lag]>bestVal){bestVal=cr[lag]; bestLag=lag;} }
+  var eD=0,eS=0; for(var j=0;j<danceSeg.length;j++) eD+=danceSeg[j]*danceSeg[j]; for(var j2=bestLag;j2<bestLag+danceSeg.length&&j2<songSeg.length;j2++) eS+=songSeg[j2]*songSeg[j2];
+  return {offset:(startSong+bestLag)/TARGET_SR, confidence:bestVal/Math.sqrt((eD||1)*(eS||1))};
+}
+function tick(){ return new Promise(function(r){setTimeout(r,30)}); }
+
+// ---------- analysis (runs automatically when both files are present) ----------
+function showCandidates(coarse){
+  var row=$('candRow'); row.innerHTML='';
+  if(!coarse||!coarse.candidates||coarse.candidates.length<2) return;
+  var top=coarse.candidates[0];
+  if(!(top.score>0&&coarse.candidates[1].score>top.score*0.90)) return;
+  log('Similar sections in this audio — alternate positions:');
+  coarse.candidates.forEach(function(c,i){
+    var sec=c.lag*HOP/TARGET_SR;
+    var b=document.createElement('button'); b.className='cand'; b.type='button'; b.textContent=sec.toFixed(2)+'s';
+    b.addEventListener('click',function(){
+      var f=fineAlign(dancePCM,songPCM,sec); detectedOffset=f.offset; confidence=f.confidence; audioPos=-detectedOffset;
+      $('offsetBig').textContent='Offset '+detectedOffset.toFixed(3)+'s';
+      log('Candidate '+sec.toFixed(3)+'s → fine offset '+detectedOffset.toFixed(3)+'s · confidence '+confidence.toFixed(3));
+      layoutTimeline(); invalidateDownload();
+    });
+    row.appendChild(b);
+  });
+}
+function runAnalysis(){
+  if(analysisPromise&&analysisState==="running") return analysisPromise;
+  if(!danceFile||!songFile) return Promise.resolve();
+  var ver=filesVersion, tok=runToken; analysisState="running"; ffmpegProgressCb=null;
+  analysisPromise=(async function(){
+    try{
+      diagStage='decode-video';
+      markStepActive(1);
+      log('Analysis pipeline starts | filesVersion='+ver+' | Video='+danceFile.name+' ('+fmtBytesMB(danceFile.size)+', '+(danceFile.type||'no MIME')+') | Audio='+songFile.name+' ('+fmtBytesMB(songFile.size)+', '+(songFile.type||'no MIME')+')');
+      log('Decoding Video: '+danceFile.name+' …');
+      var d=await cancellable(fileToMono22050(danceFile,'Decoding Video',9)); if(ver!==filesVersion||tok!==runToken){ if(tok!==runToken) analysisState="idle"; return; }
+      dancePCM=d.pcm; danceDur=d.duration; diagStage='decode-audio'; setBarPct(26); markStepDone(1); markStepActive(2); // event: video decode ends
+      log('Video: '+d.duration.toFixed(2)+'s · RMS '+d.rms.toFixed(4)+' · peak '+d.peak.toFixed(3));
+      if(d.rms<0.004||d.peak<0.02) log('⚠ Video near-silent — sync needs its background music audible.');
+      log('Decoding Audio: '+songFile.name+' …');
+      var s=await cancellable(fileToMono22050(songFile,'Decoding Audio',29)); if(ver!==filesVersion||tok!==runToken){ if(tok!==runToken) analysisState="idle"; return; }
+      songPCM=s.pcm; songDur=s.duration; diagStage='analysis'; setBarPct(46); markStepDone(2); markStepActive(3); // event: audio decode ends
+      log('Audio: '+s.duration.toFixed(2)+'s · RMS '+s.rms.toFixed(4)+' · peak '+s.peak.toFixed(3));
+      if(!dancePCM.length||!songPCM.length) throw new Error('No audio decoded — a file has no audio track.');
+      if(s.rms<0.001) throw new Error('Audio file is silent.');
+      setBarPct(49); // event: analysis starts
+      log('Analysis starts: building mel spectrograms (32 bands, FFT '+FFT_SIZE+', hop '+HOP+')…');
+      log('Analyzing — building mel spectrograms…');
+      await tick();
+      var dSpec=melSpectrogram(dancePCM), sSpec=melSpectrogram(songPCM);
+      log('Spectrograms: video '+dSpec[0].length+' frames · audio '+sSpec[0].length+' frames');
+      log('Coarse alignment — cross-correlating 32 bands…');
+      await tick();
+      var coarse=coarseAlign(dSpec,sSpec);
+      setBarPct(56); // event: coarse match ends
+      var top=coarse.candidates[0], coarseSec=top.lag*HOP/TARGET_SR;
+      log('Coarse offset: '+coarseSec.toFixed(3)+'s (score '+top.score.toFixed(1)+')');
+      coarse.candidates.forEach(function(c,i){ log('  candidate '+(i+1)+': '+(c.lag*HOP/TARGET_SR).toFixed(3)+'s · score '+c.score.toFixed(1)); });
+      log('Fine alignment — sample-level search ±0.5s…');
+      await tick();
+      var fine=fineAlign(dancePCM,songPCM,coarseSec);
+      detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(63); markStepDone(3); markStepActive(4); // event: fine offset ends
+      log('Fine offset (final): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
+      analysisState="done"; analysisVersion=ver;
+      var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
+      $('resultBox').classList.add('show');
+      $('offsetBig').textContent='Offset '+detectedOffset.toFixed(3)+'s';
+      showCandidates(coarse);
+      $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip();
+      log('Fine offset '+detectedOffset.toFixed(3)+'s · confidence '+confidence.toFixed(3));
+      log('Sync done.'); flushFilmstrip(); if(window.__autoAfterAnalysis){ var cb=window.__autoAfterAnalysis; window.__autoAfterAnalysis=null; try{ cb(); }catch(e){} }
+    }catch(err){
+      if(ver!==filesVersion) return;
+      if(isCancelErr(err)||tok!==runToken){ analysisState="idle"; analysisPromise=null; return; }
+      analysisState="error"; console.error(err); logError('analysis',err); log('❌ '+(err.message||err)); showError('❌ '+(err.message||err));
+    }
+  })();
+  return analysisPromise;
+}
+
+// ---------- timeline ----------
+var vid=$('vid');
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+function pct(t){ return danceDur>0?(t/danceDur*100):0; }
+function layoutTimeline(){
+  if(!danceDur) return;
+  var ts=trimStartSec, te=trimEnd();
+  $('hL').style.left=pct(ts)+'%';
+  $('hR').style.left=pct(te)+'%';
+  var dl=$('dimL'); dl.style.left='0%'; dl.style.width=pct(ts)+'%';
+  var dr=$('dimR'); dr.style.left=pct(te)+'%'; dr.style.width=(100-pct(te))+'%';
+  var sb=$('selBorder'); sb.style.left=pct(ts)+'%'; sb.style.width=(pct(te)-pct(ts))+'%';
+  var block=$('audioBlock');
+  if(songDur>0){ block.style.display='block'; block.style.left=pct(audioPos)+'%'; block.style.width=(songDur/danceDur*100)+'%'; }
+  else block.style.display='none';
+  $('trimRead').textContent=fmtT(ts)+' – '+fmtT(te);
+  $('offRead').textContent='Audio '+effOffset().toFixed(3)+'s';
+  syncOffsetInput();
+  requestAnimationFrame(drawWaveform);
+}
+vid.addEventListener('loadedmetadata',function(){ if(vid.duration&&isFinite(vid.duration)){ danceDur=vid.duration; $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); } });
+function drawWaveform(){
+  var c=$('wave'), block=$('audioBlock'); if(!c||!block) return;
+  var w=block.clientWidth, h=block.clientHeight; if(w<4||h<4) return;
+  var dpr=window.devicePixelRatio||1;
+  if(c.width!==Math.round(w*dpr)||c.height!==Math.round(h*dpr)){ c.width=Math.round(w*dpr); c.height=Math.round(h*dpr); }
+  var ctx=c.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+  ctx.fillStyle='rgba(140,170,255,0.95)';
+  if(!songPCM||!songPCM.length){ ctx.fillRect(0,h/2-0.5,w,1); return; }
+  var len=songPCM.length, mid=h/2;
+  for(var x=0;x<w;x++){
+    var start=Math.floor(x/w*len), end=Math.max(start+1,Math.floor((x+1)/w*len)), peak=0;
+    var step=Math.max(1,Math.floor((end-start)/64));
+    for(var i=start;i<end;i+=step){ var a=Math.abs(songPCM[i]); if(a>peak)peak=a; }
+    var bh=Math.max(1,peak*(h/2-2));
+    ctx.fillRect(x,mid-bh,1,bh*2);
+  }
+}
+// ---------- filmstrip ("video reel") ----------
+// Stills are extracted with the bundled ffmpeg, NOT by seeking a <video>
+// element: the source video stays display:none until the first Generate, and
+// iOS webviews won't decode/seek frames in a hidden video — every capture
+// came back blank. ffmpeg decodes these files (incl. .mov/HEVC) reliably.
+// Sampling stays proportional/CapCut-style: tiles laid edge to edge from the
+// left, tile j sampled at time = (j*tw / W) * duration. Tiles are cached per
+// file so rebuilds (resize, layout) are instant.
+function loadImageEl(src){
+  return new Promise(function(res,rej){
+    var img=new Image();
+    img.onload=function(){ res(img); };
+    img.onerror=function(){ rej(new Error('image decode failed')); };
+    img.src=src;
+  });
+}
+function drawCover(ctx,img,cw,ch){
+  var iw=img.naturalWidth||img.width, ih=img.naturalHeight||img.height;
+  if(!iw||!ih) return;
+  var s=Math.max(cw/iw,ch/ih), dw=iw*s, dh=ih*s;
+  ctx.drawImage(img,(cw-dw)/2,(ch-dh)/2,dw,dh);
+}
+async function extractStripTiles(N,tw,W,laneH){
+  var file=danceFile; if(!file) return null;
+  return withFFmpegLock(async function(){
+    var ff=await withTimeout(ensureFFmpeg(null),60000,'Loading ffmpeg for filmstrip');
+    var ext=(file.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+    var inName='strip.'+ext;
+    await withTimeout(ff.writeFile(inName, await FFmpegUtil.fetchFile(file)),120000,'Writing '+file.name+' for filmstrip');
+    var tiles=[];
+    for(var j=0;j<N;j++){
+      var time=Math.min(Math.max(0,danceDur-0.05),(j*tw/W)*danceDur);
+      var outName='tile'+j+'.png';
+      try{
+        await withTimeout(ff.exec(['-ss',time.toFixed(3),'-i',inName,'-frames:v','1','-vf','scale=-2:112',outName]),60000,'Filmstrip frame at '+time.toFixed(2)+'s');
+        var data=await ff.readFile(outName);
+        if(data&&data.length){
+          var blob=new Blob([data],{type:'image/png'});
+          var u=URL.createObjectURL(blob);
+          try{
+            var img=await loadImageEl(u);
+            var off=document.createElement('canvas');
+            off.width=Math.max(2,Math.round(tw*2)); off.height=Math.max(2,laneH*2);
+            drawCover(off.getContext('2d'),img,off.width,off.height);
+            tiles.push(off.toDataURL('image/jpeg',0.72));
+          }catch(ie){ tiles.push(null); }
+          URL.revokeObjectURL(u);
+        } else tiles.push(null);
+      }catch(e){ tiles.push(null); }
+      try{ await ff.deleteFile(outName); }catch(e){}
+    }
+    try{ await ff.deleteFile(inName); }catch(e){}
+    return tiles;
+  });
+}
+async function buildFilmstrip(){
+  if(!danceFile||!danceDur||filmstripBuilding) return;
+  var lane=$('videoLane'); if(!lane) return;
+  var W=lane.clientWidth; if(W<10) return;
+  // Don't compete with a decode/encode run for the single ffmpeg worker.
+  if(analysisState==="running"||isGenerating||pipelineRunning){ filmstripPending=true; return; }
+  var fkey=fileKey(danceFile);
+  var key=fkey+'@'+W;
+  if(filmstripBuiltFor===key) return;
+  var vw=vid.videoWidth||0, vh=vid.videoHeight||0;
+  var laneH=lane.clientHeight||56;
+  var tw=(vw>0&&vh>0)?(laneH*vw/vh):(W/6);
+  if(!(tw>4)) tw=W/6;
+  var N=Math.max(1,Math.ceil(W/tw));
+  filmstripBuilding=true; filmstripBuiltFor=key;
+  var strip=$('filmstrip'); strip.innerHTML='';
+  var canvases=[];
+  for(var i=0;i<N;i++){
+    var cv=document.createElement('canvas');
+    cv.width=Math.max(2,Math.round(tw*2)); cv.height=Math.max(2,laneH*2);
+    cv.style.width=tw+'px';
+    strip.appendChild(cv); canvases.push(cv);
+  }
+  try{
+    var cached=stripCache[fkey];
+    var tiles=(cached&&cached.count===N)?cached.tiles:null;
+    if(!tiles){
+      log('Filmstrip: extracting '+N+' stills with ffmpeg…');
+      tiles=await extractStripTiles(N,tw,W,laneH);
+      if(tiles) stripCache[fkey]={count:N,tiles:tiles};
+    }
+    if(filmstripBuiltFor!==key||!tiles) { filmstripBuilding=false; return; }
+    var drawn=0;
+    for(var j=0;j<N;j++){
+      if(!tiles[j]||!canvases[j]) continue;
+      try{
+        var img=await loadImageEl(tiles[j]);
+        drawCover(canvases[j].getContext('2d'),img,canvases[j].width,canvases[j].height);
+        drawn++;
+      }catch(e){}
+    }
+    if(drawn>0) log('Filmstrip: '+drawn+'/'+N+' stills drawn.');
+    else log('Filmstrip: no stills could be extracted from '+danceFile.name+'.');
+  }catch(e){ logError('filmstrip',e); log('Filmstrip failed: '+(e.message||e)); }
+  filmstripBuilding=false;
+}
+function flushFilmstrip(){ if(filmstripPending){ filmstripPending=false; buildFilmstrip(); } }
+function laneTime(clientX,lane){
+  var r=lane.getBoundingClientRect(); if(!r.width) return 0;
+  return clamp((clientX-r.left)/r.width*danceDur,0,danceDur);
+}
+function dragHandle(el,isLeft){
+  el.addEventListener('pointerdown',function(e){
+    e.preventDefault(); e.stopPropagation();
+    try{ el.setPointerCapture(e.pointerId); }catch(err){}
+    var lane=$('videoLane');
+    function move(ev){
+      var t=laneTime(ev.clientX,lane);
+      if(isLeft) trimStartSec=clamp(t,0,trimEnd()-0.5);
+      else trimEndSec=clamp(t,trimStartSec+0.5,danceDur);
+      layoutTimeline();
+    }
+    function up(){ el.removeEventListener('pointermove',move); el.removeEventListener('pointerup',up); el.removeEventListener('pointercancel',up); invalidateDownload(); }
+    el.addEventListener('pointermove',move); el.addEventListener('pointerup',up); el.addEventListener('pointercancel',up);
+  });
+}
+dragHandle($('hL'),true); dragHandle($('hR'),false);
+
+(function(){
+  var block=$('audioBlock');
+  block.addEventListener('pointerdown',function(e){
+    e.preventDefault(); e.stopPropagation();
+    try{ block.setPointerCapture(e.pointerId); }catch(err){}
+    var lane=$('audioLane'), startX=e.clientX, startPos=audioPos, width=lane.getBoundingClientRect().width||1;
+    function move(ev){
+      var delta=(ev.clientX-startX)/width*danceDur;
+      var lo=songDur>0?-(songDur-0.5):-danceDur, hi=Math.max(0,danceDur-0.5);
+      audioPos=clamp(startPos+delta,lo,hi); layoutTimeline();
+    }
+    function up(){ block.removeEventListener('pointermove',move); block.removeEventListener('pointerup',up); block.removeEventListener('pointercancel',up); log('Audio offset '+effOffset().toFixed(3)+'s'); invalidateDownload(); }
+    block.addEventListener('pointermove',move); block.addEventListener('pointerup',up); block.addEventListener('pointercancel',up);
+  });
+})();
+// ---------- manual offset-from-detected-sync control ----------
+// The input holds the MANUAL delta in seconds (signed, decimals allowed,
+// e.g. -0.042). Effective song offset = detectedOffset + delta everywhere,
+// i.e. audioPos = -(detectedOffset + delta). Arrows step the delta by
+// exactly 0.02s. Dragging the waveform updates the delta too.
+function manualDelta(){ return effOffset()-detectedOffset; }
+function syncOffsetInput(){ var inp=$('offInput'); if(inp&&document.activeElement!==inp) inp.value=manualDelta().toFixed(3); }
+function setAudioPos(p){
+  var lo=songDur>0?-(songDur-0.5):-danceDur, hi=Math.max(0,danceDur-0.5);
+  audioPos=clamp(p,lo,hi); layoutTimeline();
+}
+function applyManualDelta(d){ setAudioPos(-(detectedOffset+d)); syncOffsetInput(); }
+function stepManualDelta(step){
+  applyManualDelta(manualDelta()+step);
+  log('Audio offset '+effOffset().toFixed(3)+'s (manual '+(manualDelta()>=0?'+':'')+manualDelta().toFixed(3)+'s)');
+  invalidateDownload();
+}
+$('offMinus').addEventListener('click',function(){ stepManualDelta(-0.02); });
+$('offPlus').addEventListener('click',function(){ stepManualDelta(0.02); });
+function applyOffsetFromInput(){
+  var inp=$('offInput'); if(!inp) return;
+  var v=parseFloat(String(inp.value).replace(',','.'));
+  if(isFinite(v)){ applyManualDelta(v); log('Audio offset '+effOffset().toFixed(3)+'s (manual '+(manualDelta()>=0?'+':'')+manualDelta().toFixed(3)+'s)'); invalidateDownload(); }
+  inp.value=manualDelta().toFixed(3);
+}
+$('offInput').addEventListener('change',applyOffsetFromInput);
+$('offInput').addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); applyOffsetFromInput(); } });
+$('btnResync').addEventListener('click',function(){
+  if($('btnResync').disabled) return;
+  audioPos=-detectedOffset; layoutTimeline();
+  log('Re-sync — audio reset to detected offset '+detectedOffset.toFixed(3)+'s');
+  invalidateDownload();
+});
+window.addEventListener('resize',function(){ layoutTimeline(); buildFilmstrip(); });
+
+// ---------- settings ----------
+document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',invalidateDownload); });
+$('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.value,10)/100; $('blendVal').textContent=e.target.value+'%'; });
+$('blend').addEventListener('change',invalidateDownload);
+
+// ---------- output cache + history ----------
+// Generated outputs are cached in memory keyed by the full settings
+// signature (both files + trim + effective offset + blend + quality), so
+// re-generating with identical settings — 480p twice in a row, or switching
+// quality away and back — returns the Blob instantly instead of re-encoding
+// (the encode, incl. downscale, is the expensive part). LRU: max 6 outputs.
+var MAX_OUTPUTS=6;
+var outCache=new Map(), outOrder=[], historyEntries=[], resultURL=null;
+function settingsSignature(q,tStart,tEnd,eff,blend){
+  return fileKey(danceFile)+'|'+fileKey(songFile)+'|'+tStart.toFixed(3)+'|'+tEnd.toFixed(3)+'|'+eff.toFixed(3)+'|'+blend.toFixed(2)+'|'+q;
+}
+function cachePut(sig,entry){
+  if(outCache.has(sig)) outOrder=outOrder.filter(function(k){return k!==sig});
+  outCache.set(sig,entry); outOrder.push(sig);
+  while(outOrder.length>MAX_OUTPUTS){
+    var old=outOrder.shift(); var oe=outCache.get(old); outCache.delete(old);
+    historyEntries.forEach(function(h){ if(h.sig===old) h.available=false; });
+    log('Cache full — evicted oldest output ('+(oe?fmtSize(oe.blob.size):'?')+'). Cache now holds '+outCache.size+': '+outOrder.map(function(k){ var e=outCache.get(k); return e?fmtSize(e.blob.size):'?'; }).join(', '));
+    renderHistory();
+  }
+}
+function cacheGet(sig){
+  var e=outCache.get(sig); if(!e) return null;
+  outOrder=outOrder.filter(function(k){return k!==sig}); outOrder.push(sig);
+  return e;
+}
+// ---------- save ----------
+// iOS Safari rules this code lives by:
+// 1) navigator.share() must be the first thing that happens inside the tap
+//    handler — any await or async step before it expires the tap's
+//    transient user activation and share() throws NotAllowedError. So the
+//    shareable File is built at generation time (in showResult) and
+//    stashed here; the click handler goes straight to share().
+// 2) Download is a real <a download> rendered in the DOM at generation
+//    time — the user's own tap on it is the download gesture. Never fake
+//    it with an off-DOM anchor + .click() after async work.
+// 3) The result object URL is revoked ONLY when a newer result replaces
+//    it or on New/reset — revoking it while it is on screen silently
+//    kills the player, the share source, and the download link at once.
+var resultBlob=null, resultFile=null, resultCanShare=false;
+function shareFailed(err){
+  diagStage='share';
+  var msg='Share failed: '+((err&&err.name)||'Error')+((err&&err.message)?' — '+err.message:'');
+  log('Save/Share attempt FAILED: '+diagErrText(err));
+  log(msg+' — use Download or Open video below the result instead.');
+  showError(msg+'. Use Download or Open video below the result.');
+}
+function saveResult(){
+  // iOS rule: navigator.share() must fire inside the tap's transient
+  // activation. The File was pre-built at generation time for this reason.
+  // Diagnostics logging happens AFTER the share() call returns its promise
+  // (same synchronous tap handler) so it cannot consume the activation.
+  if(resultFile&&resultCanShare&&navigator.share){
+    var p=null, syncErr=null;
+    try{ p=navigator.share({files:[resultFile]}); }
+    catch(err){ syncErr=err; }
+    diagStage='share';
+    if(syncErr){ log('Save/Share tapped → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
+    log('Save/Share tapped → navigator.share({files:[File "'+resultFile.name+'" '+fmtBytesMB(resultFile.size)+' type='+(resultFile.type||'video/mp4')+']}) called | resultCanShare=true | shareFile pre-built at generation=true');
+    if(p&&p.then) p.then(function(){ log('Save/Share tapped → navigator.share resolved (user completed share sheet action).'); },function(err){
+      if(err&&err.name==='AbortError'){ log('Save/Share tapped → navigator.share rejected AbortError: user dismissed share sheet (not a failure).'); }
+      else { log('Save/Share tapped → navigator.share rejected: '+diagErrText(err)); shareFailed(err); }
+    });
+    return;
+  }
+  diagStage='share';
+  var why='resultFile='+(resultFile?('present ('+fmtBytesMB(resultFile.size)+')'):'null')+' | resultCanShare='+String(resultCanShare)+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent');
+  var msg='Save: file sharing is not available in this browser — use Download or Open video below the result.';
+  log('Save/Share tapped → fallback shown (share unavailable): canShare=false → fallback shown | '+why);
+  log(msg); showError(msg);
+}
+function showResult(blob){
+  diagStage='result';
+  // Pre-build the shareable File NOW, at generation time — the tap handler
+  // must not spend its user activation constructing it.
+  resultBlob=blob; resultFile=null; resultCanShare=false;
+  try{ resultFile=new File([blob],'dance-synced.mp4',{type:'video/mp4'}); }catch(e){ resultFile=null; logError('result-file-build',e); }
+  if(resultFile&&navigator.canShare&&navigator.share){
+    try{ resultCanShare=!!navigator.canShare({files:[resultFile]}); log('Result: canShare with real output File ('+fmtBytesMB(blob.size)+') → '+String(resultCanShare)); }catch(e){ resultCanShare=false; logError('result-canShare',e); }
+  } else { log('Result: canShare check skipped — resultFile='+(resultFile?'present':'null')+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent')+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')); }
+  diagResult.blobSize=blob.size; diagResult.blobType=blob.type||'video/mp4'; diagResult.canShare=resultCanShare; diagResult.shareFileBuilt=!!resultFile;
+  try{ var qe2=document.querySelector('input[name=quality]:checked'); var qv=qe2?qe2.value:'full'; diagResult.settings={q:qv,height:(qv==='full'?0:parseInt(qv,10)),tStart:trimStartSec,tEnd:trimEnd(),tDur:Math.max(0,trimEnd()-trimStartSec),eff:effOffset(),blend:blendVal}; }catch(e){}
+  var oldURL=resultURL;
+  resultURL=URL.createObjectURL(blob);
+  diagResult.hasObjectURL=true; diagResult.urlPrefix=String(resultURL).split(':')[0]+':';
+  log('Result embedded: blob '+fmtBytesMB(blob.size)+' type='+(blob.type||'video/mp4')+' | object URL created=yes (scheme '+diagResult.urlPrefix+' full URL omitted) | previous URL revoked='+(oldURL?'yes (replaced)':'no'));
+  if(oldURL) URL.revokeObjectURL(oldURL); // safe: only once the newer result's URL exists
+  var wrap=$('downloadWrap'); wrap.innerHTML='';
+  var area=$('resultArea'); area.innerHTML=''; area.classList.add('show');
+  var rv=document.createElement('video'); rv.className='resultvid'; rv.controls=true; rv.setAttribute('playsinline',''); rv.preload='auto'; rv.src=resultURL;
+  rv.addEventListener('error',function(){ try{ var ve=rv.error; log('Result video element error: '+(ve?('code='+ve.code+' message='+(ve.message||'')):'unknown')); logError('result-video-element',(ve&&ve.message)?new Error(ve.message):new Error('video error code '+(ve?ve.code:'?'))); }catch(e){} });
+  rv.addEventListener('loadedmetadata',function(){ try{ log('Result video metadata loaded: duration='+(isFinite(rv.duration)?Number(rv.duration).toFixed(3):String(rv.duration))+'s | videoWidth='+rv.videoWidth+' videoHeight='+rv.videoHeight+' | readyState='+rv.readyState); }catch(e){} });
+  area.appendChild(rv);
+  var shareBtn=document.createElement('button'); shareBtn.type='button'; shareBtn.className='download'; shareBtn.textContent='Save / Share · '+fmtSize(blob.size);
+  var dl=document.createElement('a'); dl.className='download'; dl.href=resultURL; dl.setAttribute('download','dance-synced.mp4'); dl.textContent='Download';
+  dl.addEventListener('click',function(){ diagStage='download'; log('Download tapped → anchor click | download attr="dance-synced.mp4" | href scheme='+(resultURL?String(resultURL).split(':')[0]+':':'none')+' | blob '+fmtBytesMB(blob.size)+' | in-iframe='+((window.self!==window.top)?'yes':'no')+' | note: blob: downloads depend on browser/iframe handling; no JS error is expected from an <a download> tap — if nothing downloads, check ENVIRONMENT section.'); });
+  var openA=document.createElement('a'); openA.className='download'; openA.href=resultURL; openA.target='_blank'; openA.rel='noopener'; openA.textContent='Open video';
+  openA.addEventListener('click',function(){ diagStage='open-video'; log('Open video tapped → opening blob URL in new tab (target=_blank) | href scheme='+(resultURL?String(resultURL).split(':')[0]+':':'none')+' | if the new tab shows a dead player, the blob URL did not survive navigation / was revoked, or the iframe sandbox blocks it — see ENVIRONMENT + RESULT sections.'); });
+  shareBtn.addEventListener('click',saveResult);
+  wrap.appendChild(shareBtn);
+  wrap.appendChild(dl);
+  wrap.appendChild(openA);
+  var guide=document.createElement('p'); guide.className='note';
+  guide.textContent='Save / Share opens the share sheet — pick "Save Video" or "Save to Files" to keep the video. If saving fails, Open video plays it full-screen, where the player\'s own share/save controls work.';
+  wrap.appendChild(guide);
+  updateNewBtn();
+  try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
+}
+function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
+var historyCounter=0; // sequential Video N numbering — survives New/resets
+function addHistory(sig,snap,size){
+  historyCounter++;
+  historyEntries.unshift({sig:sig, snap:snap, size:size, when:new Date(), available:true, num:historyCounter});
+  renderHistory();
+}
+function renderHistory(){
+  var wrap=$('historyWrap'), list=$('historyList'); if(!wrap||!list) return;
+  wrap.classList.toggle('show',historyEntries.length>0);
+  list.innerHTML='';
+  historyEntries.forEach(function(h){
+    var b=document.createElement('button'); b.type='button'; b.className='histRow';
+    b.textContent='Video '+h.num;
+    b.addEventListener('click',function(){ restoreHistory(h); });
+    list.appendChild(b);
+  });
+}
+function restoreHistory(h){
+  var s=h.snap;
+  // After a New reset the editor/result sections are hidden; restoring a
+  // History entry must bring them back so its video can be watched/saved.
+  $('playerSec').classList.add('show'); $('settingsSec').classList.add('show');
+  var qEl=document.querySelector('input[name=quality][value="'+s.q+'"]'); if(qEl) qEl.checked=true;
+  blendVal=s.blend; var bl=$('blend'); bl.value=Math.round(s.blend*100); $('blendVal').textContent=Math.round(s.blend*100)+'%';
+  trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
+  trimEndSec=(danceDur>0&&s.tEnd>=danceDur-0.01)?null:s.tEnd;
+  audioPos=-s.eff;
+  layoutTimeline();
+  log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
+  var e=cacheGet(h.sig);
+  if(e){ showResult(e.blob); generatedOnce=true; log('History: video loaded from cache.'); }
+  else { h.available=false; renderHistory(); log('History: that video was evicted from the cache — settings restored; tap Generate to rebuild it.'); }
+}
+
+// ---------- New (full reset to initial state) ----------
+// Visible whenever any file or result is present. One tap: cancels any
+// running job (terminating the ffmpeg worker mid-run), clears both files,
+// the decode/filmstrip caches, timeline/edit state, settings, progress,
+// result, and log — and re-arms auto-generate for the next pair of
+// uploads. History and the cached output videos behind its rows are
+// PRESERVED: after a reset, a History entry still restores its settings
+// and its video. (The output cache's own LRU cap may still evict the
+// oldest outputs as new ones are generated, as before.)
+function updateNewBtn(){ var w=$('newWrap'); if(w) w.style.display=(danceFile||songFile)?'block':'none'; }
+function resetAll(){
+  var running=isGenerating||pipelineRunning||analysisState==='running';
+  runToken++; filesVersion++;
+  if(running){
+    ffmpegChain=Promise.resolve();
+    if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; ffmpegProgressCb=null; }
+    if(cancelReject) cancelReject(new Error('Cancelled'));
+  }
+  danceFile=null; songFile=null;
+  dancePCM=null; songPCM=null; danceDur=0; songDur=0;
+  detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
+  trimStartSec=0; trimEndSec=null; blendVal=0;
+  analysisState='idle'; analysisPromise=null; analysisVersion=-1;
+  autoGenForVersion=-1; generatedOnce=false;
+  pcmCache={}; pcmPromiseCache={}; stripCache={};
+  filmstripBuiltFor=null; filmstripPending=false; filmstripBuilding=false;
+  // History + output cache intentionally preserved — see note above.
+  if(resultURL){ URL.revokeObjectURL(resultURL); resultURL=null; }
+  resultBlob=null; resultFile=null; resultCanShare=false;
+  if(danceURL){ URL.revokeObjectURL(danceURL); danceURL=null; }
+  vid.removeAttribute('src'); try{ vid.load(); }catch(e){}
+  $('fileDance').value=''; $('fileSong').value='';
+  $('metaDance').textContent='Upload'; $('metaSong').textContent='Upload (video, screen recording, or audio)';
+  $('dropDance').classList.remove('has'); $('dropSong').classList.remove('has');
+  var qf=document.querySelector('input[name=quality][value="full"]'); if(qf) qf.checked=true;
+  $('blend').value=0; $('blendVal').textContent='0%';
+  $('offInput').value='0.000';
+  $('btnResync').disabled=true;
+  $('resultBox').classList.remove('show'); $('offsetBig').textContent=''; $('candRow').innerHTML='';
+  $('downloadWrap').innerHTML='';
+  var area=$('resultArea'); area.innerHTML=''; area.classList.remove('show');
+  $('filmstrip').innerHTML='';
+  $('timeline').classList.remove('show');
+  $('playerSec').classList.remove('show'); $('settingsSec').classList.remove('show');
+  $('btnGenerate').disabled=true;
+  clearError(); stopRunClock(); setCancelVisible(false);
+  stepState={1:false,2:false,3:false,4:false};
+  for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } }
+  barPct=0; $('progBar').style.width='0%'; $('progText').textContent='';
+  $('progWrap').style.display='none'; $('stepsRow').classList.remove('show');
+  diagStage='boot'; diagRunT0=0; diagResult.blobSize=null; diagResult.hasObjectURL=false; diagResult.urlPrefix=''; diagResult.settings=null;
+  diagFiles.video={role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
+  diagFiles.audio={role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
+  // Keep diagEntries (History is preserved across New, and so are its
+  // diagnostics) — just note the reset in the timestamped log.
+  log('Reset (New) — session cleared; History preserved ('+historyEntries.length+' entries). Diagnostics log kept.');
+  updateNewBtn();
+}
+$('btnNew').addEventListener('click', resetAll);
+
+// ---------- generate (the one action button) ----------
+function fmtElapsed(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
+$('btnGenerate').disabled=true;
+var isGenerating=false, autoGenForVersion=-1, pipelineRunning=false;
+async function doGenerate(opts){
+  opts=opts||{};
+  if(!danceFile||!songFile) return;
+  if(isGenerating) return;
+  if(pipelineRunning&&!opts.fullRun) return;
+  isGenerating=true;
+  var btn=$('btnGenerate'); btn.disabled=true; // previous result stays on screen until this run completes a new one
+  if(opts.fullRun){ /* progress + cancel signal already set up by pipeline */ }
+  else { runToken++; newCancelSignal(); if(analysisState==="done"&&analysisVersion===filesVersion){ resetProgress(false); } else { resetProgress(true); } }
+  var t0=Date.now();
+  try{
+    if(analysisState!=="done"||analysisVersion!==filesVersion||!dancePCM||!songPCM){
+      // Generate runs analysis inline in its own flow — never waits indefinitely
+      // on a background promise. Stage timeouts + this overall timeout guarantee
+      // the run either finishes or surfaces a visible error and unblocks.
+      if(analysisState==="running") log('Generate: sync analysis already running — running it inline to completion…');
+      else log('Generate: running sync analysis…');
+      try{ await cancellable(withTimeout(runAnalysis(),300000,'Sync analysis for '+danceFile.name+' ('+fmtSize(danceFile.size)+') + '+songFile.name+' ('+fmtSize(songFile.size)+')')); }
+      catch(timeoutErr){ analysisState="error"; analysisPromise=null; throw new Error('Sync analysis did not finish: '+(timeoutErr.message||timeoutErr)); }
+      if(analysisState!=="done") throw new Error('Sync analysis failed — see log above.');
+      log('Generate: sync analysis done — building video…');
+    }
+    var qEl=document.querySelector('input[name=quality]:checked');
+    var q=qEl?qEl.value:'full', height=(q==='full')?0:parseInt(q,10);
+    var eff=effOffset(), tStart=trimStartSec, tEnd=trimEnd(), tDur=Math.max(0,tEnd-tStart);
+    if(tDur<0.5) throw new Error('Clip too short — widen the trim.');
+    var sig=settingsSignature(q,tStart,tEnd,eff,blendVal);
+    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal};
+    var hit=cacheGet(sig);
+    if(hit){
+      generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
+      log('Encode skipped — cache hit for identical settings (no re-encode). Blob '+fmtBytesMB(hit.blob.size)+'.');
+      showResult(hit.blob);
+      addHistory(sig,snap,hit.blob.size);
+      log('Loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
+      return;
+    }
+    var songStart=eff+tStart, delayMs=songStart<0?Math.round(-songStart*1000):0;
+    diagStage='encode'; diagResult.settings=snap; diagLastEncodeMilestone=-1;
+    log('Encode starts: quality='+(height?(q+'p'):'full')+' | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | signature='+sig);
+    log('Generating… '+(height?(q+'p'):'full quality')+' · offset '+eff.toFixed(3)+'s · trim '+tStart.toFixed(2)+'–'+tEnd.toFixed(2)+'s'+(blendVal>0?(' · room audio '+Math.round(blendVal*100)+'%'):''));
+    markStepActive(4);
+    var ff=await cancellable(ensureFFmpeg(function(ratio){ if(ratio!=null){ progressForGenerate(ratio); var m=Math.floor(ratio*10)*10; if(m>diagLastEncodeMilestone){ diagLastEncodeMilestone=m; log('Encode progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } } }));
+    var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+    var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+    log('Generate: writing files to converter ('+fmtSize(danceFile.size)+' + '+fmtSize(songFile.size)+')…');
+    await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(danceFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter');
+    await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(songFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
+    var args=['-y'];
+    if(tStart>0) args.push('-ss',tStart.toFixed(3));
+    if(tDur>0) args.push('-t',tDur.toFixed(3));
+    args.push('-i','dance.'+dExt);
+    if(songStart>0) args.push('-ss',songStart.toFixed(3));
+    args.push('-i','song.'+sExt);
+    var fc=[];
+    if(height) fc.push('[0:v]scale=-2:min('+height+'\\,ih)[v]');
+    fc.push('[1:a]'+(delayMs>0?('adelay='+delayMs+'|'+delayMs+','):'')+'apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
+    if(blendVal>0){
+      fc.push('[clean]volume=1.0[cleanv]');
+      fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+'[room]');
+      fc.push('[cleanv][room]amix=inputs=2:duration=first:normalize=0,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+    }
+    args.push('-filter_complex', fc.join(';'));
+    args.push('-map', height?'[v]':'0:v:0', '-map', blendVal>0?'[a]':'[clean]');
+    if(height) args.push('-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p'); else args.push('-c:v','copy');
+    args.push('-c:a','aac','-b:a','192k');
+    if(tDur>0) args.push('-t',tDur.toFixed(3));
+    args.push('dance-synced.mp4');
+    // Audio guarantee: filter trims/pads clean (and room) audio to exactly tDur,
+    // and the output -t tDur above caps both streams — no audio can outlive the video.
+    setBarPct(66); // event: encode starts (ffmpeg progress then interpolates 66% -> 97%)
+    log('Encode exec: ffmpeg args='+args.join(' '));
+    await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating video from '+danceFile.name); }));
+    log('Encode ends: ffmpeg exec resolved — reading dance-synced.mp4…');
+    var data=await ff.readFile('dance-synced.mp4'); if(!data.length) throw new Error('Empty output file.');
+    var blob=new Blob([data],{type:'video/mp4'});
+    log('Encode output: blob '+fmtBytesMB(blob.size)+' type='+(blob.type||'video/mp4'));
+    var secs=((Date.now()-t0)/1000).toFixed(1);
+    generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
+    cachePut(sig,{blob:blob});
+    showResult(blob);
+    addHistory(sig,snap,blob.size);
+    log('Done — '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video)');
+    try{ await ff.deleteFile('dance.'+dExt); await ff.deleteFile('song.'+sExt); await ff.deleteFile('dance-synced.mp4'); }catch(e){}
+  }catch(err){
+    if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
+    else { console.error(err); logError('generate',err); log('❌ Generate failed: '+(err.message||err)); showError('❌ Generate failed: '+(err.message||err)); }
+  }finally{
+    stopRunClock();
+    setCancelVisible(false);
+    btn.disabled=!(danceFile&&songFile);
+    isGenerating=false;
+    flushFilmstrip();
+  }
+}
+$('btnGenerate').addEventListener('click', function(){ diagStage='encode'; log('Generate tapped (manual).'); doGenerate({fullRun:false}); });
+$('btnCancel').addEventListener('click', function(){
+  runToken++; // invalidate the in-flight run's stage checks
+  ffmpegChain=Promise.resolve(); // unstick the ffmpeg lock queue
+  pcmPromiseCache={}; // in-flight decode promises died with the worker; completed PCM stays cached
+  if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; ffmpegProgressCb=null; }
+  if(cancelReject) cancelReject(new Error('Cancelled'));
+  log('Cancelled');
+  stopRunClock(); setCancelVisible(false);
+  // isGenerating / pipelineRunning / button state are restored by the
+  // aborted run's finally blocks; any previous result stays on screen.
+});
+async function runAutoPipeline(){
+  if(!danceFile||!songFile) return;
+  if(pipelineRunning||isGenerating) return;
+  if(autoGenForVersion===filesVersion) return;
+  var ver=filesVersion;
+  pipelineRunning=true;
+  runToken++; newCancelSignal();
+  try{
+    resetProgress(true);
+    if(analysisState!=="done"||analysisVersion!==filesVersion||!dancePCM||!songPCM){
+      await new Promise(function(resolve,reject){
+        window.__autoAfterAnalysis=function(){ resolve(); };
+        var p=runAnalysis();
+        if(p&&p.then) p.then(function(){ setTimeout(function(){ if(analysisState==="done") resolve(); else if(analysisState==="error") reject(new Error('Sync analysis failed — see log above.')); },50); }).catch(function(e){ reject(e); });
+        setTimeout(function(){ if(analysisState==="done") resolve(); else if(analysisState==="error") reject(new Error('Sync analysis failed')); },305000);
+      });
+      // If analysis completed but callback already consumed, continue
+      window.__autoAfterAnalysis=null;
+      if(analysisState!=="done") throw new Error('Sync analysis failed — see log above.');
+    } else {
+      setBarPct(26); markStepDone(1); setBarPct(46); markStepDone(2); setBarPct(63); markStepDone(3);
+    }
+    if(ver!==filesVersion) return;
+    autoGenForVersion=ver;
+    await doGenerate({fullRun:true});
+  }catch(autoErr){
+    if(isCancelErr(autoErr)){ /* cancelled — already logged */ }
+    else { console.error(autoErr); log('❌ Auto-generate: '+(autoErr.message||autoErr)); showError('❌ Auto-generate: '+(autoErr.message||autoErr)); }
+  }finally{
+    pipelineRunning=false;
+    if(!isGenerating){ stopRunClock(); setCancelVisible(false); }
+    flushFilmstrip();
+  }
+}
+// ---------- diagnostics wiring (startup probes + Copy button + global errors) ----------
+try{
+  diagEnvAtLoad=collectEnvProbes();
+  log('ENV PROBE (load): iframe=' + diagEnvAtLoad.inIframe + ' | origin=' + diagEnvAtLoad.locationOrigin + ' | crossOriginIsolated=' + diagEnvAtLoad.crossOriginIsolated + ' | SharedArrayBuffer=' + diagEnvAtLoad.sharedArrayBufferType + ' | DecompressionStream=' + diagEnvAtLoad.decompressionStreamType + ' | share=' + diagEnvAtLoad.sharePresent + ' | canShare=' + diagEnvAtLoad.canSharePresent + ' test: ' + diagEnvAtLoad.canShareTest + ' | downloadAttr=' + diagEnvAtLoad.downloadAttrSupport + ' | VideoDecoder=' + diagEnvAtLoad.videoDecoderType + ' | touchPoints=' + diagEnvAtLoad.maxTouchPoints);
+  log('Page ready — Video/Audio Syncer diagnostics active. Tap Details → Copy diagnostics after any failure and paste the whole dump back.');
+}catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
+try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
+try{
+  window.addEventListener('error',function(ev){ try{ var er=ev.error||new Error(ev.message||'window error'); logError('window-error',er); }catch(_){} });
+  window.addEventListener('unhandledrejection',function(ev){ try{ var r=ev.reason; logError('unhandledrejection',(r instanceof Error)?r:new Error(String(r))); }catch(_){} });
+}catch(e){}
+})();
+</script>
+</body>
+</html>
