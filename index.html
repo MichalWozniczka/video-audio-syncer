@@ -764,22 +764,42 @@ function bandCorrelation(danceBand, songBand){
   return cr;
 }
 function coarseAlign(danceSpec, songSpec){
+  // FULL-RANGE search: the true offset can be NEGATIVE — the clean audio
+  // may start LATER in the song than the video does, so the song begins
+  // partway into the video. A positive-only search cannot even represent
+  // that alignment and locks onto a loop-repetition mirage instead (the
+  // IMG_0038 case: true -6.266s, positive-only search picked +8.499s).
+  // Range: -(videoDur-10s) .. +(audioDur-10s), so every candidate keeps
+  // >=10s of overlap. Negative lags live in the wrapped tail of the
+  // circular cross-correlation array.
   var danceFrames=danceSpec[0].length, songFrames=songSpec[0].length;
-  var maxLag=Math.max(0, songFrames-danceFrames);
   var total=new Float32Array(nextPow2(danceFrames+songFrames));
   for(var b=0;b<32;b++){ var c=bandCorrelation(danceSpec[b], songSpec[b]); for(var i=0;i<total.length;i++) total[i]+=c[i]; }
-  var limit=(maxLag>0?maxLag:songFrames-1), scores=[];
-  for(var lag=0;lag<=limit;lag++) scores.push({lag:lag, score:total[lag]});
+  var n=total.length;
+  var overlapFrames=Math.min(215, Math.min(danceFrames, songFrames)); // ~10s at hop 1024 / 22050 Hz
+  var lagMin=-(danceFrames-overlapFrames), lagMax=songFrames-overlapFrames;
+  var scores=[];
+  for(var lag=lagMin;lag<=lagMax;lag++) scores.push({lag:lag, score:total[((lag%n)+n)%n]});
   scores.sort(function(a,b){return b.score-a.score});
   var cands=[];
-  for(var s=0;s<scores.length&&cands.length<3;s++){ var cand=scores[s], ok=true; for(var c2=0;c2<cands.length;c2++){ if(Math.abs(cands[c2].lag-cand.lag)<=43){ok=false;break;} } if(ok) cands.push(cand); }
-  return {candidates:cands, top:scores[0]};
+  for(var s=0;s<scores.length&&cands.length<5;s++){
+    var cand=scores[s], ok=true;
+    for(var c2=0;c2<cands.length;c2++){ if(Math.abs(cands[c2].lag-cand.lag)*HOP/TARGET_SR<=0.5){ok=false;break;} }
+    if(ok) cands.push({lag:cand.lag, score:cand.score, sec:cand.lag*HOP/TARGET_SR});
+  }
+  log('Coarse search range: '+(lagMin*HOP/TARGET_SR).toFixed(1)+'s .. '+(lagMax*HOP/TARGET_SR).toFixed(1)+'s (full range, negative offsets included, >=10s overlap guaranteed)');
+  return {candidates:cands, top:cands[0]};
 }
-function fineAlign(dancePCM, songPCM, coarseSec){
-  var winSec=4, danceSegLen=Math.min(Math.floor(winSec*TARGET_SR), dancePCM.length);
-  var startSong=Math.max(0, Math.floor((coarseSec-0.5)*TARGET_SR));
-  var endSong=Math.min(songPCM.length, Math.ceil((coarseSec+winSec+0.5)*TARGET_SR));
-  var songSeg=songPCM.slice(startSong, endSong), danceSeg=dancePCM.slice(0, danceSegLen);
+function fineWindowCorr(dancePCM, songPCM, wStartSec, winLenSec, coarseSec){
+  // Sample-level cross-correlation of one dance window against the song,
+  // searching only lags whose implied offset lies within ±0.4s of coarseSec.
+  var SR=TARGET_SR, search=Math.round(0.4*SR);
+  var dStart=Math.round(wStartSec*SR), dLen=Math.round(winLenSec*SR);
+  var coarseSamp=Math.round(coarseSec*SR);
+  var sStart=Math.max(0, coarseSamp+dStart-search);
+  var sEnd=Math.min(songPCM.length, coarseSamp+dStart+dLen+search);
+  var danceSeg=dancePCM.slice(dStart, dStart+dLen), songSeg=songPCM.slice(sStart, sEnd);
+  if(!danceSeg.length||songSeg.length<danceSeg.length) return null;
   var n=nextPow2(danceSeg.length+songSeg.length);
   var dr=new Float32Array(n), di=new Float32Array(n), sr=new Float32Array(n), si=new Float32Array(n);
   for(var i=0;i<danceSeg.length;i++) dr[i]=danceSeg[i];
@@ -788,10 +808,79 @@ function fineAlign(dancePCM, songPCM, coarseSec){
   var cr=new Float32Array(n), ci=new Float32Array(n);
   for(var k=0;k<n;k++){ var a=dr[k], b=-di[k]; cr[k]=a*sr[k]-b*si[k]; ci[k]=a*si[k]+b*sr[k]; }
   fft(cr,ci,true);
-  var bestLag=0, bestVal=-Infinity, maxLag=songSeg.length-danceSeg.length; if(maxLag<0) maxLag=songSeg.length-1;
-  for(var lag=0;lag<=maxLag;lag++){ if(cr[lag]>bestVal){bestVal=cr[lag]; bestLag=lag;} }
-  var eD=0,eS=0; for(var j=0;j<danceSeg.length;j++) eD+=danceSeg[j]*danceSeg[j]; for(var j2=bestLag;j2<bestLag+danceSeg.length&&j2<songSeg.length;j2++) eS+=songSeg[j2]*songSeg[j2];
-  return {offset:(startSong+bestLag)/TARGET_SR, confidence:bestVal/Math.sqrt((eD||1)*(eS||1))};
+  var lagMin=Math.max(0, Math.ceil((coarseSec-0.4)*SR)+dStart-sStart);
+  var lagMax=Math.min(songSeg.length-danceSeg.length, Math.floor((coarseSec+0.4)*SR)+dStart-sStart);
+  if(lagMax<lagMin) return null;
+  var bestLag=-1, bestVal=-Infinity;
+  for(var lag=lagMin;lag<=lagMax;lag++){ if(cr[lag]>bestVal){bestVal=cr[lag]; bestLag=lag;} }
+  if(bestLag<0) return null;
+  var eD=0; for(var j=0;j<danceSeg.length;j++) eD+=danceSeg[j]*danceSeg[j];
+  var eS=0; for(var j2=bestLag;j2<bestLag+danceSeg.length;j2++) eS+=songSeg[j2]*songSeg[j2];
+  return { offset:(sStart+bestLag-dStart)/SR, score:bestVal/Math.sqrt((eD||1)*(eS||1)), rms:Math.sqrt(eD/Math.max(1,danceSeg.length)) };
+}
+function medianOf(arr){
+  var a=arr.slice().sort(function(x,y){return x-y});
+  var m=Math.floor(a.length/2);
+  return a.length%2? a[m] : (a[m-1]+a[m])/2;
+}
+function evaluateCandidate(dancePCM, songPCM, coarseSec){
+  // Multi-window fine vote for ONE coarse candidate, run across its whole
+  // overlap. Windows live on the DANCE timeline but only inside the overlap
+  // region — the dance times whose matching song time actually exists. For
+  // a negative offset that region starts at |offset|, not at 0; for a
+  // positive offset it ends at songDur-offset. Strong windows agree to
+  // <10ms; weak ones (handling noise, loop mirages) scatter — so the
+  // candidate's verified score is the median of its TOP-HALF window
+  // scores, and its refined offset the median of those windows' offsets.
+  var SR=TARGET_SR;
+  var danceSecTotal=dancePCM.length/SR, songSecTotal=songPCM.length/SR;
+  var ovStart=Math.max(0,-coarseSec), ovEnd=Math.min(danceSecTotal, songSecTotal-coarseSec);
+  var overlapSec=Math.max(0, ovEnd-ovStart);
+  var WIN=6, STEP=4, MINWIN=3;
+  var wins=[];
+  for(var start=ovStart; start<ovEnd; start+=STEP){
+    var len=Math.min(WIN, ovEnd-start);
+    if(len<MINWIN) break;
+    var r=fineWindowCorr(dancePCM, songPCM, start, len, coarseSec);
+    if(!r) continue;
+    wins.push({start:start, offset:r.offset, score:r.score, rms:r.rms});
+  }
+  if(!wins.length) return {coarseSec:coarseSec, wins:wins, topHalf:[], verifiedScore:0, medianOffset:coarseSec, bestScore:0, spread:Infinity, overlapSec:overlapSec};
+  var byScore=wins.slice().sort(function(a,b){return b.score-a.score});
+  var takeN=Math.max(1, Math.ceil(wins.length/2));
+  var topHalf=byScore.slice(0, takeN);
+  var offs=topHalf.map(function(w){return w.offset});
+  return {
+    coarseSec:coarseSec, wins:wins, topHalf:topHalf,
+    verifiedScore:medianOf(topHalf.map(function(w){return w.score})),
+    medianOffset:medianOf(offs),
+    bestScore:byScore[0].score,
+    spread:Math.max.apply(null,offs)-Math.min.apply(null,offs),
+    overlapSec:overlapSec
+  };
+}
+function fineAlign(dancePCM, songPCM, coarseSec){
+  // Single-candidate wrapper (alternate-candidate buttons): evaluate, log
+  // the window table, apply the same gates the verified pipeline uses.
+  var ev=evaluateCandidate(dancePCM, songPCM, coarseSec);
+  log('Fine alignment — multi-window vote: win 6s · step 4s · search ±0.40s around coarse '+coarseSec.toFixed(3)+'s · overlap '+ev.overlapSec.toFixed(1)+'s');
+  ev.wins.forEach(function(w){ log('  win @ '+w.start.toFixed(1)+'s: offset '+w.offset.toFixed(3)+'s · score '+w.score.toFixed(4)+' · RMS '+w.rms.toFixed(4)); });
+  if(ev.wins.length<2){
+    log('Fine stage ABSTAINED: only '+ev.wins.length+' usable window(s) (< 2) — keeping coarse offset '+coarseSec.toFixed(3)+'s.');
+    return {offset:coarseSec, confidence: ev.wins.length? ev.wins[0].score : 0};
+  }
+  if(!(ev.bestScore>=0.02)){
+    log('Fine stage ABSTAINED: best window score '+ev.bestScore.toFixed(4)+' < 0.0200 — no window matched confidently; keeping coarse offset '+coarseSec.toFixed(3)+'s.');
+    return {offset:coarseSec, confidence:ev.bestScore};
+  }
+  log('Fine windows used (top '+ev.topHalf.length+' of '+ev.wins.length+' by score): '+ev.topHalf.map(function(w){return '@'+w.start.toFixed(1)+'s→'+w.offset.toFixed(3)+'s ('+w.score.toFixed(3)+')'}).join(', '));
+  log('Fine median offset: '+ev.medianOffset.toFixed(3)+'s · verified score '+ev.verifiedScore.toFixed(4));
+  if(Math.abs(ev.medianOffset-coarseSec)>0.25){
+    log('Fine gate: median deviates from coarse by '+Math.abs(ev.medianOffset-coarseSec).toFixed(3)+'s > 0.250s — distrusted; keeping coarse offset '+coarseSec.toFixed(3)+'s.');
+    return {offset:coarseSec, confidence:ev.verifiedScore};
+  }
+  log('Fine gate: passed — applying median fine offset '+ev.medianOffset.toFixed(3)+'s.');
+  return {offset:ev.medianOffset, confidence:ev.verifiedScore};
 }
 function tick(){ return new Promise(function(r){setTimeout(r,30)}); }
 
@@ -844,14 +933,47 @@ function runAnalysis(){
       await tick();
       var coarse=coarseAlign(dSpec,sSpec);
       setBarPct(56); // event: coarse match ends
-      var top=coarse.candidates[0], coarseSec=top.lag*HOP/TARGET_SR;
-      log('Coarse offset: '+coarseSec.toFixed(3)+'s (score '+top.score.toFixed(1)+')');
-      coarse.candidates.forEach(function(c,i){ log('  candidate '+(i+1)+': '+(c.lag*HOP/TARGET_SR).toFixed(3)+'s · score '+c.score.toFixed(1)); });
-      log('Fine alignment — sample-level search ±0.5s…');
+      // CANDIDATE VERIFICATION: the raw coarse argmax is NOT trusted — with
+      // looping tracks a repetition mirage can outscore the true alignment
+      // (IMG_0038: mirage +8.499s beat the true -6.266s on raw score, while
+      // its windows scored 0.005-0.10 and scattered; the true family's
+      // windows scored 0.11-0.41 and agreed within 5ms). Every coarse
+      // candidate gets the multi-window fine vote; the winner is the best
+      // VERIFIED score (median of top-half window scores; tie-break:
+      // smaller offset spread), never the raw argmax.
+      log('Coarse candidates (raw cross-correlation — unverified):');
+      coarse.candidates.forEach(function(c,i){ log('  candidate '+(i+1)+': '+c.sec.toFixed(3)+'s · raw score '+c.score.toFixed(1)); });
+      log('Candidate verification — multi-window fine vote per candidate (6s windows, ~4s step, ±0.4s sample-level)…');
       await tick();
-      var fine=fineAlign(dancePCM,songPCM,coarseSec);
+      var evals=[];
+      for(var ci=0; ci<coarse.candidates.length; ci++){
+        var ev2=evaluateCandidate(dancePCM,songPCM,coarse.candidates[ci].sec);
+        ev2.rawScore=coarse.candidates[ci].score;
+        evals.push(ev2);
+        await tick();
+      }
+      evals.sort(function(a,b){ if(Math.abs(b.verifiedScore-a.verifiedScore)>1e-9) return b.verifiedScore-a.verifiedScore; return a.spread-b.spread; });
+      log('Verified candidates (verified = median of top-half window scores):');
+      evals.forEach(function(e3,i){ log('  '+(i+1)+'. coarse '+e3.coarseSec.toFixed(3)+'s · verified '+e3.verifiedScore.toFixed(4)+' · best window '+e3.bestScore.toFixed(4)+' · median offset '+e3.medianOffset.toFixed(3)+'s · spread '+(isFinite(e3.spread)?e3.spread.toFixed(3)+'s':'n/a')+' · windows '+e3.wins.length+' · raw score '+e3.rawScore.toFixed(1)); });
+      var winner=evals[0];
+      log('Winner: coarse candidate '+winner.coarseSec.toFixed(3)+'s · verified '+winner.verifiedScore.toFixed(4)+' — per-window table:');
+      winner.wins.forEach(function(w){ log('  win @ '+w.start.toFixed(1)+'s: offset '+w.offset.toFixed(3)+'s · score '+w.score.toFixed(4)+' · RMS '+w.rms.toFixed(4)); });
+      var fine;
+      if(winner.wins.length<2){
+        log('Fine gate: ABSTAINED — winner has only '+winner.wins.length+' usable window(s) (< 2); falling back to winner coarse value '+winner.coarseSec.toFixed(3)+'s.');
+        fine={offset:winner.coarseSec, confidence: winner.wins.length?winner.wins[0].score:0};
+      } else if(!(winner.bestScore>=0.02)){
+        log('Fine gate: ABSTAINED — winner best window score '+winner.bestScore.toFixed(4)+' < 0.0200; falling back to winner coarse value '+winner.coarseSec.toFixed(3)+'s.');
+        fine={offset:winner.coarseSec, confidence:winner.bestScore};
+      } else if(Math.abs(winner.medianOffset-winner.coarseSec)>0.25){
+        log('Fine gate: winner median '+winner.medianOffset.toFixed(3)+'s deviates from its coarse by '+Math.abs(winner.medianOffset-winner.coarseSec).toFixed(3)+'s > 0.250s — distrusted; using winner coarse value '+winner.coarseSec.toFixed(3)+'s.');
+        fine={offset:winner.coarseSec, confidence:winner.verifiedScore};
+      } else {
+        log('Fine gate: passed — final offset = median of winner\'s top-half window offsets ('+winner.medianOffset.toFixed(3)+'s).');
+        fine={offset:winner.medianOffset, confidence:winner.verifiedScore};
+      }
       detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(63); markStepDone(3); markStepActive(4); // event: fine offset ends
-      log('Fine offset (final): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
+      log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
       analysisState="done"; analysisVersion=ver;
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
       $('resultBox').classList.add('show');
@@ -1370,14 +1492,44 @@ async function doGenerate(opts){
     args.push('-i','song.'+sExt);
     var fc=[];
     if(height) fc.push('[0:v]scale=-2:min('+height+'\\,ih)[v]');
-    fc.push('[1:a]'+(delayMs>0?('adelay='+delayMs+'|'+delayMs+','):'')+'apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
-    if(blendVal>0){
-      fc.push('[clean]volume=1.0[cleanv]');
-      fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+'[room]');
-      fc.push('[cleanv][room]amix=inputs=2:duration=first:normalize=0,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+    var gapSec=songStart<0?-songStart:0;
+    if(gapSec>0){
+      // NEGATIVE effective offset: the clean audio begins gapSec into the
+      // clip (its input got NO -ss above; adelay shifts it into place).
+      // The leading gap has no clean audio at all, so it is filled with
+      // the video's own original audio at full level — regardless of the
+      // room-blend slider, which keeps its usual meaning once the clean
+      // audio exists. Built as two concatenated segments: [0,gap) room at
+      // full level, then [gap,tDur) clean (+ room at blend level).
+      log('Encode: negative offset — clean audio begins '+gapSec.toFixed(3)+'s into the clip; leading gap filled with the video\'s original audio at full level'+(blendVal>0?(' · room blend '+Math.round(blendVal*100)+'% applies after the gap'):'')+'.');
+      if(gapSec>=tDur){
+        fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+      } else {
+        fc.push('[1:a]adelay='+delayMs+'|'+delayMs+',apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
+        fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[room]');
+        if(blendVal>0){
+          fc.push('[room]asplit=2[roomGap][roomTailSrc]');
+          fc.push('[roomGap]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
+          fc.push('[roomTailSrc]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+',asetpts=N/SR/TB[roomTail]');
+          fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[cleanTail]');
+          fc.push('[cleanTail][roomTail]amix=inputs=2:duration=first:normalize=0[tail]');
+        } else {
+          fc.push('[room]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
+          fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[tail]');
+        }
+        fc.push('[gapA][tail]concat=n=2:v=0:a=1,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+      }
+    } else {
+      // Positive offset: current path untouched (-ss on the clean input).
+      fc.push('[1:a]'+(delayMs>0?('adelay='+delayMs+'|'+delayMs+','):'')+'apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
+      if(blendVal>0){
+        fc.push('[clean]volume=1.0[cleanv]');
+        fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+'[room]');
+        fc.push('[cleanv][room]amix=inputs=2:duration=first:normalize=0,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+      }
     }
     args.push('-filter_complex', fc.join(';'));
-    args.push('-map', height?'[v]':'0:v:0', '-map', blendVal>0?'[a]':'[clean]');
+    args.push('-map', height?'[v]':'0:v:0', '-map', (blendVal>0||gapSec>0)?'[a]':'[clean]');
     if(height) args.push('-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p'); else args.push('-c:v','copy');
     args.push('-c:a','aac','-b:a','192k');
     if(tDur>0) args.push('-t',tDur.toFixed(3));
