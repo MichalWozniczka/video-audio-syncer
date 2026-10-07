@@ -461,6 +461,20 @@ function markStepActive(n){ var el=$('step'+n); if(el&&!stepState[n]) el.classLi
 function resetProgress(full){ clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; $('progBar').style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=66; $('progBar').style.width="66%"; } startRunClock(); }
 function progressForGenerate(ratio){ if(ratio==null) return; setBarPct(66+Math.max(0,Math.min(1,ratio))*31); }
 var analysisState="idle", analysisPromise=null, filesVersion=0, analysisVersion=-1, confidence=0, lastCandidates=[];
+var _scratchDanceSpec=null, _scratchSongSpec=null, _scratchCoarse=null, _scratchEvals=null;
+function releaseAnalysisScratch(where){
+  var freed=[];
+  if(_scratchDanceSpec){ freed.push('dance spectrogram ('+_scratchDanceSpec.length+' bands)'); _scratchDanceSpec=null; }
+  if(_scratchSongSpec){ freed.push('song spectrogram ('+_scratchSongSpec.length+' bands)'); _scratchSongSpec=null; }
+  if(_scratchCoarse){ freed.push('coarse correlation result'); _scratchCoarse=null; }
+  if(_scratchEvals){ freed.push('candidate eval tables ('+_scratchEvals.length+' candidates)'); _scratchEvals=null; }
+  // Correlation buffers inside coarseAlign/fineWindowCorr are function-local
+  // and already unreachable once those calls return; the globals above were
+  // the only scratch references that survived into the encode phase.
+  // dancePCM/songPCM and cached settings are intentionally KEPT (needed for re-generate / candidate re-pick).
+  if(freed.length) log('memory: analysis scratch released ('+where+'): '+freed.join(', ')+' — decoded PCM kept for re-generate');
+  else log('memory: analysis scratch released ('+where+'): no spectrogram/correlation buffers retained — decoded PCM kept for re-generate');
+}
 var filmstripBuiltFor=null, filmstripBuilding=false, filmstripPending=false, stripCache={};
 var pcmCache={}, pcmPromiseCache={}, ffmpegChain=Promise.resolve(), generatedOnce=false;
 // ---------- cancel ----------
@@ -928,10 +942,12 @@ function runAnalysis(){
       log('Analyzing — building mel spectrograms…');
       await tick();
       var dSpec=melSpectrogram(dancePCM), sSpec=melSpectrogram(songPCM);
+      _scratchDanceSpec=dSpec; _scratchSongSpec=sSpec;
       log('Spectrograms: video '+dSpec[0].length+' frames · audio '+sSpec[0].length+' frames');
       log('Coarse alignment — cross-correlating 32 bands…');
       await tick();
       var coarse=coarseAlign(dSpec,sSpec);
+      _scratchCoarse=coarse;
       setBarPct(56); // event: coarse match ends
       // CANDIDATE VERIFICATION: the raw coarse argmax is NOT trusted — with
       // looping tracks a repetition mirage can outscore the true alignment
@@ -953,6 +969,7 @@ function runAnalysis(){
         await tick();
       }
       evals.sort(function(a,b){ if(Math.abs(b.verifiedScore-a.verifiedScore)>1e-9) return b.verifiedScore-a.verifiedScore; return a.spread-b.spread; });
+      _scratchEvals=evals;
       log('Verified candidates (verified = median of top-half window scores):');
       evals.forEach(function(e3,i){ log('  '+(i+1)+'. coarse '+e3.coarseSec.toFixed(3)+'s · verified '+e3.verifiedScore.toFixed(4)+' · best window '+e3.bestScore.toFixed(4)+' · median offset '+e3.medianOffset.toFixed(3)+'s · spread '+(isFinite(e3.spread)?e3.spread.toFixed(3)+'s':'n/a')+' · windows '+e3.wins.length+' · raw score '+e3.rawScore.toFixed(1)); });
       var winner=evals[0];
@@ -1212,21 +1229,34 @@ $('blend').addEventListener('change',invalidateDownload);
 // signature (both files + trim + effective offset + blend + quality), so
 // re-generating with identical settings — 480p twice in a row, or switching
 // quality away and back — returns the Blob instantly instead of re-encoding
-// (the encode, incl. downscale, is the expensive part). LRU: max 6 outputs.
+// (the encode, incl. downscale, is the expensive part). LRU: max 6 outputs
+// AND a total byte cap (~600 MB across all cached output blobs) — with
+// full-quality 4K outputs of ~200-290 MB each, the count cap alone could
+// hold >1.2 GB in a mobile Safari tab and OOM it. Whichever cap is hit
+// first evicts the oldest entries.
 var MAX_OUTPUTS=6;
+var MAX_CACHE_BYTES=600*1024*1024;
 var outCache=new Map(), outOrder=[], historyEntries=[], resultURL=null;
+function cacheTotalBytes(){ var t=0; outCache.forEach(function(e){ if(e&&e.blob&&e.blob.size) t+=e.blob.size; }); return t; }
 function settingsSignature(q,tStart,tEnd,eff,blend){
   return fileKey(danceFile)+'|'+fileKey(songFile)+'|'+tStart.toFixed(3)+'|'+tEnd.toFixed(3)+'|'+eff.toFixed(3)+'|'+blend.toFixed(2)+'|'+q;
 }
 function cachePut(sig,entry){
   if(outCache.has(sig)) outOrder=outOrder.filter(function(k){return k!==sig});
   outCache.set(sig,entry); outOrder.push(sig);
-  while(outOrder.length>MAX_OUTPUTS){
-    var old=outOrder.shift(); var oe=outCache.get(old); outCache.delete(old);
+  var evictedAny=false;
+  while(outOrder.length>1&&(outOrder.length>MAX_OUTPUTS||cacheTotalBytes()>MAX_CACHE_BYTES)){
+    var old=outOrder.shift(); if(old===sig){ outOrder.unshift(old); break; }
+    var oe=outCache.get(old); outCache.delete(old);
+    // Revoke a per-entry object URL if this entry ever owned one (entries
+    // currently share the single resultURL, which is revoked on replace
+    // in showResult — never revoke the live resultURL for an old entry).
+    if(oe&&oe.url){ try{ URL.revokeObjectURL(oe.url); }catch(e){} oe.url=null; }
     historyEntries.forEach(function(h){ if(h.sig===old) h.available=false; });
-    log('Cache full — evicted oldest output ('+(oe?fmtSize(oe.blob.size):'?')+'). Cache now holds '+outCache.size+': '+outOrder.map(function(k){ var e=outCache.get(k); return e?fmtSize(e.blob.size):'?'; }).join(', '));
-    renderHistory();
+    evictedAny=true;
+    log('Cache eviction — evicted oldest output ('+(oe?fmtSize(oe.blob.size):'?')+') | reason: '+(outOrder.length>=MAX_OUTPUTS?'count cap '+MAX_OUTPUTS:'byte cap '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB')+' | cache now holds '+outCache.size+' entries, '+fmtBytesMB(cacheTotalBytes())+' total: '+outOrder.map(function(k){ var e=outCache.get(k); return e?fmtSize(e.blob.size):'?'; }).join(', '));
   }
+  if(evictedAny) renderHistory();
 }
 function cacheGet(sig){
   var e=outCache.get(sig); if(!e) return null;
@@ -1473,6 +1503,9 @@ async function doGenerate(opts){
       log('Loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
       return;
     }
+    // Memory hygiene (5): before encode starts, release analysis scratch
+    // (spectrograms + correlation/eval tables). PCM + settings stay.
+    releaseAnalysisScratch('before encode');
     var songStart=eff+tStart, delayMs=songStart<0?Math.round(-songStart*1000):0;
     diagStage='encode'; diagResult.settings=snap; diagLastEncodeMilestone=-1;
     log('Encode starts: quality='+(height?(q+'p'):'full')+' | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | signature='+sig);
@@ -1539,9 +1572,42 @@ async function doGenerate(opts){
     setBarPct(66); // event: encode starts (ffmpeg progress then interpolates 66% -> 97%)
     log('Encode exec: ffmpeg args='+args.join(' '));
     await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating video from '+danceFile.name); }));
-    log('Encode ends: ffmpeg exec resolved — reading dance-synced.mp4…');
-    var data=await ff.readFile('dance-synced.mp4'); if(!data.length) throw new Error('Empty output file.');
+    log('Encode ends: ffmpeg exec resolved — freeing inputs from converter FS before reading output…');
+    // Memory hygiene (1): peak-memory cut. Before readFile duplicates the
+    // output into JS, free BOTH inputs + any temp WAV/strip files from the
+    // wasm FS. In the crash case that was ~396 MB held for no reason while
+    // a ~290 MB output was read out and blobbed (FS 686 MB + JS copy +
+    // Blob copy > 1.2 GB → iOS tab OOM-kill at ~97%).
+    var freedBytes=0;
+    var fsCleanup=[
+      {name:'dance.'+dExt, size:danceFile.size, label:'input video'},
+      {name:'song.'+sExt, size:songFile.size, label:'input audio'},
+      {name:'out.wav', size:null, label:'temp WAV'},
+      {name:'in.'+dExt, size:null, label:'temp decode input'},
+      {name:'in.'+sExt, size:null, label:'temp decode input'},
+      {name:'strip.'+dExt, size:null, label:'temp filmstrip input'},
+      {name:'strip.'+sExt, size:null, label:'temp filmstrip input'}
+    ];
+    for(var ti=0;ti<10;ti++) fsCleanup.push({name:'tile'+ti+'.png', size:null, label:'temp filmstrip tile'});
+    var seenCleanup={};
+    for(var ci2=0;ci2<fsCleanup.length;ci2++){
+      var ce=fsCleanup[ci2];
+      if(seenCleanup[ce.name]) continue; seenCleanup[ce.name]=true;
+      if(ce.name==='dance-synced.mp4') continue;
+      try{ var delRes=await ff.deleteFile(ce.name); if(delRes===false) continue; log('memory: deleted FS '+ce.label+' '+ce.name+(ce.size!=null?(' ('+fmtBytesMB(ce.size)+')'):'')); if(ce.size) freedBytes+=ce.size; }catch(delErr){}
+    }
+    log('memory: inputs freed ('+(freedBytes/1048576).toFixed(1)+' MB)');
+    // Memory hygiene (2): read output, then immediately delete its FS copy.
+    var data=await ff.readFile('dance-synced.mp4'); if(!data||!data.length) throw new Error('Empty output file.');
+    var outputBytes=data.length||data.byteLength||0;
+    try{ await ff.deleteFile('dance-synced.mp4'); log('memory: deleted FS output dance-synced.mp4 ('+fmtBytesMB(outputBytes)+')'); }catch(delOutErr){ log('memory: FS output delete failed: '+(delOutErr.message||delOutErr)); }
+    log('memory: output read ('+(outputBytes/1048576).toFixed(1)+' MB), FS copy deleted');
+    // Memory hygiene (3): Blob directly from the readFile bytes (single
+    // copy — no intermediate Uint8Array copy), then drop the intermediate
+    // reference BEFORE showResult creates the object URL / video src.
     var blob=new Blob([data],{type:'video/mp4'});
+    data=null;
+    log('memory: blob created ('+fmtBytesMB(blob.size)+') — readFile bytes reference dropped before object URL creation');
     log('Encode output: blob '+fmtBytesMB(blob.size)+' type='+(blob.type||'video/mp4'));
     var secs=((Date.now()-t0)/1000).toFixed(1);
     generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
@@ -1549,7 +1615,6 @@ async function doGenerate(opts){
     showResult(blob);
     addHistory(sig,snap,blob.size);
     log('Done — '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video)');
-    try{ await ff.deleteFile('dance.'+dExt); await ff.deleteFile('song.'+sExt); await ff.deleteFile('dance-synced.mp4'); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
     else { console.error(err); logError('generate',err); log('❌ Generate failed: '+(err.message||err)); showError('❌ Generate failed: '+(err.message||err)); }
