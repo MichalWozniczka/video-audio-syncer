@@ -108,7 +108,12 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 .histRow{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-top:6px;color:var(--text);font-size:12.5px;font-weight:400;cursor:pointer;font-family:ui-monospace,Menlo,monospace}
 .histRow .unavail{color:#ff8a75}
 .resultvid{width:100%;border-radius:12px;background:#000;margin-top:10px;max-height:60vh;display:block}
-.download{display:inline-block;margin-top:10px;margin-right:8px;background:var(--ok);color:#06281a;padding:11px 16px;border-radius:999px;font-weight:800;text-decoration:none;font-size:14px;cursor:pointer}
+.saveRow{display:flex;gap:8px;margin-top:10px;flex-wrap:nowrap}
+.saveBtn{flex:1 1 0;min-width:0;display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--ok);color:#06281a;padding:9px 6px;border-radius:999px;font-weight:800;font-size:13.5px;text-decoration:none;cursor:pointer;border:0;font-family:inherit;white-space:nowrap}
+.saveBtn svg{width:16px;height:16px;flex:none}
+.startover{background:var(--accent);color:#fff}
+.startover:disabled{background:var(--card2);color:var(--muted);border:1px solid var(--line);cursor:not-allowed}
+#topResetWrap{margin-top:10px}
 #newWrap{margin-top:14px;display:none}
 .dlstatus{margin-top:12px;font-size:13px;background:#14231c;border:1px solid #24543e;border-radius:10px;padding:9px 12px;color:#e6f7ee}
 @media (prefers-color-scheme:light){.dlstatus{background:#e7f5ec;border-color:#bfe3cd;color:#14402a}}
@@ -128,6 +133,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
       <input type="file" id="fileSong" accept="video/*,audio/*,.mp4,.mov,.webm,.m4v,.mkv,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" hidden>
     </div>
   </div>
+  <div id="topResetWrap"><button type="button" class="startover" id="btnStartOverTop" disabled>Start over</button></div>
 
   <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
   <div class="steps" id="stepsRow"><span id="step1" data-label="Video">Video</span><span id="step2" data-label="Audio">Audio</span><span id="step3" data-label="Sync">Sync</span><span id="step4" data-label="Generate">Generate</span></div>
@@ -159,7 +165,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
         </div>
       </div>
       <div class="offsetRow">
-        <span class="offlabel">Audio offset (s):</span>
+        <span class="offlabel">Additional offset (s):</span>
         <button type="button" class="offBtn" id="offMinus" aria-label="Offset minus 0.02 seconds">◀</button>
         <input type="text" class="offInput" id="offInput" value="0.000" inputmode="decimal" autocomplete="off" aria-label="Offset from detected sync, in seconds">
         <button type="button" class="offBtn" id="offPlus" aria-label="Offset plus 0.02 seconds">▶</button>
@@ -187,7 +193,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
         <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
       </div>
       <div id="downloadWrap"></div>
-      <div id="newWrap"><button type="button" class="secondary" id="btnNew">New</button></div>
+      <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
     </div>
   </section>
   <div id="historyWrap"><h4>History</h4><div id="historyList"></div></div>
@@ -202,6 +208,7 @@ var dancePCM=null, songPCM=null;
 var danceDur=0, songDur=0;
 var detectedOffset=0;
 var trimStartSec=0, trimEndSec=null; // null = full duration
+var baseTrimStart=0, baseTrimEnd=null; // trim of the restored/last-generated version; readouts compose against it when it differs from full range
 var audioPos=0; // video-timeline position (sec) of the song block's left edge; effOffset = -audioPos
 var blendVal=0;
 var ffmpeg=null, ffmpegLoaded=false, ffmpegProgressCb=null;
@@ -483,6 +490,17 @@ function withFFmpegLock(fn){
 // visible until a new Generate/auto-run completes and replaces it.
 function invalidateDownload(){ if(generatedOnce) log('Edits changed — generated video stays until you tap Generate.'); }
 function trimEnd(){ return trimEndSec==null?danceDur:trimEndSec; }
+// Cumulative trim readout: when the version on screen was itself trimmed
+// (restored from History or just generated with a non-full trim), show each
+// endpoint as "{base} + {delta}" / "{base} − {delta}" in plain seconds with
+// two decimals, so re-trimming a cropped video keeps its original timeline
+// visible. No base trim → plain m:ss exactly as before.
+function baseTrimActive(){ return danceDur>0&&(baseTrimStart>0.001||(baseTrimEnd!=null&&baseTrimEnd<danceDur-0.001)); }
+function fmtTrimPoint(cur, base){
+  if(!baseTrimActive()) return fmtT(cur);
+  var d=cur-base;
+  return base.toFixed(2)+' '+(d<0?'\u2212':'+')+' '+Math.abs(d).toFixed(2);
+}
 
 // ---------- files ----------
 function setupDrop(dropId,inputId,which){
@@ -499,7 +517,7 @@ function handleFile(f,which){
   filesVersion++; analysisState="idle"; analysisPromise=null; try{ autoGenForVersion=-1; }catch(e){}
   try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
   if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
-  detectedOffset=0; audioPos=0; generatedOnce=false;
+  detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null;
   var rb=$('btnResync'); if(rb) rb.disabled=true;
   $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show');
   $(which==='dance'?'metaDance':'metaSong').textContent=f.name+' · '+fmtSize(f.size);
@@ -866,7 +884,7 @@ function layoutTimeline(){
   var block=$('audioBlock');
   if(songDur>0){ block.style.display='block'; block.style.left=pct(audioPos)+'%'; block.style.width=(songDur/danceDur*100)+'%'; }
   else block.style.display='none';
-  $('trimRead').textContent=fmtT(ts)+' – '+fmtT(te);
+  $('trimRead').textContent=fmtTrimPoint(ts, baseTrimStart)+' – '+fmtTrimPoint(te, baseTrimEnd==null?danceDur:baseTrimEnd);
   $('offRead').textContent='Audio '+effOffset().toFixed(3)+'s';
   syncOffsetInput();
   requestAnimationFrame(drawWaveform);
@@ -1160,17 +1178,22 @@ function showResult(blob){
   rv.addEventListener('error',function(){ try{ var ve=rv.error; log('Result video element error: '+(ve?('code='+ve.code+' message='+(ve.message||'')):'unknown')); logError('result-video-element',(ve&&ve.message)?new Error(ve.message):new Error('video error code '+(ve?ve.code:'?'))); }catch(e){} });
   rv.addEventListener('loadedmetadata',function(){ try{ log('Result video metadata loaded: duration='+(isFinite(rv.duration)?Number(rv.duration).toFixed(3):String(rv.duration))+'s | videoWidth='+rv.videoWidth+' videoHeight='+rv.videoHeight+' | readyState='+rv.readyState); }catch(e){} });
   area.appendChild(rv);
-  var shareBtn=document.createElement('button'); shareBtn.type='button'; shareBtn.className='download'; shareBtn.textContent='Save / Share · '+fmtSize(blob.size);
-  var dl=document.createElement('a'); dl.className='download'; dl.href=resultURL; dl.setAttribute('download','dance-synced.mp4'); dl.textContent='Download';
+  var ICON_SHARE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4"/><path d="M8 7l4-4 4 4"/><path d="M5 13v6a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19v-6"/></svg>';
+  var ICON_DL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M5 20h14"/></svg>';
+  var ICON_OPEN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4L10.5 13.5"/><path d="M19 13.5V19a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 19V7a1.5 1.5 0 0 1 5.5 5.5H11"/></svg>';
+  var saveRow=document.createElement('div'); saveRow.className='saveRow';
+  var shareBtn=document.createElement('button'); shareBtn.type='button'; shareBtn.className='saveBtn'; shareBtn.innerHTML=ICON_SHARE+'<span>Share</span>';
+  var dl=document.createElement('a'); dl.className='saveBtn'; dl.href=resultURL; dl.setAttribute('download','dance-synced.mp4'); dl.innerHTML=ICON_DL+'<span>Download</span>';
   dl.addEventListener('click',function(){ diagStage='download'; log('Download tapped → anchor click | download attr="dance-synced.mp4" | href scheme='+(resultURL?String(resultURL).split(':')[0]+':':'none')+' | blob '+fmtBytesMB(blob.size)+' | in-iframe='+((window.self!==window.top)?'yes':'no')+' | note: blob: downloads depend on browser/iframe handling; no JS error is expected from an <a download> tap — if nothing downloads, check ENVIRONMENT section.'); });
-  var openA=document.createElement('a'); openA.className='download'; openA.href=resultURL; openA.target='_blank'; openA.rel='noopener'; openA.textContent='Open video';
+  var openA=document.createElement('a'); openA.className='saveBtn'; openA.href=resultURL; openA.target='_blank'; openA.rel='noopener'; openA.innerHTML=ICON_OPEN+'<span>Open</span>';
   openA.addEventListener('click',function(){ diagStage='open-video'; log('Open video tapped → opening blob URL in new tab (target=_blank) | href scheme='+(resultURL?String(resultURL).split(':')[0]+':':'none')+' | if the new tab shows a dead player, the blob URL did not survive navigation / was revoked, or the iframe sandbox blocks it — see ENVIRONMENT + RESULT sections.'); });
   shareBtn.addEventListener('click',saveResult);
-  wrap.appendChild(shareBtn);
-  wrap.appendChild(dl);
-  wrap.appendChild(openA);
+  saveRow.appendChild(shareBtn);
+  saveRow.appendChild(dl);
+  saveRow.appendChild(openA);
+  wrap.appendChild(saveRow);
   var guide=document.createElement('p'); guide.className='note';
-  guide.textContent='Save / Share opens the share sheet — pick "Save Video" or "Save to Files" to keep the video. If saving fails, Open video plays it full-screen, where the player\'s own share/save controls work.';
+  guide.textContent='Share opens the share sheet — pick "Save Video" or "Save to Files" to keep the video. If saving fails, Open plays it full-screen, where the player\'s own share/save controls work.';
   wrap.appendChild(guide);
   updateNewBtn();
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
@@ -1180,15 +1203,19 @@ var historyCounter=0; // sequential Video N numbering — survives New/resets
 function addHistory(sig,snap,size){
   historyCounter++;
   historyEntries.unshift({sig:sig, snap:snap, size:size, when:new Date(), available:true, num:historyCounter});
+  // This generation becomes the base trim the readouts compose against.
+  baseTrimStart=snap.tStart; baseTrimEnd=snap.tEnd;
   renderHistory();
+  layoutTimeline();
 }
 function renderHistory(){
   var wrap=$('historyWrap'), list=$('historyList'); if(!wrap||!list) return;
   wrap.classList.toggle('show',historyEntries.length>0);
+  updateNewBtn(); // History existing at all is session state — keep Start over in sync
   list.innerHTML='';
   historyEntries.forEach(function(h){
     var b=document.createElement('button'); b.type='button'; b.className='histRow';
-    b.textContent='Video '+h.num;
+    b.textContent='Version '+h.num;
     b.addEventListener('click',function(){ restoreHistory(h); });
     list.appendChild(b);
   });
@@ -1202,6 +1229,7 @@ function restoreHistory(h){
   blendVal=s.blend; var bl=$('blend'); bl.value=Math.round(s.blend*100); $('blendVal').textContent=Math.round(s.blend*100)+'%';
   trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
   trimEndSec=(danceDur>0&&s.tEnd>=danceDur-0.01)?null:s.tEnd;
+  baseTrimStart=s.tStart; baseTrimEnd=s.tEnd; // restored version's trim becomes the composition base
   audioPos=-s.eff;
   layoutTimeline();
   log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
@@ -1219,7 +1247,18 @@ function restoreHistory(h){
 // PRESERVED: after a reset, a History entry still restores its settings
 // and its video. (The output cache's own LRU cap may still evict the
 // oldest outputs as new ones are generated, as before.)
-function updateNewBtn(){ var w=$('newWrap'); if(w) w.style.display=(danceFile||songFile)?'block':'none'; }
+// Single source of truth for BOTH Start over buttons (top + bottom):
+// the page is "active" whenever any session state exists — an uploaded
+// file OR at least one History entry. Restoring a History entry after a
+// reset is session state too, so the buttons must come back; today they
+// vanished in exactly that flow because only files were checked.
+function sessionActive(){ return !!(danceFile||songFile||historyEntries.length>0); }
+function updateNewBtn(){
+  var active=sessionActive();
+  var w=$('newWrap'); if(w) w.style.display=active?'block':'none';
+  var top=$('btnStartOverTop'); if(top) top.disabled=!active;
+  var bn=$('btnNew'); if(bn) bn.disabled=!active;
+}
 function resetAll(){
   var running=isGenerating||pipelineRunning||analysisState==='running';
   runToken++; filesVersion++;
@@ -1231,7 +1270,7 @@ function resetAll(){
   danceFile=null; songFile=null;
   dancePCM=null; songPCM=null; danceDur=0; songDur=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
-  trimStartSec=0; trimEndSec=null; blendVal=0;
+  trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0;
   analysisState='idle'; analysisPromise=null; analysisVersion=-1;
   autoGenForVersion=-1; generatedOnce=false;
   pcmCache={}; pcmPromiseCache={}; stripCache={};
@@ -1265,10 +1304,11 @@ function resetAll(){
   diagFiles.audio={role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
   // Keep diagEntries (History is preserved across New, and so are its
   // diagnostics) — just note the reset in the timestamped log.
-  log('Reset (New) — session cleared; History preserved ('+historyEntries.length+' entries). Diagnostics log kept.');
+  log('Reset (Start over) — session cleared; History preserved ('+historyEntries.length+' entries). Diagnostics log kept.');
   updateNewBtn();
 }
 $('btnNew').addEventListener('click', resetAll);
+$('btnStartOverTop').addEventListener('click', resetAll);
 
 // ---------- generate (the one action button) ----------
 function fmtElapsed(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
