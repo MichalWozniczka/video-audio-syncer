@@ -47,7 +47,10 @@ button{appearance:none;border:0;border-radius:999px;padding:11px 16px;font-weigh
 .progress{margin-top:10px;display:none}
 .progress .barTrack{position:relative;flex:1;height:22px;background:var(--card2);border-radius:999px;overflow:hidden}
 .progress i{display:block;height:100%;background:var(--accent);width:0%;transition:width .45s ease;border-radius:999px}
-#progText{position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7),0 0 3px rgba(0,0,0,.55);white-space:nowrap;pointer-events:none}
+#progText,#exportProgText{position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7),0 0 3px rgba(0,0,0,.55);white-space:nowrap;pointer-events:none}
+.procWrap{align-items:center;gap:10px}
+.procLabel{font-size:13px;font-weight:700;white-space:nowrap}
+#exportProgWrap .secondary{padding:7px 14px;font-size:13px;flex:none}
 .steps{display:none;justify-content:space-between;gap:4px;margin-top:6px;font-size:11.5px;color:var(--muted)}
 .steps.show{display:flex}
 .steps span{flex:1;text-align:center;white-space:nowrap}
@@ -175,8 +178,8 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 
     <div class="settings" id="settingsSec">
       <div class="setrow">
-        <span class="setlabel">Quality</span>
-        <div class="pills" role="radiogroup" aria-label="Quality">
+        <span class="setlabel">Export quality</span>
+        <div class="pills" role="radiogroup" aria-label="Export quality">
           <label class="pill"><input type="radio" name="quality" value="full" checked><span>Full</span></label>
           <label class="pill"><input type="radio" name="quality" value="1080"><span>1080p</span></label>
           <label class="pill"><input type="radio" name="quality" value="720"><span>720p</span></label>
@@ -193,6 +196,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
         <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
       </div>
       <div id="downloadWrap"></div>
+      <div class="progress procWrap" id="exportProgWrap"><span class="procLabel">Processing</span><div class="barTrack"><i id="exportProgBar"></i><span id="exportProgText"></span></div><button type="button" class="secondary" id="btnExportCancel">Cancel</button></div>
       <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
     </div>
   </section>
@@ -228,6 +232,9 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false};
+var diagProxy={size:null, durationSec:null, backend:null};
+var diagExport={size:null, durationSec:null, quality:null, backend:null};
 function $(id){return document.getElementById(id)}
 function effOffset(){ return -audioPos; }
 function fmtT(s){ s=Math.max(0,s||0); var m=Math.floor(s/60), sec=Math.floor(s%60); return m+":"+(sec<10?"0":"")+sec; }
@@ -386,12 +393,23 @@ function buildDiagnosticsText(){
     'Standalone / display-mode: '+((probesNow)?(probesNow.displayMode+' (navigator.standalone='+probesNow.standaloneFlag+')'):'unknown'),
     'Language: '+String(navigator.language||'')+((navigator.languages)?' ['+navigator.languages.join(', ')+']':'')
   ].join('\n');
+  var storageLines='(storage diagnostics unavailable)';
+  try{
+    storageLines=[
+      'Storage backend detection: OPFS available='+String(diagStorage.opfsAvailable)+' | note: '+diagStorage.note+' | typeof navigator.storage.getDirectory='+storageGetDirectoryType(),
+      'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
+      'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'),
+      'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode',
+      'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')
+    ].join('\n');
+  }catch(e){}
   var parts=[];
   parts.push('--- HEADER ---'); parts.push(headerLines);
   parts.push('--- ENVIRONMENT (AT LOAD) ---'); parts.push(probesToText(diagEnvAtLoad));
   parts.push('--- ENVIRONMENT (AT COPY TIME) ---'); parts.push(probesToText(probesNow));
   parts.push('--- CONVERTER ---'); parts.push(convLines);
   parts.push('--- FILES ---'); parts.push(fileDiagText(diagFiles.video)); parts.push(fileDiagText(diagFiles.audio));
+  parts.push('--- STORAGE ---'); parts.push(storageLines);
   parts.push('--- RESULT ---'); parts.push(resultLines);
   parts.push('--- PIPELINE LOG ---'); parts.push(diagEntries.length?diagEntries.join('\n'):'(no log lines yet)');
   parts.push('--- END ---');
@@ -486,7 +504,7 @@ function newCancelSignal(){ cancelPromise=new Promise(function(_,rej){ cancelRej
 function cancellable(p){ return cancelPromise?Promise.race([p,cancelPromise]):p; }
 function isCancelErr(e){ return e&&e.message==='Cancelled'; }
 function setCancelVisible(v){ var b=$('btnCancel'); if(b) b.style.display=v?'':'none'; }
-function fileKey(f){ return f.name+'|'+f.size+'|'+(f.lastModified||0); }
+function fileKey(f){ return f?(f.name+'|'+f.size+'|'+(f.lastModified||0)):'nofile'; }
 function withTimeout(promise,ms,label){
   var timer=null;
   var timeout=new Promise(function(_,rej){ timer=setTimeout(function(){ rej(new Error(label+' timed out after '+Math.round(ms/1000)+'s')); },ms); });
@@ -502,7 +520,7 @@ function withFFmpegLock(fn){
 }
 // Edits NEVER touch the generated result: once a result video exists it stays
 // visible until a new Generate/auto-run completes and replaces it.
-function invalidateDownload(){ if(generatedOnce) log('Edits changed — generated video stays until you tap Generate.'); }
+function invalidateDownload(){ invalidateExport('settings edit'); if(generatedOnce) log('Edits changed — proxy preview stays on screen until you tap Generate; any cached export is now stale and will re-render on the next Share/Download/Open.'); }
 function trimEnd(){ return trimEndSec==null?danceDur:trimEndSec; }
 // Cumulative trim readout: when the version on screen was itself trimmed
 // (restored from History or just generated with a non-full trim), show each
@@ -554,6 +572,7 @@ function handleFile(f,which){
     $('playerSec').classList.add('show');
     $('settingsSec').classList.add('show');
   }
+  try{ detectStorageBackend().then(function(ok){ if(ok) opfsStageInput(f, which); }); }catch(e){}
   updateNewBtn();
   checkReady();
 }
@@ -1220,20 +1239,391 @@ $('btnResync').addEventListener('click',function(){
 window.addEventListener('resize',function(){ layoutTimeline(); buildFilmstrip(); });
 
 // ---------- settings ----------
-document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',invalidateDownload); });
+document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — this selects the EXPORT quality only; the 480p proxy preview is unchanged and no render happens until Share/Download/Open.'); }); });
 $('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.value,10)/100; $('blendVal').textContent=e.target.value+'%'; });
 $('blend').addEventListener('change',invalidateDownload);
 
+
+// ---------- storage (OPFS) + proxy/export architecture ----------
+// PROXY-FIRST: Generate renders only a 480p-max proxy (fast encode) for
+// editing; the full-quality file is rendered ON DEMAND by Share/Download/
+// Open at the selected Export quality and cached by settings signature.
+// STORAGE: OPFS (navigator.storage.getDirectory) is feature-detected. When
+// available, uploaded inputs are staged into OPFS files and every render
+// output is streamed out of the converter into an OPFS file in chunks and
+// delivered from that disk-backed File; the converter FS copy is freed
+// immediately after streaming. When OPFS is unavailable the previous
+// memory-hygiene MEMFS behavior is kept exactly (inputs freed before
+// output read-out, FS output deleted right after read, refs nulled).
+function hashStr(str){ var h=5381; for(var i=0;i<str.length;i++){ h=((h<<5)+h+str.charCodeAt(i))|0; } return (h>>>0).toString(36); }
+var opfsRoot=null, opfsStaged={dance:null, song:null};
+function storageGetDirectoryType(){ try{ return typeof (navigator.storage&&navigator.storage.getDirectory); }catch(e){ return 'threw '+(e.message||e); } }
+async function detectStorageBackend(){
+  if(diagStorage.detected) return diagStorage.opfsAvailable;
+  diagStorage.detected=true;
+  try{
+    if(typeof navigator==='undefined'||!navigator.storage||typeof navigator.storage.getDirectory!=='function'){
+      diagStorage.opfsAvailable=false; diagStorage.note='navigator.storage.getDirectory unavailable (typeof='+storageGetDirectoryType()+')';
+      log('storage: OPFS not available — '+diagStorage.note);
+      log('storage: fallback=MEMFS');
+      return false;
+    }
+    opfsRoot=await navigator.storage.getDirectory();
+    diagStorage.opfsAvailable=true; diagStorage.note='navigator.storage.getDirectory() resolved — OPFS available';
+    log('storage: OPFS detected — inputs stage to OPFS files; render outputs stream to OPFS in chunks and are delivered from disk-backed Files');
+    await refreshStorageEstimate();
+    return true;
+  }catch(e){
+    diagStorage.opfsAvailable=false; diagStorage.note='getDirectory threw '+(e.name||'Error')+': '+(e.message||e);
+    logError('storage-detect',e);
+    log('storage: fallback=MEMFS (OPFS detection failed)');
+    return false;
+  }
+}
+async function refreshStorageEstimate(){
+  try{
+    if(typeof navigator!=='undefined'&&navigator.storage&&typeof navigator.storage.estimate==='function'){
+      var est=await navigator.storage.estimate();
+      diagStorage.usage=(est&&est.usage!=null)?est.usage:null;
+      diagStorage.quota=(est&&est.quota!=null)?est.quota:null;
+      log('storage: OPFS estimate usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'));
+    }
+  }catch(e){ log('storage: estimate failed: '+(e.message||e)); }
+}
+async function opfsWriteChunked(name, data){
+  if(!opfsRoot) throw new Error('OPFS root unavailable');
+  var handle=await opfsRoot.getFileHandle(name,{create:true});
+  var writable=await handle.createWritable();
+  var CH=4*1024*1024;
+  try{
+    if(data instanceof Blob){
+      for(var boff=0; boff<data.size; boff+=CH){
+        var chunk=await data.slice(boff, Math.min(data.size, boff+CH)).arrayBuffer();
+        await writable.write(chunk);
+      }
+    } else if(data && data.length!=null){
+      for(var off=0; off<data.length; off+=CH){ await writable.write(data.subarray(off, Math.min(data.length, off+CH))); }
+    } else { await writable.write(data); }
+    await writable.close();
+  }catch(e){ try{ await writable.abort(); }catch(_){} throw e; }
+  return await handle.getFile();
+}
+async function opfsDelete(name){
+  if(!opfsRoot||!name) return;
+  try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name); }catch(e){}
+}
+async function opfsStageInput(file, which){
+  try{
+    var ok=await detectStorageBackend(); if(!ok) return false;
+    var ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,'')||'bin';
+    var name='input-'+which+'-'+hashStr(fileKey(file))+'.'+ext;
+    var prev=opfsStaged[which];
+    var f=await opfsWriteChunked(name, file);
+    opfsStaged[which]={name:name, size:f.size, key:fileKey(file)};
+    diagStorage.inputsBackend='OPFS';
+    if(prev&&prev.name!==name) opfsDelete(prev.name);
+    log('storage: input staged to OPFS ['+which+'] '+name+' ('+fmtBytesMB(f.size)+') — disk-backed copy held instead of only in memory');
+    return true;
+  }catch(e){ logError('opfs-stage-input',e); log('storage: OPFS input staging failed — keeping the in-memory File (storage: fallback=MEMFS for inputs)'); return false; }
+}
+async function getInputFileForRender(which){
+  var orig=(which==='dance')?danceFile:songFile;
+  var st=opfsStaged[which];
+  if(diagStorage.opfsAvailable&&opfsRoot&&st&&orig&&st.key===fileKey(orig)){
+    try{ var handle=await opfsRoot.getFileHandle(st.name); var f=await handle.getFile(); if(f&&f.size===orig.size) return f; }catch(e){ log('storage: OPFS staged input read failed ('+(e.message||e)+') — using the in-memory File'); }
+  }
+  return orig;
+}
+function inputsBackendLabel(){
+  return (diagStorage.opfsAvailable&&(opfsStaged.dance||opfsStaged.song))?'OPFS':'MEMFS';
+}
+async function tryMountOPFS(ff){
+  if(diagStorage.mountTried) return diagStorage.mountSupported;
+  diagStorage.mountTried=true;
+  try{
+    if(!ff||typeof ff.mount!=='function'){ diagStorage.mountSupported=false; log('storage: ffmpeg wrapper exposes no mount() — renders run on MEMFS with OPFS stream-out'); return false; }
+    try{ await ff.createDir('/opfs'); }catch(e){}
+    var r=await ff.mount('OPFS', {}, '/opfs');
+    diagStorage.mountSupported=!!r;
+    if(r){ log('storage: ffmpeg mount("OPFS") succeeded — OPFS-backed filesystem mount is exposed by this core'); }
+    else { log('storage: ffmpeg mount("OPFS") returned '+String(r)+' — the bundled core exposes no OPFS filesystem; renders run on MEMFS with OPFS stream-out of outputs'); try{ await ff.unmount('/opfs'); }catch(e){} }
+    return !!r;
+  }catch(e){ diagStorage.mountSupported=false; log('storage: ffmpeg mount("OPFS") threw '+(e.name||'Error')+': '+(e.message||e)+' — renders run on MEMFS with OPFS stream-out of outputs'); return false; }
+}
+// Shared encode-argument builder for BOTH the proxy and the export render.
+// The audio pipeline is identical in both: detected sync offset (including
+// negative offsets with adelay + room-audio gap fill), trims, room-audio
+// blend, and audio always exactly the video duration (filter atrim/apad to
+// tDur plus the output -t tDur cap). Only the video leg differs: proxy =
+// scale to max 480p + ultrafast; export = selected quality (Full = stream
+// copy, otherwise scale + veryfast/crf20 as before).
+function buildRenderArgs(o){
+  var encHeight=o.encHeight, tStart=o.tStart, tDur=o.tDur, eff=o.eff;
+  var songStart=eff+tStart, delayMs=songStart<0?Math.round(-songStart*1000):0;
+  var args=['-y'];
+  if(tStart>0) args.push('-ss',tStart.toFixed(3));
+  if(tDur>0) args.push('-t',tDur.toFixed(3));
+  args.push('-i','dance.'+o.dExt);
+  if(songStart>0) args.push('-ss',songStart.toFixed(3));
+  args.push('-i','song.'+o.sExt);
+  var fc=[];
+  if(encHeight) fc.push('[0:v]scale=-2:min('+encHeight+'\\,ih)[v]');
+  var gapSec=songStart<0?-songStart:0;
+  if(gapSec>0){
+    log('Encode: negative offset — clean audio begins '+gapSec.toFixed(3)+'s into the clip; leading gap filled with the video\'s original audio at full level'+(blendVal>0?(' · room blend '+Math.round(blendVal*100)+'% applies after the gap'):'')+'.');
+    if(gapSec>=tDur){
+      fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+    } else {
+      fc.push('[1:a]adelay='+delayMs+'|'+delayMs+',apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
+      fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[room]');
+      if(blendVal>0){
+        fc.push('[room]asplit=2[roomGap][roomTailSrc]');
+        fc.push('[roomGap]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
+        fc.push('[roomTailSrc]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+',asetpts=N/SR/TB[roomTail]');
+        fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[cleanTail]');
+        fc.push('[cleanTail][roomTail]amix=inputs=2:duration=first:normalize=0[tail]');
+      } else {
+        fc.push('[room]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
+        fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[tail]');
+      }
+      fc.push('[gapA][tail]concat=n=2:v=0:a=1,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+    }
+  } else {
+    fc.push('[1:a]'+(delayMs>0?('adelay='+delayMs+'|'+delayMs+','):'')+'apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
+    if(blendVal>0){
+      fc.push('[clean]volume=1.0[cleanv]');
+      fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+'[room]');
+      fc.push('[cleanv][room]amix=inputs=2:duration=first:normalize=0,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+    }
+  }
+  args.push('-filter_complex', fc.join(';'));
+  args.push('-map', encHeight?'[v]':'0:v:0', '-map', (blendVal>0||gapSec>0)?'[a]':'[clean]');
+  if(encHeight){ if(o.proxy) args.push('-c:v','libx264','-preset','ultrafast','-crf','23','-pix_fmt','yuv420p'); else args.push('-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p'); } else args.push('-c:v','copy');
+  args.push('-c:a','aac','-b:a','192k');
+  if(tDur>0) args.push('-t',tDur.toFixed(3));
+  args.push(o.outName);
+  return args;
+}
+async function freeConverterInputs(ff, dExt, sExt){
+  var freedBytes=0;
+  var fsCleanup=[
+    {name:'dance.'+dExt, size:danceFile?danceFile.size:null, label:'input video'},
+    {name:'song.'+sExt, size:songFile?songFile.size:null, label:'input audio'},
+    {name:'out.wav', size:null, label:'temp WAV'},
+    {name:'in.'+dExt, size:null, label:'temp decode input'},
+    {name:'in.'+sExt, size:null, label:'temp decode input'},
+    {name:'strip.'+dExt, size:null, label:'temp filmstrip input'},
+    {name:'strip.'+sExt, size:null, label:'temp filmstrip input'}
+  ];
+  for(var ti=0;ti<10;ti++) fsCleanup.push({name:'tile'+ti+'.png', size:null, label:'temp filmstrip tile'});
+  var seenCleanup={};
+  for(var ci2=0;ci2<fsCleanup.length;ci2++){
+    var ce=fsCleanup[ci2];
+    if(seenCleanup[ce.name]) continue; seenCleanup[ce.name]=true;
+    if(ce.name==='dance-synced.mp4') continue;
+    try{ var delRes=await ff.deleteFile(ce.name); if(delRes===false) continue; log('memory: deleted FS '+ce.label+' '+ce.name+(ce.size!=null?(' ('+fmtBytesMB(ce.size)+')'):'')); if(ce.size) freedBytes+=ce.size; }catch(delErr){}
+  }
+  log('memory: inputs freed ('+(freedBytes/1048576).toFixed(1)+' MB)');
+  return freedBytes;
+}
+async function readRenderOutput(ff, fsOutName, opfsName){
+  var data=await ff.readFile(fsOutName); if(!data||!data.length) throw new Error('Empty output file.');
+  var bytes=data.length||data.byteLength||0;
+  if(diagStorage.opfsAvailable&&opfsName){
+    try{
+      var file=await opfsWriteChunked(opfsName, data);
+      try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+') after streaming it to OPFS'); }catch(delErr){ log('memory: FS output delete after OPFS stream failed: '+(delErr.message||delErr)); }
+      log('memory: output streamed out of the converter into OPFS file '+opfsName+' in chunks ('+fmtBytesMB(bytes)+') — delivered from the disk-backed File; no additional full in-RAM blob copy built, readFile bytes reference dropped');
+      data=null;
+      return {blob:file, backend:'OPFS', opfsName:opfsName};
+    }catch(e){ logError('opfs-stream-output',e); log('OPFS stream-out failed — falling back to an in-memory blob for this output (storage: fallback=MEMFS)'); }
+  }
+  try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+')'); }catch(delOutErr){ log('memory: FS output delete failed: '+(delOutErr.message||delOutErr)); }
+  log('memory: output read ('+(bytes/1048576).toFixed(1)+' MB), FS copy deleted');
+  var blob=new Blob([data],{type:'video/mp4'});
+  data=null;
+  log('memory: blob created ('+fmtBytesMB(blob.size)+') — readFile bytes reference dropped before object URL creation');
+  return {blob:blob, backend:'MEMFS', opfsName:null};
+}
+// ---------- Processing progress bar (export only) ----------
+// A second, independent progress bar directly under the Share/Download/Open
+// row, visible only while a full-quality export renders. Same discrete-
+// event style as the main ladder: 2% render requested · 8% inputs staged
+// to converter · 15% encode starts · ffmpeg progress 15%->95% · 96%
+// read-out/stream-out · 100% done. Percentage text is one persistent
+// element updated in place.
+var exportBarPct=0, exportT0=0, exportClockTimer=null, exportLastMilestone=-1;
+function renderExportProgText(){ var el=$('exportProgText'); if(!el) return; if(exportBarPct>=100){ el.textContent='Done'; return; } el.textContent=Math.round(exportBarPct)+'%'+(exportT0?(' · '+fmtClock(Date.now()-exportT0)):''); }
+function setExportBarPct(pv){ pv=Math.max(0,Math.min(100,pv)); if(pv<exportBarPct) pv=exportBarPct; exportBarPct=pv; var b=$('exportProgBar'); if(b) b.style.width=pv+'%'; renderExportProgText(); }
+function showExportProgress(v){
+  var w=$('exportProgWrap'); if(!w) return;
+  if(v){ w.style.display='flex'; exportBarPct=0; var b=$('exportProgBar'); if(b) b.style.width='0%'; exportLastMilestone=-1; exportT0=Date.now(); if(exportClockTimer) clearInterval(exportClockTimer); exportClockTimer=setInterval(renderExportProgText,1000); renderExportProgText(); }
+  else { w.style.display='none'; if(exportClockTimer){ clearInterval(exportClockTimer); exportClockTimer=null; } }
+}
+function progressForExport(ratio){ if(ratio==null) return; setExportBarPct(15+Math.max(0,Math.min(1,ratio))*80); var m=Math.floor(ratio*10)*10; if(m>exportLastMilestone){ exportLastMilestone=m; log('Export progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } }
+// ---------- export cache + live export ----------
+var exportCache=new Map(), exportOrder=[];
+var liveExport=null; // {sig, file, blob, url, canShare, size, opfsName, q}
+var shareBtnEl=null, dlAnchorEl=null, openAnchorEl=null;
+function exportCacheTotalBytes(){ var t=0; exportCache.forEach(function(e){ if(e&&e.blob&&e.blob.size) t+=e.blob.size; }); return t; }
+function exportCachePut(sig, entry){
+  if(exportCache.has(sig)) exportOrder=exportOrder.filter(function(k){return k!==sig});
+  exportCache.set(sig,entry); exportOrder.push(sig);
+  while(exportOrder.length>1&&(exportOrder.length>MAX_OUTPUTS||exportCacheTotalBytes()>MAX_CACHE_BYTES)){
+    var old=exportOrder.shift(); if(old===sig){ exportOrder.unshift(old); break; }
+    var oe=exportCache.get(old); exportCache.delete(old);
+    if(oe&&oe.opfsName){ opfsDelete(oe.opfsName); }
+    log('Export cache eviction — evicted oldest export ('+(oe?fmtSize(oe.blob.size):'?')+', quality '+(oe&&oe.q?oe.q:'?')+') | reason: '+(exportOrder.length>=MAX_OUTPUTS?'count cap '+MAX_OUTPUTS:'byte cap '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB')+' | export cache now holds '+exportCache.size+' entries, '+fmtBytesMB(exportCacheTotalBytes())+' total');
+  }
+}
+function exportCacheGet(sig){
+  var e=exportCache.get(sig); if(!e) return null;
+  exportOrder=exportOrder.filter(function(k){return k!==sig}); exportOrder.push(sig);
+  return e;
+}
+function currentExportQuality(){ var qe=document.querySelector('input[name=quality]:checked'); var q=qEl2(qe); return q; }
+function qEl2(qe){ var q=qe?qe.value:'full'; return {q:q, height:(q==='full')?0:parseInt(q,10)}; }
+function currentExportSignature(){ var c=currentExportQuality(); return settingsSignature(c.q, trimStartSec, trimEnd(), effOffset(), blendVal); }
+function invalidateExport(reason){
+  if(liveExport){
+    if(liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
+    log('Export invalidated ('+reason+') — the previous export no longer matches the current settings + export quality; the next Share/Download/Open re-renders it.');
+    liveExport=null;
+  }
+  if(dlAnchorEl&&resultURL) dlAnchorEl.href=resultURL;
+  if(openAnchorEl&&resultURL) openAnchorEl.href=resultURL;
+}
+function setLiveExport(entry, sig){
+  if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
+  var file=entry.blob;
+  var shareFile=file;
+  if(!(shareFile instanceof File)){ try{ shareFile=new File([file],'dance-synced.mp4',{type:'video/mp4'}); }catch(e){ shareFile=file; } }
+  var can=false;
+  if(shareFile&&typeof navigator!=='undefined'&&navigator.canShare&&navigator.share){ try{ can=!!navigator.canShare({files:[shareFile]}); }catch(e){ can=false; } }
+  liveExport={sig:sig, file:shareFile, blob:file, url:URL.createObjectURL(file), canShare:can, size:file.size, opfsName:entry.opfsName||null, q:entry.q||null};
+  if(dlAnchorEl) dlAnchorEl.href=liveExport.url;
+  if(openAnchorEl) openAnchorEl.href=liveExport.url;
+  log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | canShare(export File)='+String(can)+' | Download/Open links now point at the export file (not the proxy)');
+  return liveExport;
+}
+var isExporting=false, exportToken=0, exportCancelReject=null, exportCancelPromise=null, pendingExportAction=null;
+function newExportCancelSignal(){ exportCancelPromise=new Promise(function(_,rej){ exportCancelReject=rej; }); exportCancelPromise.catch(function(){}); }
+function cancellableExport(pv){ return exportCancelPromise?Promise.race([pv,exportCancelPromise]):pv; }
+function isExportCancelErr(e){ return e&&e.message==='Export cancelled'; }
+async function renderExport(sig){
+  var c=currentExportQuality(); var q=c.q, height=c.height;
+  var eff=effOffset(), tStart=trimStartSec, tEnd=trimEnd(), tDur=Math.max(0,tEnd-tStart);
+  if(tDur<0.5) throw new Error('Clip too short — widen the trim.');
+  releaseAnalysisScratch('before export');
+  diagStage='export';
+  var renderT0=Date.now();
+  log('Export render starts: quality='+(height?(q+'p'):'full')+' | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | signature='+sig);
+  await detectStorageBackend();
+  showExportProgress(true); setExportBarPct(2); // event: export requested
+  var ff=await cancellableExport(ensureFFmpeg(function(ratio){ progressForExport(ratio); }));
+  await tryMountOPFS(ff);
+  var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
+  diagStorage.lastInputs=inputsBackendLabel();
+  var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  log('Export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+  await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for export');
+  await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for export');
+  setExportBarPct(15); // event: export encode starts
+  var args=buildRenderArgs({encHeight:height, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false});
+  log('Export exec: ffmpeg args='+args.join(' '));
+  await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Exporting video from '+danceFile.name); }));
+  setExportBarPct(96); // event: export encode ends, read-out/stream-out begins
+  log('Export encode ends — freeing inputs from converter FS before reading output…');
+  await freeConverterInputs(ff,dExt,sExt);
+  var outRes=await readRenderOutput(ff,'dance-synced.mp4','export-'+hashStr(sig)+'.mp4');
+  setExportBarPct(100);
+  var durSec=(Date.now()-renderT0)/1000;
+  diagStorage.lastOutput=outRes.backend;
+  diagExport.size=outRes.blob.size; diagExport.durationSec=Number(durSec.toFixed(2)); diagExport.quality=(height?(q+'p'):'full'); diagExport.backend=outRes.backend;
+  log('storage: inputs='+diagStorage.lastInputs+' output='+outRes.backend+(outRes.backend==='OPFS'?'':' | storage: fallback=MEMFS'));
+  log('Export render: size='+fmtBytesMB(outRes.blob.size)+' | duration='+durSec.toFixed(1)+'s | quality='+(height?(q+'p'):'full'));
+  await refreshStorageEstimate();
+  var entry={blob:outRes.blob, opfsName:outRes.opfsName, q:q};
+  exportCachePut(sig, entry);
+  return entry;
+}
+function performExportAction(action){
+  if(!liveExport) return;
+  diagStage='export-'+action;
+  if(action==='share'){
+    if(liveExport.file&&liveExport.canShare&&navigator.share){
+      var pr=null, syncErr=null;
+      try{ pr=navigator.share({files:[liveExport.file]}); }catch(err){ syncErr=err; }
+      if(syncErr){ log('Share (export) → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
+      log('Share (export) → navigator.share({files:[export File '+fmtBytesMB(liveExport.file.size)+']}) called with the pre-built export File. If this share followed a Processing render, iOS may have expired the original tap activation — a NotAllowedError below means: tap Share again (export is cached, the next tap shares instantly).');
+      if(pr&&pr.then) pr.then(function(){ log('Share (export) → navigator.share resolved.'); },function(err){
+        if(err&&err.name==='AbortError'){ log('Share (export) → dismissed by user (AbortError, not a failure).'); }
+        else { log('Share (export) → navigator.share rejected: '+diagErrText(err)); if(err&&err.name==='NotAllowedError'){ showError('Export is ready ('+fmtSize(liveExport.size)+') — tap Share again to open the share sheet.'); } else shareFailed(err); }
+      });
+      return;
+    }
+    log('Share (export) → file sharing unavailable in this browser (canShare='+String(liveExport.canShare)+') — use Download or Open.');
+    showError('File sharing is not available in this browser — use Download or Open for the export.');
+    return;
+  }
+  if(action==='download'){
+    if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; log('Download (export) → activating the in-DOM download anchor for the export file '+fmtBytesMB(liveExport.size)+' (href is the export object URL; if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).'); dlAnchorEl.click(); }
+    return;
+  }
+  if(action==='open'){
+    if(openAnchorEl){ openAnchorEl.href=liveExport.url; log('Open (export) → activating the in-DOM Open anchor for the export file '+fmtBytesMB(liveExport.size)+' (if the browser blocks the automatic open after Processing, tap Open again — the export is cached).'); openAnchorEl.click(); }
+    return;
+  }
+}
+async function ensureExport(action){
+  // Fast paths run synchronously inside the tap handler (no await before
+  // them) so a cached export's Share keeps its transient user activation:
+  // navigator.share() is effectively the first real action of the tap.
+  if(isGenerating||pipelineRunning){ log('Export tap ('+action+') while the proxy is still generating — ignored until generation finishes.'); showError('Still generating the preview — Share/Download/Open will export once it finishes.'); return; }
+  if(!danceFile||!songFile){ log('Export tap ('+action+') with no source files loaded (e.g. a History preview restored after Start over) — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files (History previews are kept).'); return; }
+  if(isExporting){ pendingExportAction=action; log('Export already processing — the pending action is now '+action+'.'); return; }
+  var sig=currentExportSignature();
+  if(liveExport&&liveExport.sig===sig){ performExportAction(action); return; }
+  var cached=exportCacheGet(sig);
+  if(cached){ setLiveExport(cached, sig); log('Export cache hit for current settings + export quality — no re-render.'); performExportAction(action); return; }
+  isExporting=true; pendingExportAction=action; exportToken++; var tok=exportToken; newExportCancelSignal();
+  clearError();
+  log('Export tap ('+action+') → no up-to-date export for the current settings + export quality — rendering the full-quality export first (Processing bar under the buttons).');
+  try{
+    var entry=await renderExport(sig);
+    if(tok!==exportToken){ log('Export finished but the run was cancelled/superseded — not delivering it.'); return; }
+    if(currentExportSignature()!==sig){ log('Export finished but the settings changed during processing — that export is stale; tap again to re-render.'); return; }
+    setLiveExport(entry, sig);
+    var act=pendingExportAction; pendingExportAction=null;
+    if(act) performExportAction(act);
+  }catch(err){
+    if(isExportCancelErr(err)||tok!==exportToken){ log('Export processing cancelled.'); }
+    else { console.error(err); logError('export',err); log('❌ Export failed: '+(err.message||err)); showError('❌ Export failed: '+(err.message||err)); }
+  }finally{
+    isExporting=false; ffmpegProgressCb=null;
+    setTimeout(function(){ if(!isExporting) showExportProgress(false); },1200);
+  }
+}
+try{ var _ebc=$('btnExportCancel'); if(_ebc) _ebc.addEventListener('click', function(){
+  exportToken++;
+  ffmpegChain=Promise.resolve();
+  if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; ffmpegProgressCb=null; }
+  if(exportCancelReject) exportCancelReject(new Error('Export cancelled'));
+  pendingExportAction=null;
+  log('Export processing cancelled by user (Processing bar Cancel).');
+  showExportProgress(false);
+}); }catch(e){ try{ logError('export-cancel-wiring',e); }catch(_){} }
+
 // ---------- output cache + history ----------
-// Generated outputs are cached in memory keyed by the full settings
-// signature (both files + trim + effective offset + blend + quality), so
-// re-generating with identical settings — 480p twice in a row, or switching
-// quality away and back — returns the Blob instantly instead of re-encoding
-// (the encode, incl. downscale, is the expensive part). LRU: max 6 outputs
-// AND a total byte cap (~600 MB across all cached output blobs) — with
-// full-quality 4K outputs of ~200-290 MB each, the count cap alone could
-// hold >1.2 GB in a mobile Safari tab and OOM it. Whichever cap is hit
-// first evicts the oldest entries.
+// PROXY outputs are cached keyed by the settings signature (both files +
+// trim + effective offset + blend + the fixed proxy kind — export quality
+// is NOT part of it, since the proxy is always 480p), so re-generating
+// with identical settings returns the proxy instantly instead of
+// re-encoding. Full-quality exports live in exportCache (above) with the
+// same caps. LRU: max 6 outputs AND a total byte cap (~600 MB per cache)
+// — whichever cap is hit first evicts the oldest entries, deleting any
+// OPFS file they held.
 var MAX_OUTPUTS=6;
 var MAX_CACHE_BYTES=600*1024*1024;
 var outCache=new Map(), outOrder=[], historyEntries=[], resultURL=null;
@@ -1252,6 +1642,7 @@ function cachePut(sig,entry){
     // currently share the single resultURL, which is revoked on replace
     // in showResult — never revoke the live resultURL for an old entry).
     if(oe&&oe.url){ try{ URL.revokeObjectURL(oe.url); }catch(e){} oe.url=null; }
+    if(oe&&oe.opfsName){ opfsDelete(oe.opfsName); oe.opfsName=null; }
     historyEntries.forEach(function(h){ if(h.sig===old) h.available=false; });
     evictedAny=true;
     log('Cache eviction — evicted oldest output ('+(oe?fmtSize(oe.blob.size):'?')+') | reason: '+(outOrder.length>=MAX_OUTPUTS?'count cap '+MAX_OUTPUTS:'byte cap '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB')+' | cache now holds '+outCache.size+' entries, '+fmtBytesMB(cacheTotalBytes())+' total: '+outOrder.map(function(k){ var e=outCache.get(k); return e?fmtSize(e.blob.size):'?'; }).join(', '));
@@ -1310,6 +1701,10 @@ function saveResult(){
 }
 function showResult(blob){
   diagStage='result';
+  // A new proxy on screen means any previous live export belongs to older
+  // settings — drop it (the cached-export check below re-arms it instantly
+  // if an export for exactly these settings is already cached).
+  try{ invalidateExport('new result shown'); }catch(e){}
   // Pre-build the shareable File NOW, at generation time — the tap handler
   // must not spend its user activation constructing it.
   resultBlob=blob; resultFile=null; resultCanShare=false;
@@ -1336,16 +1731,33 @@ function showResult(blob){
   var saveRow=document.createElement('div'); saveRow.className='saveRow';
   var shareBtn=document.createElement('button'); shareBtn.type='button'; shareBtn.className='saveBtn'; shareBtn.innerHTML=ICON_SHARE+'<span>Share</span>';
   var dl=document.createElement('a'); dl.className='saveBtn'; dl.href=resultURL; dl.setAttribute('download','dance-synced.mp4'); dl.innerHTML=ICON_DL+'<span>Download</span>';
-  dl.addEventListener('click',function(){ diagStage='download'; log('Download tapped → anchor click | download attr="dance-synced.mp4" | href scheme='+(resultURL?String(resultURL).split(':')[0]+':':'none')+' | blob '+fmtBytesMB(blob.size)+' | in-iframe='+((window.self!==window.top)?'yes':'no')+' | note: blob: downloads depend on browser/iframe handling; no JS error is expected from an <a download> tap — if nothing downloads, check ENVIRONMENT section.'); });
   var openA=document.createElement('a'); openA.className='saveBtn'; openA.href=resultURL; openA.target='_blank'; openA.rel='noopener'; openA.innerHTML=ICON_OPEN+'<span>Open</span>';
-  openA.addEventListener('click',function(){ diagStage='open-video'; log('Open video tapped → opening blob URL in new tab (target=_blank) | href scheme='+(resultURL?String(resultURL).split(':')[0]+':':'none')+' | if the new tab shows a dead player, the blob URL did not survive navigation / was revoked, or the iframe sandbox blocks it — see ENVIRONMENT + RESULT sections.'); });
-  shareBtn.addEventListener('click',saveResult);
+  shareBtnEl=shareBtn; dlAnchorEl=dl; openAnchorEl=openA;
+  // If an export for exactly these settings + the selected Export quality
+  // is already cached (e.g. a restored History version), point the links
+  // at it immediately so the buttons deliver it with no re-render.
+  try{ var curSig=currentExportSignature(); var ce=exportCacheGet(curSig); if(ce){ setLiveExport(ce, curSig); } }catch(e){}
+  dl.addEventListener('click',function(ev){
+    var sig2=currentExportSignature();
+    if(liveExport&&liveExport.sig===sig2&&liveExport.url){ diagStage='download'; log('Download tapped → delivering the EXPORT file (up-to-date, no re-render) | '+fmtBytesMB(liveExport.size)+' | href scheme='+String(liveExport.url).split(':')[0]+': | download attr="dance-synced.mp4"'); return; }
+    ev.preventDefault(); diagStage='download';
+    log('Download tapped → no up-to-date export — starting Processing (full-quality export render) first; the download follows when processing finishes.');
+    ensureExport('download');
+  });
+  openA.addEventListener('click',function(ev){
+    var sig3=currentExportSignature();
+    if(liveExport&&liveExport.sig===sig3&&liveExport.url){ diagStage='open-video'; log('Open tapped → delivering the EXPORT file (up-to-date, no re-render) in a new tab | href scheme='+String(liveExport.url).split(':')[0]+':'); return; }
+    ev.preventDefault(); diagStage='open-video';
+    log('Open tapped → no up-to-date export — starting Processing (full-quality export render) first; Open follows when processing finishes (if the browser blocks the automatic open after processing, tap Open again — the export is then cached).');
+    ensureExport('open');
+  });
+  shareBtn.addEventListener('click',function(){ ensureExport('share'); });
   saveRow.appendChild(shareBtn);
   saveRow.appendChild(dl);
   saveRow.appendChild(openA);
   wrap.appendChild(saveRow);
   var guide=document.createElement('p'); guide.className='note';
-  guide.textContent='Share opens the share sheet — pick "Save Video" or "Save to Files" to keep the video. If saving fails, Open plays it full-screen, where the player\'s own share/save controls work.';
+  guide.textContent='The player above is a lightweight 480p proxy for editing. Share, Download and Open first render the full export at the selected Export quality — watch the Processing bar under the buttons — then deliver that file. In the share sheet, pick "Save Video" or "Save to Files" to keep it.';
   wrap.appendChild(guide);
   updateNewBtn();
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
@@ -1386,7 +1798,7 @@ function restoreHistory(h){
   layoutTimeline();
   log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
   var e=cacheGet(h.sig);
-  if(e){ showResult(e.blob); generatedOnce=true; log('History: video loaded from cache.'); }
+  if(e){ showResult(e.blob); generatedOnce=true; log('History: proxy preview restored instantly from cache ('+fmtSize(e.blob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
   else { h.available=false; renderHistory(); log('History: that video was evicted from the cache — settings restored; tap Generate to rebuild it.'); }
 }
 
@@ -1428,6 +1840,15 @@ function resetAll(){
   pcmCache={}; pcmPromiseCache={}; stripCache={};
   filmstripBuiltFor=null; filmstripPending=false; filmstripBuilding=false;
   // History + output cache intentionally preserved — see note above.
+  exportToken++;
+  if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
+  isExporting=false; pendingExportAction=null;
+  if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
+  liveExport=null; shareBtnEl=null; dlAnchorEl=null; openAnchorEl=null;
+  showExportProgress(false);
+  if(opfsStaged.dance) opfsDelete(opfsStaged.dance.name);
+  if(opfsStaged.song) opfsDelete(opfsStaged.song.name);
+  opfsStaged={dance:null, song:null};
   if(resultURL){ URL.revokeObjectURL(resultURL); resultURL=null; }
   resultBlob=null; resultFile=null; resultCanShare=false;
   if(danceURL){ URL.revokeObjectURL(danceURL); danceURL=null; }
@@ -1489,132 +1910,61 @@ async function doGenerate(opts){
       log('Generate: sync analysis done — building video…');
     }
     var qEl=document.querySelector('input[name=quality]:checked');
-    var q=qEl?qEl.value:'full', height=(q==='full')?0:parseInt(q,10);
+    var q=qEl?qEl.value:'full', height=(q==='full')?0:parseInt(q,10); // EXPORT quality selection — kept in the snapshot for History; NOT used by the proxy encode
     var eff=effOffset(), tStart=trimStartSec, tEnd=trimEnd(), tDur=Math.max(0,tEnd-tStart);
     if(tDur<0.5) throw new Error('Clip too short — widen the trim.');
-    var sig=settingsSignature(q,tStart,tEnd,eff,blendVal);
-    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal};
+    var sig=settingsSignature('proxy480',tStart,tEnd,eff,blendVal);
+    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal,proxySig:sig};
     var hit=cacheGet(sig);
     if(hit){
       generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
-      log('Encode skipped — cache hit for identical settings (no re-encode). Blob '+fmtBytesMB(hit.blob.size)+'.');
+      diagProxy.size=hit.blob.size; diagProxy.durationSec=0; diagProxy.backend=hit.opfsName?'OPFS':'MEMFS';
+      log('Proxy encode skipped — cache hit for identical settings (no re-encode). Proxy blob '+fmtBytesMB(hit.blob.size)+'.');
       showResult(hit.blob);
       addHistory(sig,snap,hit.blob.size);
-      log('Loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
+      log('Proxy loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
       return;
     }
     // Memory hygiene (5): before encode starts, release analysis scratch
     // (spectrograms + correlation/eval tables). PCM + settings stay.
     releaseAnalysisScratch('before encode');
-    var songStart=eff+tStart, delayMs=songStart<0?Math.round(-songStart*1000):0;
-    diagStage='encode'; diagResult.settings=snap; diagLastEncodeMilestone=-1;
-    log('Encode starts: quality='+(height?(q+'p'):'full')+' | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | signature='+sig);
-    log('Generating… '+(height?(q+'p'):'full quality')+' · offset '+eff.toFixed(3)+'s · trim '+tStart.toFixed(2)+'–'+tEnd.toFixed(2)+'s'+(blendVal>0?(' · room audio '+Math.round(blendVal*100)+'%'):''));
+    diagStage='proxy-encode'; diagResult.settings=snap; diagLastEncodeMilestone=-1;
+    log('Proxy render starts: max height 480p · fast encode (libx264 ultrafast) | audio pipeline identical to export (detected offset incl. negative-offset room-audio gap fill, trims, room blend, audio exactly the video duration) | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | proxy signature='+sig);
+    log('Generating proxy preview… 480p · offset '+eff.toFixed(3)+'s · trim '+tStart.toFixed(2)+'–'+tEnd.toFixed(2)+'s'+(blendVal>0?(' · room audio '+Math.round(blendVal*100)+'%'):''));
+    log('Export quality selected: '+(height?(q+'p'):'Full')+' — no full-quality render happens during editing; the export renders on demand from Share/Download/Open.');
     markStepActive(4);
-    var ff=await cancellable(ensureFFmpeg(function(ratio){ if(ratio!=null){ progressForGenerate(ratio); var m=Math.floor(ratio*10)*10; if(m>diagLastEncodeMilestone){ diagLastEncodeMilestone=m; log('Encode progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } } }));
+    await detectStorageBackend();
+    if(diagStorage.opfsAvailable&&!opfsStaged.dance){ try{ await opfsStageInput(danceFile,'dance'); }catch(e){} }
+    if(diagStorage.opfsAvailable&&!opfsStaged.song){ try{ await opfsStageInput(songFile,'song'); }catch(e){} }
+    var renderT0=Date.now();
+    var ff=await cancellable(ensureFFmpeg(function(ratio){ if(ratio!=null){ progressForGenerate(ratio); var m=Math.floor(ratio*10)*10; if(m>diagLastEncodeMilestone){ diagLastEncodeMilestone=m; log('Proxy encode progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } } }));
+    await tryMountOPFS(ff);
+    var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
+    diagStorage.lastInputs=inputsBackendLabel();
     var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
     var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
-    log('Generate: writing files to converter ('+fmtSize(danceFile.size)+' + '+fmtSize(songFile.size)+')…');
-    await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(danceFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter');
-    await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(songFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
-    var args=['-y'];
-    if(tStart>0) args.push('-ss',tStart.toFixed(3));
-    if(tDur>0) args.push('-t',tDur.toFixed(3));
-    args.push('-i','dance.'+dExt);
-    if(songStart>0) args.push('-ss',songStart.toFixed(3));
-    args.push('-i','song.'+sExt);
-    var fc=[];
-    if(height) fc.push('[0:v]scale=-2:min('+height+'\\,ih)[v]');
-    var gapSec=songStart<0?-songStart:0;
-    if(gapSec>0){
-      // NEGATIVE effective offset: the clean audio begins gapSec into the
-      // clip (its input got NO -ss above; adelay shifts it into place).
-      // The leading gap has no clean audio at all, so it is filled with
-      // the video's own original audio at full level — regardless of the
-      // room-blend slider, which keeps its usual meaning once the clean
-      // audio exists. Built as two concatenated segments: [0,gap) room at
-      // full level, then [gap,tDur) clean (+ room at blend level).
-      log('Encode: negative offset — clean audio begins '+gapSec.toFixed(3)+'s into the clip; leading gap filled with the video\'s original audio at full level'+(blendVal>0?(' · room blend '+Math.round(blendVal*100)+'% applies after the gap'):'')+'.');
-      if(gapSec>=tDur){
-        fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[a]');
-      } else {
-        fc.push('[1:a]adelay='+delayMs+'|'+delayMs+',apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
-        fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[room]');
-        if(blendVal>0){
-          fc.push('[room]asplit=2[roomGap][roomTailSrc]');
-          fc.push('[roomGap]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
-          fc.push('[roomTailSrc]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+',asetpts=N/SR/TB[roomTail]');
-          fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[cleanTail]');
-          fc.push('[cleanTail][roomTail]amix=inputs=2:duration=first:normalize=0[tail]');
-        } else {
-          fc.push('[room]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
-          fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[tail]');
-        }
-        fc.push('[gapA][tail]concat=n=2:v=0:a=1,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
-      }
-    } else {
-      // Positive offset: current path untouched (-ss on the clean input).
-      fc.push('[1:a]'+(delayMs>0?('adelay='+delayMs+'|'+delayMs+','):'')+'apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
-      if(blendVal>0){
-        fc.push('[clean]volume=1.0[cleanv]');
-        fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+'[room]');
-        fc.push('[cleanv][room]amix=inputs=2:duration=first:normalize=0,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
-      }
-    }
-    args.push('-filter_complex', fc.join(';'));
-    args.push('-map', height?'[v]':'0:v:0', '-map', (blendVal>0||gapSec>0)?'[a]':'[clean]');
-    if(height) args.push('-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p'); else args.push('-c:v','copy');
-    args.push('-c:a','aac','-b:a','192k');
-    if(tDur>0) args.push('-t',tDur.toFixed(3));
-    args.push('dance-synced.mp4');
-    // Audio guarantee: filter trims/pads clean (and room) audio to exactly tDur,
-    // and the output -t tDur above caps both streams — no audio can outlive the video.
-    setBarPct(66); // event: encode starts (ffmpeg progress then interpolates 66% -> 97%)
-    log('Encode exec: ffmpeg args='+args.join(' '));
-    await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating video from '+danceFile.name); }));
-    log('Encode ends: ffmpeg exec resolved — freeing inputs from converter FS before reading output…');
-    // Memory hygiene (1): peak-memory cut. Before readFile duplicates the
-    // output into JS, free BOTH inputs + any temp WAV/strip files from the
-    // wasm FS. In the crash case that was ~396 MB held for no reason while
-    // a ~290 MB output was read out and blobbed (FS 686 MB + JS copy +
-    // Blob copy > 1.2 GB → iOS tab OOM-kill at ~97%).
-    var freedBytes=0;
-    var fsCleanup=[
-      {name:'dance.'+dExt, size:danceFile.size, label:'input video'},
-      {name:'song.'+sExt, size:songFile.size, label:'input audio'},
-      {name:'out.wav', size:null, label:'temp WAV'},
-      {name:'in.'+dExt, size:null, label:'temp decode input'},
-      {name:'in.'+sExt, size:null, label:'temp decode input'},
-      {name:'strip.'+dExt, size:null, label:'temp filmstrip input'},
-      {name:'strip.'+sExt, size:null, label:'temp filmstrip input'}
-    ];
-    for(var ti=0;ti<10;ti++) fsCleanup.push({name:'tile'+ti+'.png', size:null, label:'temp filmstrip tile'});
-    var seenCleanup={};
-    for(var ci2=0;ci2<fsCleanup.length;ci2++){
-      var ce=fsCleanup[ci2];
-      if(seenCleanup[ce.name]) continue; seenCleanup[ce.name]=true;
-      if(ce.name==='dance-synced.mp4') continue;
-      try{ var delRes=await ff.deleteFile(ce.name); if(delRes===false) continue; log('memory: deleted FS '+ce.label+' '+ce.name+(ce.size!=null?(' ('+fmtBytesMB(ce.size)+')'):'')); if(ce.size) freedBytes+=ce.size; }catch(delErr){}
-    }
-    log('memory: inputs freed ('+(freedBytes/1048576).toFixed(1)+' MB)');
-    // Memory hygiene (2): read output, then immediately delete its FS copy.
-    var data=await ff.readFile('dance-synced.mp4'); if(!data||!data.length) throw new Error('Empty output file.');
-    var outputBytes=data.length||data.byteLength||0;
-    try{ await ff.deleteFile('dance-synced.mp4'); log('memory: deleted FS output dance-synced.mp4 ('+fmtBytesMB(outputBytes)+')'); }catch(delOutErr){ log('memory: FS output delete failed: '+(delOutErr.message||delOutErr)); }
-    log('memory: output read ('+(outputBytes/1048576).toFixed(1)+' MB), FS copy deleted');
-    // Memory hygiene (3): Blob directly from the readFile bytes (single
-    // copy — no intermediate Uint8Array copy), then drop the intermediate
-    // reference BEFORE showResult creates the object URL / video src.
-    var blob=new Blob([data],{type:'video/mp4'});
-    data=null;
-    log('memory: blob created ('+fmtBytesMB(blob.size)+') — readFile bytes reference dropped before object URL creation');
+    log('Generate: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+    await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter');
+    await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
+    var args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true});
+    setBarPct(66); // event: proxy encode starts (ffmpeg progress then interpolates 66% -> 97%)
+    log('Proxy encode exec: ffmpeg args='+args.join(' '));
+    await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating proxy video from '+danceFile.name); }));
+    log('Proxy encode ends: ffmpeg exec resolved — freeing inputs from converter FS before reading output…');
+    await freeConverterInputs(ff,dExt,sExt);
+    var outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
+    var blob=outRes.blob;
+    diagStorage.lastOutput=outRes.backend; diagProxy.size=blob.size; diagProxy.durationSec=Number(((Date.now()-renderT0)/1000).toFixed(2)); diagProxy.backend=outRes.backend;
+    log('storage: inputs='+diagStorage.lastInputs+' output='+outRes.backend+(outRes.backend==='OPFS'?'':' | storage: fallback=MEMFS'));
+    log('Proxy render: size='+fmtBytesMB(blob.size)+' | duration='+((Date.now()-renderT0)/1000).toFixed(1)+'s | max height 480p · fast encode');
     log('Encode output: blob '+fmtBytesMB(blob.size)+' type='+(blob.type||'video/mp4'));
     var secs=((Date.now()-t0)/1000).toFixed(1);
     generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
-    cachePut(sig,{blob:blob});
+    cachePut(sig,{blob:blob, opfsName:outRes.opfsName});
+    await refreshStorageEstimate();
     showResult(blob);
     addHistory(sig,snap,blob.size);
-    log('Done — '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video)');
+    log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Share, Download or Open.');
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
     else { console.error(err); logError('generate',err); log('❌ Generate failed: '+(err.message||err)); showError('❌ Generate failed: '+(err.message||err)); }
@@ -1678,6 +2028,7 @@ try{
   log('ENV PROBE (load): iframe=' + diagEnvAtLoad.inIframe + ' | origin=' + diagEnvAtLoad.locationOrigin + ' | crossOriginIsolated=' + diagEnvAtLoad.crossOriginIsolated + ' | SharedArrayBuffer=' + diagEnvAtLoad.sharedArrayBufferType + ' | DecompressionStream=' + diagEnvAtLoad.decompressionStreamType + ' | share=' + diagEnvAtLoad.sharePresent + ' | canShare=' + diagEnvAtLoad.canSharePresent + ' test: ' + diagEnvAtLoad.canShareTest + ' | downloadAttr=' + diagEnvAtLoad.downloadAttrSupport + ' | VideoDecoder=' + diagEnvAtLoad.videoDecoderType + ' | touchPoints=' + diagEnvAtLoad.maxTouchPoints);
   log('Page ready — Video/Audio Syncer diagnostics active. Tap Details → Copy diagnostics after any failure and paste the whole dump back.');
 }catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
+try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
 try{
   window.addEventListener('error',function(ev){ try{ var er=ev.error||new Error(ev.message||'window error'); logError('window-error',er); }catch(_){} });
