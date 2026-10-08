@@ -825,23 +825,35 @@ function setupDrop(dropId,inputId,which){
   ['dragenter','dragover'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.add('over')})});
   ['dragleave','drop'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('over')})});
   drop.addEventListener('drop',function(e){ var f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) handleFile(f,which); });
-  input.addEventListener('change',function(){ if(input.files[0]) handleFile(input.files[0],which); });
+  input.addEventListener('change',function(){ var f=input.files&&input.files[0]; if(f){ handleFile(f,which); try{ input.value=''; }catch(e){} } });
+}
+var autoStartScheduled=false, pendingRestartPollActive=false, pipelineActiveVersion=-1;
+function scheduleAutoPipeline(reason){
+  if(autoStartScheduled) return;
+  autoStartScheduled=true;
+  setTimeout(function(){
+    autoStartScheduled=false;
+    if(!danceFile||!songFile) return;
+    runAutoPipeline();
+  },40);
 }
 function schedulePendingRestartPoll(){
+  if(pendingRestartPollActive) return;
+  pendingRestartPollActive=true;
   var n=0;
   var iv=setInterval(function(){
     n++;
-    if(!pipelineRestartPending){ clearInterval(iv); return; }
-    if(n>240){ clearInterval(iv); pipelineRestartPending=false; return; }
+    if(!pipelineRestartPending){ clearInterval(iv); pendingRestartPollActive=false; return; }
+    if(n>240){ clearInterval(iv); pendingRestartPollActive=false; pipelineRestartPending=false; return; }
     if(!danceFile||!songFile) return;
     var busy=false;
     try{ busy=!!(pipelineRunning||isGenerating||isExporting||analysisState==="running"); }catch(e){}
     if(busy) return;
     pipelineRestartPending=false;
-    clearInterval(iv);
+    clearInterval(iv); pendingRestartPollActive=false;
     if(analysisState!=="idle"){ analysisState="idle"; analysisPromise=null; }
     try{ autoGenForVersion=-1; }catch(e){}
-    runAutoPipeline();
+    scheduleAutoPipeline('pending-restart-poll');
   },100);
 }
 function handleFile(f,which){
@@ -909,7 +921,7 @@ function handleFile(f,which){
 function checkReady(){
   updateApplyEditsState();
   if(danceDur>0){ if(generatedOnce) $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); }
-  if(danceFile&&songFile&&analysisState==="idle"){ runAutoPipeline(); }
+  if(danceFile&&songFile&&analysisState==="idle"){ scheduleAutoPipeline('checkReady'); }
 }
 setupDrop('dropDance','fileDance','dance');
 setupDrop('dropSong','fileSong','song');
@@ -1343,6 +1355,11 @@ function runAnalysis(){
       }
       detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(50,'Generating'); markStepDone(3); markStepActive(4); // event: fine offset ends
       log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
+      if(!(confidence>=0.10)){
+        log('Confidence gate: verified confidence '+confidence.toFixed(4)+' is below the 0.10 floor — analysis FAILED; no result will be presented and no History version will be stored.');
+        throw new Error('Sync analysis failed');
+      }
+      log('Confidence gate: verified confidence '+confidence.toFixed(4)+' meets the 0.10 floor — analysis accepted.');
       analysisState="done"; analysisVersion=ver;
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
       // The Preview block (header, subheading, player, Share/Download/Open)
@@ -2938,9 +2955,38 @@ function showResult(blob, opts){
 function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
 var historyCounter=0; // sequential Video N numbering — survives New/resets
 var VERSIONS_KEEP=5; // stored version videos kept in OPFS — older entries degrade to settings-only
+var HISTORY_INDEX_KEY='dance-sync.history-index.v1';
+function persistHistoryIndex(){
+  try{
+    var data={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
+      return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:!!h.available, settingsOnly:!h.versionFile, versionFile:h.versionFile||null, payloadSize:(h.payloadSize!=null?h.payloadSize:null), blobType:h.blobType||null};
+    })};
+    localStorage.setItem(HISTORY_INDEX_KEY, JSON.stringify(data));
+  }catch(e){}
+}
+function restoreHistoryIndex(){
+  try{
+    var raw=localStorage.getItem(HISTORY_INDEX_KEY);
+    if(!raw) return;
+    var parsed=JSON.parse(raw);
+    if(!parsed||!Array.isArray(parsed.entries)) return;
+    var restored=[];
+    parsed.entries.forEach(function(pe){
+      if(!pe||typeof pe.num!=='number'||!pe.snap) return;
+      var hasPayload=!!pe.versionFile;
+      restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(pe.payloadSize||0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, versionFile:pe.versionFile||null, payloadSize:(pe.payloadSize!=null?pe.payloadSize:null), blobType:pe.blobType||null, settingsOnly:!hasPayload});
+    });
+    historyEntries.length=0;
+    restored.forEach(function(h){ historyEntries.push(h); });
+    var maxNum=0; restored.forEach(function(h){ if(h.num>maxNum) maxNum=h.num; });
+    historyCounter=Math.max((typeof parsed.counter==='number'?parsed.counter:0), maxNum);
+    log('History: restored '+restored.length+' entries from saved index');
+    renderHistory();
+  }catch(e){ try{ log('History: failed to restore saved index: '+(e.message||e)); }catch(_){} }
+}
 function addHistory(sig,snap,size,available,blob){
   historyCounter++;
-  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, versionFile:null, payloadSize:null};
+  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, versionFile:null, payloadSize:null, blobType:blob?(blob.type||'video/mp4'):null, settingsOnly:!blob};
   historyEntries.unshift(entry);
   if(available===false&&!blob) log('History: entry stored without its video payload (size '+fmtBytesMB(size)+' exceeds the History cache caps — max '+MAX_OUTPUTS+' outputs / '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — restore requires re-generate.');
   // A completed apply/generation becomes the applied-settings snapshot:
@@ -2972,7 +3018,7 @@ function storeVersionPayload(entry, blob){
       for(var i=0;i<historyEntries.length;i++){
         var o=historyEntries[i];
         if(o!==entry&&o.sig===entry.sig&&o.versionFile){
-          entry.versionFile=o.versionFile; entry.payloadSize=o.payloadSize||blob.size; entry.available=true;
+          entry.versionFile=o.versionFile; entry.payloadSize=o.payloadSize||blob.size; entry.blobType=o.blobType||entry.blobType||(blob.type||'video/mp4'); entry.available=true; entry.settingsOnly=false;
           log('Version '+entry.num+': identical settings already stored as '+o.versionFile+' — reusing that stored video ('+fmtBytesMB(entry.payloadSize)+').');
           renderHistory();
           return;
@@ -2998,8 +3044,10 @@ function storeVersionPayload(entry, blob){
       }catch(we){ try{ await writable.abort(); }catch(_){} throw we; }
       entry.versionFile='versions/'+name;
       entry.payloadSize=blob.size;
+      entry.blobType=blob.type||entry.blobType||'video/mp4';
       entry.available=true;
-      log('Version '+entry.num+' stored: '+blob.size+' bytes → OPFS versions/'+name);
+      entry.settingsOnly=false;
+      log('Version '+entry.num+' stored: '+blob.size+' bytes → OPFS versions/'+name+' | blob type='+(entry.blobType||'video/mp4'));
       renderHistory();
       await evictOldVersionPayloads();
       try{ await refreshStorageEstimate(); }catch(e){}
@@ -3017,7 +3065,7 @@ async function evictOldVersionPayloads(){
   var evict=withPayload.slice(VERSIONS_KEEP); // historyEntries is newest-first
   for(var i=0;i<evict.length;i++){
     var h=evict[i], fname=h.versionFile;
-    h.versionFile=null; h.payloadSize=null;
+    h.versionFile=null; h.payloadSize=null; h.settingsOnly=true;
     if(!outCache.has(h.sig)) h.available=false;
     log('Version '+h.num+' payload evicted — keeping only the newest '+VERSIONS_KEEP+' stored version videos; this entry is now settings-only (restore requires re-generate).');
     var stillUsed=historyEntries.some(function(x){ return x.versionFile===fname; });
@@ -3036,16 +3084,19 @@ function loadVersionPayload(h){
       if(!ok||!opfsRoot) throw new Error('OPFS unavailable: '+diagStorage.note);
       var dir=await opfsRoot.getDirectoryHandle('versions');
       var handle=await dir.getFileHandle(h.versionFile.split('/').pop());
-      var file=await handle.getFile();
-      if(!file||!file.size) throw new Error('the stored version file is empty');
-      log('Version '+h.num+' restored from storage: OPFS '+h.versionFile+' ('+file.size+' bytes) loaded into the Preview.');
+      var rawFile=await handle.getFile();
+      if(!rawFile||!rawFile.size) throw new Error('the stored version file is empty');
+      var restoredType=h.blobType||'video/mp4';
+      var file=null;
+      try{ file=new File([rawFile], rawFile.name||('v'+h.num+'.mp4'), {type:restoredType}); }catch(fe){ file=new Blob([rawFile], {type:restoredType}); }
+      log('Version '+h.num+' restored from storage: OPFS '+h.versionFile+' — restored blob type='+restoredType+' size='+file.size+' bytes (raw stored file type='+(rawFile.type||'(empty)')+' size='+rawFile.size+' bytes) loaded into the Preview.');
       generatedOnce=true;
       try{ cachePut(h.sig,{blob:file, opfsName:null}); }catch(e){}
       showResult(file,{isDirect:!!(h.snap&&h.snap.isDirect)});
       if(h.snap&&h.snap.isDirect){ log('History: restored version is a direct export — Share/Download/Open deliver this stored file.'); }
     }catch(e){
       logError('version-restore',e);
-      h.versionFile=null; h.payloadSize=null; h.available=false; renderHistory();
+      h.versionFile=null; h.payloadSize=null; h.settingsOnly=true; h.available=false; renderHistory();
       log('Version '+h.num+': the stored video could not be loaded ('+(e.message||e)+') — settings restored; restore requires re-generate — tap Apply edits to rebuild it.');
     }
   })();
@@ -3061,6 +3112,7 @@ function renderHistory(){
     b.addEventListener('click',function(){ restoreHistory(h); });
     list.appendChild(b);
   });
+  persistHistoryIndex();
 }
 function restoreHistory(h){
   var s=h.snap;
@@ -3084,7 +3136,7 @@ function restoreHistory(h){
   else { appliedSnapshot=null; }
   updateApplyEditsState();
   var e=cacheGet(h.sig);
-  if(e){ var isDir=!!(s.isDirect); showResult(e.blob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(e.blob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(e.blob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
+  if(e){ var isDir=!!(s.isDirect); var rawBlob=e.blob; var effType=h.blobType||rawBlob.type||'video/mp4'; var useBlob=rawBlob; if(rawBlob.type!==effType){ try{ useBlob=new Blob([rawBlob],{type:effType}); }catch(be){ useBlob=rawBlob; } } log('History: restored blob type='+effType+' size='+useBlob.size+' bytes (cached blob type='+(rawBlob.type||'(empty)')+' size='+rawBlob.size+' bytes).'); showResult(useBlob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(useBlob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
   else if(h.versionFile){ loadVersionPayload(h); }
   else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
 }
@@ -3440,10 +3492,11 @@ $('btnCancel').addEventListener('click', function(){
 });
 async function runAutoPipeline(){
   if(!danceFile||!songFile) return;
-  if(pipelineRunning||isGenerating||isExporting){ pipelineRestartPending=true; return; }
+  if(pipelineRunning||isGenerating||isExporting){ if(filesVersion!==pipelineActiveVersion) pipelineRestartPending=true; return; }
   pipelineRestartPending=false;
   if(autoGenForVersion===filesVersion) return;
   var ver=filesVersion;
+  pipelineActiveVersion=ver;
   pipelineRunning=true;
   runToken++; newCancelSignal();
   try{
@@ -3472,12 +3525,18 @@ async function runAutoPipeline(){
     if(!isGenerating){ stopRunClock(); setCancelVisible(false); }
     flushFilmstrip();
     // A file change during this run queued a restart: start the pipeline
-    // again with the new files now that this run has unwound.
+    // again with the new files now that this run has unwound. Coalesced
+    // through scheduleAutoPipeline so the pending-restart poll and this
+    // finally block cannot both start a second run for the same files.
     if(pipelineRestartPending&&danceFile&&songFile&&!isGenerating&&!isExporting){
       pipelineRestartPending=false;
-      if(analysisState!=="idle"){ analysisState="idle"; analysisPromise=null; }
-      autoGenForVersion=-1;
-      setTimeout(function(){ runAutoPipeline(); },30);
+      if(autoGenForVersion===filesVersion){
+        log('Auto pipeline: duplicate restart trigger coalesced — current files already generated; not re-running.');
+      } else {
+        if(analysisState!=="idle"){ analysisState="idle"; analysisPromise=null; }
+        autoGenForVersion=-1;
+        scheduleAutoPipeline('pipeline-restart');
+      }
     }
   }
 }
@@ -3487,6 +3546,7 @@ try{
   log('ENV PROBE (load): iframe=' + diagEnvAtLoad.inIframe + ' | origin=' + diagEnvAtLoad.locationOrigin + ' | crossOriginIsolated=' + diagEnvAtLoad.crossOriginIsolated + ' | SharedArrayBuffer=' + diagEnvAtLoad.sharedArrayBufferType + ' | DecompressionStream=' + diagEnvAtLoad.decompressionStreamType + ' | share=' + diagEnvAtLoad.sharePresent + ' | canShare=' + diagEnvAtLoad.canSharePresent + ' test: ' + diagEnvAtLoad.canShareTest + ' | downloadAttr=' + diagEnvAtLoad.downloadAttrSupport + ' | VideoDecoder=' + diagEnvAtLoad.videoDecoderType + ' | touchPoints=' + diagEnvAtLoad.maxTouchPoints);
   log('Page ready — Video/Audio Syncer diagnostics active. Tap Details → Copy diagnostics after any failure and paste the whole dump back.');
 }catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
+try{ restoreHistoryIndex(); }catch(e){ try{ logError('history-restore-startup',e); }catch(_){} }
 try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
 // Global 'error' / 'unhandledrejection' handlers are registered once,
