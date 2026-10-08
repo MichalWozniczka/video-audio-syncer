@@ -239,7 +239,7 @@ var dancePCM=null, songPCM=null;
 var danceDur=0, songDur=0;
 var restoredDur=0, restoredSongDur=0; // source durations carried by a History entry's metadata — used to display the editor (trim/offset readouts, offset input) after a post-reload restore, when no source files are loaded and danceDur/songDur are still 0
 var restoreNeedsSources=false; // true after a post-reload History restore (no source files): timeline dragging + Re-sync disabled, Apply edits disabled, and the editor shows the re-upload note until the sources are uploaded again
-var pendingRestoreCtx=null; // offset context of a History version restored with NO source files loaded: {eff, detected (nullable), sig}. handleFile zeroes detectedOffset/audioPos on re-upload, so without this stash the restored version's true additional offset (eff − detected) is destroyed before detection re-runs — and if the effective offset were ever re-interpreted AS the additional offset, applying an edit would double-apply the detected offset (eff + detected). runAnalysis consumes this on its next successful detection for the same file pair and re-establishes audioPos from (new detected + true additional) — never from the raw effective value.
+var pendingRestoreCtx=null; // FULL settings context of a History version restored with NO source files loaded: {eff, detected (nullable), sig, tStart, tEnd, blend, q}. handleFile zeroes detectedOffset/audioPos AND resets the trim to full range on re-upload, so without this stash the restored version's true additional offset (eff − detected) is destroyed before detection re-runs — and if the effective offset were ever re-interpreted AS the additional offset, applying an edit would double-apply the detected offset (eff + detected) — and the restored trim/blend/export quality are silently dropped the same way. runAnalysis consumes this on its next successful detection for the same file pair: it re-establishes audioPos from (new detected + true additional) — never from the raw effective value — and carries the restored trim start/end, blend, and export quality into the run, so a re-upload of the restored version's own sources makes it editable WITHOUT dropping any of its settings. Only a deliberate user edit after the re-upload changes them.
 var detectedOffset=0;
 var trimStartSec=0, trimEndSec=null; // null = full duration
 var baseTrimStart=0, baseTrimEnd=null; // trim of the restored/last-generated version; readouts compose against it when it differs from full range
@@ -1404,8 +1404,15 @@ function runAnalysis(){
       // new detected), which lands the position exactly on the restored
       // effective offset. Either way the Additional offset input ends
       // up holding the true additional offset once layoutTimeline syncs
-      // it below. A stash for a DIFFERENT file pair is dropped: those
-      // files start fresh at the detected offset, additional 0.
+      // it below. The SAME match also carries the restored version's
+      // FULL remaining settings into the run — trim start/end, blend,
+      // and export quality — undoing handleFile's full-range trim
+      // reset, so the generation that follows runs with the restored
+      // version's settings intact (a restore promises its settings;
+      // re-uploading the sources to make it editable must not silently
+      // drop part of them). A stash for a DIFFERENT file pair is
+      // dropped: those files start fresh at the detected offset,
+      // additional 0, full-range trim, and the current blend/quality.
       if(pendingRestoreCtx){
         var prc=pendingRestoreCtx; pendingRestoreCtx=null;
         var pairPrefix=fileKey(danceFile)+'|'+fileKey(songFile)+'|';
@@ -1413,8 +1420,32 @@ function runAnalysis(){
           var trueDelta=(prc.detected!=null)?(prc.eff-prc.detected):(prc.eff-detectedOffset);
           audioPos=-(detectedOffset+trueDelta);
           log('Restored offset context normalized after re-upload: re-detected offset '+detectedOffset.toFixed(3)+'s · restored version effective offset '+prc.eff.toFixed(3)+'s'+(prc.detected!=null?(' · its recorded detected offset '+prc.detected.toFixed(3)+'s'):' · its metadata carried no detected offset, derived against this detection')+' → additional offset '+(trueDelta>=0?'+':'')+trueDelta.toFixed(3)+'s, effective offset '+effOffset().toFixed(3)+'s. The detected offset is applied exactly once.');
+          // FULL-SETTINGS CARRY: the offset is only one of the restored
+          // version's settings. handleFile reset the trim to full
+          // range when the sources were re-uploaded; restore the
+          // version's trim (composed against the same base restore
+          // used), its blend, and its export quality, so the run that
+          // follows uses the restored settings in full. These are
+          // applied here — after detection, before any generation
+          // reads them — and from here on only a deliberate user edit
+          // changes them.
+          if(typeof prc.tStart==='number'&&isFinite(prc.tStart)&&typeof prc.tEnd==='number'&&isFinite(prc.tEnd)){
+            trimStartSec=(danceDur>0)?clamp(prc.tStart,0,Math.max(0,danceDur-0.5)):prc.tStart;
+            trimEndSec=(danceDur>0&&prc.tEnd>=danceDur-0.01)?null:prc.tEnd;
+            baseTrimStart=prc.tStart; baseTrimEnd=prc.tEnd;
+          }
+          if(typeof prc.blend==='number'&&isFinite(prc.blend)){
+            blendVal=prc.blend;
+            var blEl=$('blend'); if(blEl) blEl.value=Math.round(prc.blend*100);
+            var blVal=$('blendVal'); if(blVal) blVal.textContent=Math.round(prc.blend*100)+'%';
+          }
+          if(prc.q){
+            var qCarry=document.querySelector('input[name=quality][value="'+prc.q+'"]'); if(qCarry) qCarry.checked=true;
+            try{ updatePreviewSub(); }catch(e){}
+          }
+          log('Restored settings carried into the re-uploaded run: trim '+trimStartSec.toFixed(2)+'–'+trimEnd().toFixed(2)+'s · blend '+Math.round(blendVal*100)+'% · export quality '+(prc.q==='full'?'Full':(prc.q?prc.q+'p':'(unchanged)'))+' · additional offset '+(trueDelta>=0?'+':'')+trueDelta.toFixed(3)+'s — the restored version\'s FULL settings (trim, blend, export quality, additional offset, with the detected offset re-derived from this analysis and applied exactly once) carry into the next generation; only a deliberate edit from here changes them.');
         } else {
-          log('Restored offset context dropped: the re-uploaded files are not the restored version\'s file pair — starting fresh at the detected offset (additional offset 0.000s).');
+          log('Restored offset context dropped: the re-uploaded files are not the restored version\'s file pair — starting fresh at the detected offset (additional offset 0.000s), full-range trim, and the current blend/export quality; none of the restored version\'s settings carry over.');
         }
       }
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
@@ -3308,6 +3339,48 @@ function loadVersionPayload(h){
     }
   })();
 }
+// ---------- cache-hit generation embed (stored OPFS File) ----------
+// When a generation resolves via cache hit / identical-settings dedupe,
+// the payload already lives in the OPFS versions store — that is WHY
+// it is a cache hit: an earlier History entry with this exact
+// signature owns (or shares) the stored file. The result MUST be
+// embedded from that stored File, with the exact same construction as
+// a History restore (loadVersionPayload above) and a fresh OPFS-backed
+// generation: handle.getFile() handed straight to showResult — no
+// re-wrap, no type override. A cache-hit generation used to hand
+// showResult the in-memory cached blob instead, and the player
+// rejected it (code 4 MEDIA_ELEMENT_ERROR) while restoring the same
+// entry from History — the stored-File embed of the identical bytes —
+// played perfectly. After this change the in-memory cached blob is
+// never handed to the player on ANY path (a fresh generation embeds
+// its render output, a cache-hit generation embeds the stored File, a
+// restore embeds the stored File); the cached blob remains only a
+// Share/Download delivery object. Falls back to the cached-blob embed
+// ONLY when no stored payload exists for the signature at all (e.g.
+// OPFS was unavailable when the original was generated — the same
+// payload-less policy the restore routing uses for proxy entries).
+async function embedStoredVersionForGeneration(sig,isDirect){
+  try{
+    var path=null, num=null;
+    for(var i=0;i<historyEntries.length;i++){
+      var he=historyEntries[i];
+      if(he&&he.sig===sig){ var p=payloadPathOf(he); if(p){ path=p; num=he.num; break; } }
+    }
+    if(!path) return false;
+    var ok=await detectStorageBackend();
+    if(!ok||!opfsRoot) return false;
+    var dir=await opfsRoot.getDirectoryHandle('versions');
+    var handle=await dir.getFileHandle(path.split('/').pop());
+    var rawFile=await handle.getFile();
+    if(!rawFile||!rawFile.size) return false;
+    log('Generation resolved via cache hit — embedding the stored OPFS File '+path+' ('+rawFile.size+' bytes, stored type='+(rawFile.type||'(empty)')+') as the result, identical in construction to a History restore of Version '+num+' and to a fresh OPFS-backed generation (no re-wrap, no type override). The in-memory cached blob is NOT handed to the player; it remains only a Share/Download delivery object.');
+    showResult(rawFile,{isDirect:!!isDirect});
+    return true;
+  }catch(e){
+    try{ log('Generation cache hit: the stored OPFS File for these settings could not be loaded ('+(e.message||e)+') — falling back to the cached-blob embed.'); }catch(_){}
+    return false;
+  }
+}
 function renderHistory(){
   var wrap=$('historyWrap'), list=$('historyList'); if(!wrap||!list) return;
   wrap.classList.toggle('show',historyEntries.length>0);
@@ -3339,18 +3412,22 @@ function restoreHistory(h){
   // their trim end as the duration.
   var sourcesAbsent=!(danceFile&&songFile);
   if(typeof s.detected==='number'&&isFinite(s.detected)) detectedOffset=s.detected;
-  // Offset-context preservation for the re-upload flow (Question 3):
+  // Full-settings preservation for the re-upload flow (Question 3):
   // with no sources loaded, stash this version's effective offset, its
   // own detected offset (null when the entry's metadata predates it),
-  // and its signature. Re-uploading files zeroes detectedOffset and
-  // audioPos (handleFile); when detection re-runs for the same file
-  // pair, runAnalysis consumes this stash and re-establishes the
-  // position as (new detected + TRUE additional offset) — the restored
-  // effective value is never re-interpreted as the additional offset,
-  // so the detected offset can never be double-applied. A restore WITH
-  // sources loaded needs no stash: the editor state is already live
-  // and consistent.
-  pendingRestoreCtx=sourcesAbsent?{eff:s.eff, detected:(typeof s.detected==='number'&&isFinite(s.detected))?s.detected:null, sig:h.sig||''}:null;
+  // its signature, AND its trim start/end, blend, and export quality.
+  // Re-uploading files zeroes detectedOffset and audioPos and resets
+  // the trim to full range (handleFile); when detection re-runs for
+  // the same file pair, runAnalysis consumes this stash and
+  // re-establishes the position as (new detected + TRUE additional
+  // offset) — the restored effective value is never re-interpreted as
+  // the additional offset, so the detected offset can never be
+  // double-applied — and carries the trim, blend, and export quality
+  // into the run. A restore promises the version's settings;
+  // re-uploading its sources to make it editable must not silently
+  // drop any of them. A restore WITH sources loaded needs no stash:
+  // the editor state is already live and consistent.
+  pendingRestoreCtx=sourcesAbsent?{eff:s.eff, detected:(typeof s.detected==='number'&&isFinite(s.detected))?s.detected:null, sig:h.sig||'', tStart:s.tStart, tEnd:s.tEnd, blend:s.blend, q:s.q}:null;
   restoredDur=(typeof s.srcDur==='number'&&isFinite(s.srcDur)&&s.srcDur>0)?s.srcDur:(s.tEnd||0);
   restoredSongDur=(typeof s.songDur==='number'&&isFinite(s.songDur)&&s.songDur>0)?s.songDur:0;
   trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
@@ -3560,7 +3637,12 @@ async function doGenerate(opts){
         var dHitOpfs=(dHitOut||dHitExp).opfsName||null;
         if(!dHitOut&&dHitBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dHitBlob, opfsName:null}); }catch(e){} }
         if(!dHitExp){ try{ exportCachePut(exportSig,{blob:dHitBlob, opfsName:dHitOpfs, q:q}); }catch(e){} }
-        showResult(dHitBlob,{isDirect:true});
+        // CACHE-HIT EMBED: embed the result from the stored OPFS File
+        // for these settings (identical construction to a History
+        // restore) — never the in-memory cached blob, which the player
+        // rejects on this path (code 4) while the stored File plays.
+        var dEmbedded=await embedStoredVersionForGeneration(exportSig,true);
+        if(!dEmbedded) showResult(dHitBlob,{isDirect:true});
         addHistory(exportSig,snap,dHitBlob.size, dHitBlob.size<=MAX_CACHE_BYTES, dHitBlob);
         log('Direct export loaded from cache — identical settings, no re-render. ('+fmtSize(dHitBlob.size)+')');
         try{ journalMarkCompleted(true); }catch(e){}
@@ -3596,7 +3678,11 @@ async function doGenerate(opts){
       generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
       diagProxy.size=hit.blob.size; diagProxy.durationSec=0; diagProxy.backend=hit.opfsName?'OPFS':'MEMFS';
       log('Proxy encode skipped — cache hit for identical settings (no re-encode). Proxy blob '+fmtBytesMB(hit.blob.size)+'.');
-      showResult(hit.blob);
+      // CACHE-HIT EMBED: same rule as the direct path above — the
+      // result is embedded from the stored OPFS File for these
+      // settings, never the in-memory cached blob.
+      var pEmbedded=await embedStoredVersionForGeneration(sig,false);
+      if(!pEmbedded) showResult(hit.blob);
       addHistory(sig,snap,hit.blob.size,true,hit.blob);
       log('Proxy loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
       try{ journalMarkCompleted(true); }catch(e){}
