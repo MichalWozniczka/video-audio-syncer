@@ -251,7 +251,7 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:''};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
@@ -665,6 +665,7 @@ function buildDiagnosticsText(){
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
       'mount (last render): '+diagStorage.mountNote,
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'),
+      'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
       'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'n/a')+(diagProxy.webcodecs?(' | webcodecs stages: demux '+(diagProxy.webcodecs.timings.demuxMs/1000).toFixed(2)+'s · decode+encode '+(diagProxy.webcodecs.timings.decodeEncodeMs/1000).toFixed(1)+'s · audio '+(diagProxy.webcodecs.timings.audioMs/1000).toFixed(1)+'s · mux '+(diagProxy.webcodecs.timings.muxMs/1000).toFixed(1)+'s · '+diagProxy.webcodecs.frames+' frames · '+diagProxy.webcodecs.outW+'x'+diagProxy.webcodecs.outH+' @ '+diagProxy.webcodecs.fps+' fps · '+diagProxy.webcodecs.srcCodec+' → '+diagProxy.webcodecs.encCodec):''),
       'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
     ].join('\n');
@@ -870,7 +871,7 @@ function handleFile(f,which){
   detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null;
   try{ var _tl0=$('timeline'); if(_tl0) _tl0.classList.remove('show'); var _ss0=$('settingsSec'); if(_ss0) _ss0.classList.remove('show'); var _eh0=$('editVideoHeader'); if(_eh0) _eh0.classList.remove('show'); }catch(e){}
   var rb=$('btnResync'); if(rb) rb.disabled=true;
-  $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show');
+  $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show'); resultVideoEl=null;
   $(which==='dance'?'metaDance':'metaSong').textContent=f.name+' · '+fmtSize(f.size);
   $(which==='dance'?'dropDance':'dropSong').classList.add('has');
   log((which==='dance'?'Video: ':'Audio: ')+f.name+' · '+fmtSize(f.size));
@@ -1607,6 +1608,7 @@ async function detectStorageBackend(){
     diagStorage.opfsAvailable=true; diagStorage.note='navigator.storage.getDirectory() resolved — OPFS available';
     log('storage: OPFS detected — inputs stage to OPFS files; render outputs stream to OPFS in chunks and are delivered from disk-backed Files');
     await refreshStorageEstimate();
+    await opfsStartupSweep();
     return true;
   }catch(e){
     diagStorage.opfsAvailable=false; diagStorage.note='getDirectory threw '+(e.name||'Error')+': '+(e.message||e);
@@ -1646,6 +1648,83 @@ async function opfsWriteChunked(name, data){
 async function opfsDelete(name){
   if(!opfsRoot||!name) return;
   try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name); }catch(e){}
+}
+// ---------- OPFS hygiene (startup sweep + post-render cleanup) ----------
+// Staged files all live at the OPFS root with recognizable names: staged
+// inputs 'input-dance-*' / 'input-song-*' and render outputs 'proxy-*.mp4'
+// / 'export-*.mp4'. Stale copies from previous sessions are never cleaned
+// by the browser and pile up (a diagnostics dump showed ~10.9 GB), which
+// also makes OPFS stream-out fail. The startup sweep deletes every staged
+// file left over from previous sessions (at startup nothing belongs to
+// the current session yet); after each render, that render's staged
+// inputs and any superseded staged outputs are deleted so at most the
+// current result stays staged.
+function opfsIsStagedName(name){
+  return /^input-(dance|song)-/.test(name)||/^proxy-.+\.mp4$/i.test(name)||/^export-.+\.mp4$/i.test(name);
+}
+async function opfsListEntries(){
+  var out=[];
+  if(!opfsRoot) return out;
+  try{
+    if(typeof opfsRoot.values==='function'){
+      for await (var handle of opfsRoot.values()){ if(handle) out.push(handle); }
+      return out;
+    }
+    if(typeof opfsRoot.entries==='function'){
+      for await (var pair of opfsRoot.entries()){ if(pair&&pair[1]) out.push(pair[1]); }
+      return out;
+    }
+    if(typeof opfsRoot.keys==='function'){
+      for await (var name of opfsRoot.keys()){
+        try{ out.push(await opfsRoot.getFileHandle(name)); }catch(e){}
+      }
+      return out;
+    }
+  }catch(e){ log('storage: OPFS directory listing failed: '+(e.message||e)); }
+  return out;
+}
+async function opfsSweepStale(keepNames, reason){
+  if(!opfsRoot) return {removed:0, bytes:0};
+  var usageBefore=null;
+  try{ if(navigator.storage&&typeof navigator.storage.estimate==='function'){ var eb=await navigator.storage.estimate(); usageBefore=(eb&&eb.usage!=null)?eb.usage:null; } }catch(e){}
+  var entries=await opfsListEntries();
+  var removed=0, bytes=0;
+  for(var i=0;i<entries.length;i++){
+    var h=entries[i];
+    if(!h||h.kind!=='file'||!opfsIsStagedName(h.name)) continue;
+    if(keepNames&&keepNames[h.name]) continue;
+    try{ var f=await h.getFile(); if(f) bytes+=f.size||0; }catch(e){}
+    try{ await opfsRoot.removeEntry(h.name); removed++; }catch(e){}
+  }
+  var usageAfter=null;
+  try{ if(navigator.storage&&typeof navigator.storage.estimate==='function'){ var ea=await navigator.storage.estimate(); usageAfter=(ea&&ea.usage!=null)?ea.usage:null; diagStorage.usage=usageAfter; diagStorage.quota=(ea&&ea.quota!=null)?ea.quota:diagStorage.quota; } }catch(e){}
+  var note='removed '+removed+' staged file(s), reclaimed '+fmtBytesMB(bytes)+' ('+reason+') | usage before='+(usageBefore!=null?fmtBytesMB(usageBefore):'n/a')+' after='+(usageAfter!=null?fmtBytesMB(usageAfter):'n/a');
+  diagStorage.sweepNote=note;
+  log('storage: OPFS sweep '+note);
+  return {removed:removed, bytes:bytes};
+}
+async function opfsStartupSweep(){
+  if(diagStorage.sweepDone) return;
+  diagStorage.sweepDone=true;
+  if(!opfsRoot) return;
+  try{ await opfsSweepStale(null,'startup — files left over from previous sessions'); }
+  catch(e){ logError('opfs-startup-sweep',e); }
+}
+async function opfsCleanupAfterRender(keepOpfsName){
+  if(!opfsRoot||!diagStorage.opfsAvailable) return;
+  try{
+    // Delete this render's staged inputs (they are re-staged on demand
+    // from the in-memory Files before the next render).
+    var stagedDance=opfsStaged.dance, stagedSong=opfsStaged.song;
+    opfsStaged={dance:null, song:null};
+    diagStorage.inputsBackend='MEMFS';
+    if(stagedDance&&stagedDance.name&&stagedDance.name!==keepOpfsName) await opfsDelete(stagedDance.name);
+    if(stagedSong&&stagedSong.name&&stagedSong.name!==keepOpfsName) await opfsDelete(stagedSong.name);
+    // Delete any superseded staged outputs — keep at most the current
+    // result staged.
+    var keep={}; if(keepOpfsName) keep[keepOpfsName]=true;
+    await opfsSweepStale(keep,'after render — staged inputs + superseded outputs');
+  }catch(e){ logError('opfs-post-render-cleanup',e); }
 }
 async function opfsStageInput(file, which){
   try{
@@ -1785,6 +1864,14 @@ function buildRenderArgs(o){
   }
   args.push('-c:a','aac','-b:a','192k');
   if(tDur>0) args.push('-t',tDur.toFixed(3));
+  if(/\.mp4$/i.test(o.outName||'')){
+    // Faststart: moov atom at the FRONT of the file. Without it, iOS
+    // WebKit's blob media loader refuses large MP4s whose moov sits at
+    // the end (result <video> error code 4, MEDIA_ERR_SRC_NOT_SUPPORTED)
+    // even though the same file plays fine in other apps.
+    args.push('-movflags','+faststart');
+    log('Render args: -movflags +faststart applied to MP4 output '+o.outName+' (moov atom moved to the front for WebKit blob playback)');
+  }
   args.push(o.outName);
   return args;
 }
@@ -2203,11 +2290,12 @@ async function tryWebCodecsProxy(ctx){
     ffmpegProgressCb=function(ratio){ if(ratio!=null) progressForGenerate(0.86+Math.min(1, ratio)*0.11); };
     var mT0=Date.now();
     var muxed=mp4MuxVideoOnly(encChunks, encAvcDesc, outW, outH);
+    log('Proxy (webcodecs) mux: hand-rolled MP4 muxer output uses faststart layout (moov written before mdat) for proxy-video-wc.mp4.');
     if(muxed.startOffsetUs>0) log('Proxy (webcodecs) mux: encoder used frame reordering — edit-list start offset '+muxed.startOffsetUs+'µs written so presentation starts at exactly 0 (no timestamps clamped).');
     await ctx.ff.writeFile('proxy-video-wc.mp4', muxed.bytes);
     wcVideoMade=true;
-    var mArgs=['-y','-i','proxy-video-wc.mp4','-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',ctx.tDur.toFixed(3),'dance-synced.mp4'];
-    log('Proxy (webcodecs) mux: video-only MP4 ('+fmtBytesMB(muxed.bytes.length)+') + stage-1 audio → ffmpeg stream-copy mux (audio starts at exactly 0; video timestamps start at 0) | ffmpeg args='+mArgs.join(' '));
+    var mArgs=['-y','-i','proxy-video-wc.mp4','-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',ctx.tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
+    log('Proxy (webcodecs) mux: video-only MP4 ('+fmtBytesMB(muxed.bytes.length)+') + stage-1 audio → ffmpeg stream-copy mux (audio starts at exactly 0; video timestamps start at 0) | faststart: -movflags +faststart applied to the final mux; the hand-rolled muxer already writes moov before mdat for proxy-video-wc.mp4 | ffmpeg args='+mArgs.join(' '));
     var muxRc=null;
     await cancellable(withFFmpegLock(async function(){ muxRc=await withTimeout(ctx.ff.exec(mArgs),600000,'WebCodecs proxy final mux'); }));
     if(muxRc!=null&&muxRc!==0) throw wcFail('the final stream-copy mux failed (ffmpeg exit code '+muxRc+')');
@@ -2263,9 +2351,14 @@ async function readRenderOutput(ff, fsOutName, opfsName){
       try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+') after streaming it to OPFS'); }catch(delErr){ log('memory: FS output delete after OPFS stream failed: '+(delErr.message||delErr)); }
       log('memory: output streamed out of the converter into OPFS file '+opfsName+' in chunks ('+fmtBytesMB(bytes)+') — delivered from the disk-backed File; no additional full in-RAM blob copy built, readFile bytes reference dropped');
       data=null;
+      await opfsCleanupAfterRender(opfsName);
       return {blob:file, backend:'OPFS', opfsName:opfsName};
     }catch(e){ logError('opfs-stream-output',e); log('OPFS stream-out failed — falling back to an in-memory blob for this output (storage: fallback=MEMFS)'); }
   }
+  // No staged output for this render (stream-out failed or OPFS off):
+  // still clear this render's staged inputs and any superseded staged
+  // outputs so stale files never accumulate across renders.
+  await opfsCleanupAfterRender(null);
   try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+')'); }catch(delOutErr){ log('memory: FS output delete failed: '+(delOutErr.message||delOutErr)); }
   log('memory: output read ('+(bytes/1048576).toFixed(1)+' MB), FS copy deleted');
   var blob=new Blob([data],{type:'video/mp4'});
@@ -2320,7 +2413,7 @@ function invalidateExport(reason){
     liveExport=null;
   }
   if(dlAnchorEl&&resultURL) dlAnchorEl.href=resultURL;
-  if(openAnchorEl&&resultURL) openAnchorEl.href=resultURL;
+  if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen (see openResultFullscreen)
 }
 function setLiveExport(entry, sig){
   if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
@@ -2331,8 +2424,8 @@ function setLiveExport(entry, sig){
   if(shareFile&&typeof navigator!=='undefined'&&navigator.canShare&&navigator.share){ try{ can=!!navigator.canShare({files:[shareFile]}); }catch(e){ can=false; } }
   liveExport={sig:sig, file:shareFile, blob:file, url:URL.createObjectURL(file), canShare:can, size:file.size, opfsName:entry.opfsName||null, q:entry.q||null};
   if(dlAnchorEl) dlAnchorEl.href=liveExport.url;
-  if(openAnchorEl) openAnchorEl.href=liveExport.url;
-  log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | canShare(export File)='+String(can)+' | Download/Open links now point at the export file (not the proxy)');
+  if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen
+  log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | canShare(export File)='+String(can)+' | Download link now points at the export file (not the proxy); Open presents the Preview fullscreen');
   return liveExport;
 }
 var isExporting=false, exportToken=0, exportCancelReject=null, exportCancelPromise=null, pendingExportAction=null;
@@ -2398,9 +2491,9 @@ async function renderExport(sig){
       log('Export stage 1 (audio): size='+fmtBytesMB(s1Size)+' | duration='+s1DurSec.toFixed(1)+'s');
       setExportBarPct(50);
       exportProgLo=50; exportProgHi=95;
-      var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'dance-synced.mp4'];
+      var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
       diagStage='export-stage-2';
-      log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | ffmpeg args='+s2Args.join(' '));
+      log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied | ffmpeg args='+s2Args.join(' '));
       var s2T0=Date.now();
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Export stage 2 (copy mux) from '+danceFile.name); }));
       log('Export stage 2 (copy mux): duration='+((Date.now()-s2T0)/1000).toFixed(1)+'s (pure stream copy — no decode, no encode)');
@@ -2492,9 +2585,9 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
     setBarPct(75,'Exporting');
     // Stage 2 — pure stream-copy mux.
     directStageNum=2; directStageLabel=''; progPhase='Exporting'; renderProgText(); directLastMilestone=-1;
-    var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'dance-synced.mp4'];
+    var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
     diagStage='export-stage-2';
-    log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | ffmpeg args='+s2Args.join(' '));
+    log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied | ffmpeg args='+s2Args.join(' '));
     var s2T0=Date.now();
     await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Direct export stage 2 (copy mux) from '+danceFile.name); }));
     s2DurSec=(Date.now()-s2T0)/1000;
@@ -2545,7 +2638,11 @@ function performExportAction(action){
     return;
   }
   if(action==='open'){
-    if(openAnchorEl){ openAnchorEl.href=liveExport.url; log('Open (export) → activating the in-DOM Open anchor for the export file '+fmtBytesMB(liveExport.size)+' (if the browser blocks the automatic open after Processing, tap Open again — the export is cached).'); openAnchorEl.click(); try{ journalMarkCompleted(true); }catch(e){} }
+    // Open NEVER navigates to a blob URL (a large blob navigation fails
+    // with WebKitBlobResource error 1 and replaces the page). It presents
+    // the in-page Preview video in the native fullscreen player instead.
+    log('Open (export) → presenting the in-page Preview video fullscreen (no blob URL navigation).');
+    openResultFullscreen();
     return;
   }
 }
@@ -2641,6 +2738,42 @@ function cacheGet(sig){
 //    it or on New/reset — revoking it while it is on screen silently
 //    kills the player, the share source, and the download link at once.
 var resultBlob=null, resultFile=null, resultCanShare=false;
+var resultVideoEl=null; // the in-page Preview <video> for the current result — Open presents THIS element fullscreen; it never navigates to a blob URL (a 291 MB blob navigation dies with WebKitBlobResource error 1 and kills the tab view)
+// Open: present the existing in-page Preview video in the native
+// fullscreen player — webkitEnterFullscreen() on iOS, falling back to
+// requestFullscreen(), falling back to scrolling the Preview into view
+// and playing it. Never a navigation to the result blob URL.
+function openResultFullscreen(){
+  diagStage='open-video';
+  var v=resultVideoEl;
+  if(!v){ log('Open tapped → no Preview video on screen to present.'); return; }
+  try{
+    if(typeof v.webkitEnterFullscreen==='function'){
+      v.webkitEnterFullscreen();
+      log('Open → Preview video presented in the native fullscreen player (webkitEnterFullscreen) — no blob URL navigation.');
+      try{ var pp=v.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
+      try{ journalMarkCompleted(true); }catch(e){}
+      return;
+    }
+  }catch(e){ log('Open → webkitEnterFullscreen threw ('+(e.message||e)+') — falling back.'); }
+  function scrollAndPlay(){
+    try{ v.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){ try{ v.scrollIntoView(); }catch(_){} }
+    try{ var pp2=v.play(); if(pp2&&pp2.catch) pp2.catch(function(){}); }catch(e){}
+    log('Open → Preview scrolled into view and playing (fullscreen APIs unavailable).');
+  }
+  try{
+    if(typeof v.requestFullscreen==='function'){
+      var rp=v.requestFullscreen();
+      log('Open → Preview video presented fullscreen (requestFullscreen) — no blob URL navigation.');
+      try{ var pp3=v.play(); if(pp3&&pp3.catch) pp3.catch(function(){}); }catch(e){}
+      try{ journalMarkCompleted(true); }catch(e){}
+      if(rp&&rp.catch) rp.catch(function(){ scrollAndPlay(); });
+      return;
+    }
+  }catch(e){ log('Open → requestFullscreen threw ('+(e.message||e)+') — falling back to scroll + play.'); }
+  scrollAndPlay();
+  try{ journalMarkCompleted(true); }catch(e){}
+}
 function shareFailed(err){
   diagStage='delivery';
   var msg='Share failed: '+((err&&err.name)||'Error')+((err&&err.message)?' — '+err.message:'');
@@ -2712,6 +2845,7 @@ function showResult(blob, opts){
   var wrap=$('downloadWrap'); wrap.innerHTML='';
   var area=$('resultArea'); area.innerHTML=''; area.classList.add('show');
   var rv=document.createElement('video'); rv.className='resultvid'; rv.controls=true; rv.setAttribute('playsinline',''); rv.preload='auto'; rv.src=resultURL;
+  resultVideoEl=rv;
   rv.addEventListener('error',function(){ try{ var ve=rv.error; log('Result video element error: '+(ve?('code='+ve.code+' message='+(ve.message||'')):'unknown')); logError('result-video-element',(ve&&ve.message)?new Error(ve.message):new Error('video error code '+(ve?ve.code:'?'))); }catch(e){} });
   rv.addEventListener('loadedmetadata',function(){ try{ log('Result video metadata loaded: duration='+(isFinite(rv.duration)?Number(rv.duration).toFixed(3):String(rv.duration))+'s | videoWidth='+rv.videoWidth+' videoHeight='+rv.videoHeight+' | readyState='+rv.readyState); }catch(e){} });
   area.appendChild(rv);
@@ -2721,7 +2855,7 @@ function showResult(blob, opts){
   var saveRow=document.createElement('div'); saveRow.className='saveRow';
   var shareBtn=document.createElement('button'); shareBtn.type='button'; shareBtn.className='saveBtn'; shareBtn.innerHTML=ICON_SHARE+'<span>Share</span>';
   var dl=document.createElement('a'); dl.className='saveBtn'; dl.href=resultURL; dl.setAttribute('download','dance-synced.mp4'); dl.innerHTML=ICON_DL+'<span>Download</span>';
-  var openA=document.createElement('a'); openA.className='saveBtn'; openA.href=resultURL; openA.target='_blank'; openA.rel='noopener'; openA.innerHTML=ICON_OPEN+'<span>Open</span>';
+  var openA=document.createElement('a'); openA.className='saveBtn'; openA.setAttribute('role','button'); openA.innerHTML=ICON_OPEN+'<span>Open</span>'; // deliberately NO href/target: Open must never navigate the page to a blob URL — its click presents the Preview video fullscreen (openResultFullscreen)
   shareBtnEl=shareBtn; dlAnchorEl=dl; openAnchorEl=openA;
   // If an export for exactly these settings + the selected Export quality
   // is already cached (e.g. a restored History version), point the links
@@ -2735,10 +2869,10 @@ function showResult(blob, opts){
     ensureExport('download');
   });
   openA.addEventListener('click',function(ev){
-    var sig3=currentExportSignature();
-    if(liveExport&&liveExport.sig===sig3&&liveExport.url){ diagStage='open-video'; log('Open tapped → delivering the EXPORT file (up-to-date, no re-render) in a new tab | href scheme='+String(liveExport.url).split(':')[0]+':'); return; }
     ev.preventDefault(); diagStage='open-video';
-    log('Open tapped → no up-to-date export — starting Processing (full-quality export render) first; Open follows when processing finishes (if the browser blocks the automatic open after processing, tap Open again — the export is then cached).');
+    var sig3=currentExportSignature();
+    if(liveExport&&liveExport.sig===sig3&&liveExport.url){ log('Open tapped → export is up-to-date (no re-render) — presenting the in-page Preview video in the native fullscreen player (no blob URL navigation).'); openResultFullscreen(); return; }
+    log('Open tapped → no up-to-date export — starting Processing (full-quality export render) first; when processing finishes, Open presents the Preview video fullscreen.');
     ensureExport('open');
   });
   shareBtn.addEventListener('click',function(){ ensureExport('share'); });
@@ -2853,7 +2987,7 @@ function resetAll(){
   if(opfsStaged.song) opfsDelete(opfsStaged.song.name);
   opfsStaged={dance:null, song:null};
   if(resultURL){ URL.revokeObjectURL(resultURL); resultURL=null; }
-  resultBlob=null; resultFile=null; resultCanShare=false; lastResultIsDirect=false; directStageLabel='';
+  resultBlob=null; resultFile=null; resultCanShare=false; resultVideoEl=null; lastResultIsDirect=false; directStageLabel='';
   if(danceURL){ URL.revokeObjectURL(danceURL); danceURL=null; }
   vid.removeAttribute('src'); try{ vid.load(); }catch(e){}
   $('fileDance').value=''; $('fileSong').value='';
