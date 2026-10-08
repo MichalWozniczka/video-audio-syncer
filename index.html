@@ -58,6 +58,8 @@ button{appearance:none;border:0;border-radius:999px;padding:11px 16px;font-weigh
 #generateRow.show{display:flex}
 #generateRow .primary{width:auto;margin-top:0}
 .previewHeader{font-size:20px;font-weight:800;letter-spacing:-.02em}
+.previewSub{display:none;color:var(--muted);font-size:12.5px;margin-top:3px}
+.previewSub.show{display:block}
 .progress i{display:block;height:100%;background:var(--accent);width:0%;transition:width .45s ease;border-radius:999px}
 #progText,#exportProgText{position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7),0 0 3px rgba(0,0,0,.55);white-space:nowrap;pointer-events:none}
 .procWrap{align-items:center;gap:10px}
@@ -157,10 +159,15 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
       <span class="bigoffset previewHeader" id="offsetBig">Preview</span>
       <div class="cands" id="candRow"></div>
     </div>
+    <div class="previewSub" id="previewSub">Preview only — save for Full video</div>
     <div id="resultArea"></div>
     <div id="downloadWrap"></div>
-    <h2 id="editVideoHeader" class="editHeader">Edit video</h2>
     <div class="progress procWrap" id="exportProgWrap"><span class="procLabel">Exporting</span><div class="barTrack"><i id="exportProgBar"></i><span id="exportProgText"></span></div><button type="button" class="secondary" id="btnExportCancel">Cancel</button></div>
+    <h2 id="editVideoHeader" class="editHeader">Edit video</h2>
+    <div id="generateRow">
+      <button class="primary" id="btnGenerate" style="display:none">Apply edits</button>
+      <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
+    </div>
 
     <div class="timeline" id="timeline">
       <div class="tl-read"><span id="trimRead"></span><span id="offRead"></span></div>
@@ -205,10 +212,6 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
   </section>
 
   <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
-  <div id="generateRow">
-    <button class="primary" id="btnGenerate" style="display:none">Generate</button>
-    <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
-  </div>
   <div class="errline" id="errLine"></div>
   <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
   <div id="historyWrap"><h4>History</h4><div id="historyList"></div></div>
@@ -775,6 +778,7 @@ function releaseAnalysisScratch(where){
 var filmstripBuiltFor=null, filmstripBuilding=false, filmstripPending=false, stripCache={};
 var pcmCache={}, pcmPromiseCache={}, ffmpegChain=Promise.resolve(), generatedOnce=false;
 var firstGenDone=false; // true only after the FIRST generation completes successfully this session (reset by Start over). Gates Generate / Cancel / Start over visibility until then.
+var appliedSnapshot=null; // settings {eff,tStart,tEnd,blend,q} of the last applied/generated (or payload-restored) version — the Apply edits button is disabled while the editor matches it exactly
 var pipelineRestartPending=false; // a file change cancelled an in-flight run; restart the pipeline once the old run unwinds
 // ---------- cancel ----------
 // Every run captures runToken; Cancel bumps it, rejects the run's cancel
@@ -868,10 +872,10 @@ function handleFile(f,which){
   filesVersion++; analysisState="idle"; analysisPromise=null; try{ autoGenForVersion=-1; }catch(e){}
   try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
   if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; danceVideoW=0; danceVideoH=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
-  detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null;
+  detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null; appliedSnapshot=null;
   try{ var _tl0=$('timeline'); if(_tl0) _tl0.classList.remove('show'); var _ss0=$('settingsSec'); if(_ss0) _ss0.classList.remove('show'); var _eh0=$('editVideoHeader'); if(_eh0) _eh0.classList.remove('show'); }catch(e){}
   var rb=$('btnResync'); if(rb) rb.disabled=true;
-  $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show'); resultVideoEl=null;
+  $('resultBox').classList.remove('show'); var _ps0=$('previewSub'); if(_ps0) _ps0.classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show'); resultVideoEl=null;
   $(which==='dance'?'metaDance':'metaSong').textContent=f.name+' · '+fmtSize(f.size);
   $(which==='dance'?'dropDance':'dropSong').classList.add('has');
   log((which==='dance'?'Video: ':'Audio: ')+f.name+' · '+fmtSize(f.size));
@@ -903,7 +907,7 @@ function handleFile(f,which){
   if(hadInFlight&&danceFile&&songFile) schedulePendingRestartPoll();
 }
 function checkReady(){
-  var gen=$('btnGenerate'); if(gen) gen.disabled=!(danceFile&&songFile);
+  updateApplyEditsState();
   if(danceDur>0){ if(generatedOnce) $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); }
   if(danceFile&&songFile&&analysisState==="idle"){ runAutoPipeline(); }
 }
@@ -1341,7 +1345,11 @@ function runAnalysis(){
       log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
       analysisState="done"; analysisVersion=ver;
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
-      $('resultBox').classList.add('show');
+      // The Preview block (header, subheading, player, Share/Download/Open)
+      // is revealed ONLY by showResult, once a generation is fully complete
+      // — never here at analysis-done (~50-90%), where it used to pop in
+      // early. On a re-generation the previous result stays visible because
+      // showResult of the previous run already revealed it.
       $('offsetBig').textContent='Preview';
       showCandidates(coarse);
       if(generatedOnce) $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip();
@@ -1374,6 +1382,7 @@ function layoutTimeline(){
   $('trimRead').textContent=fmtTrimPoint(ts, baseTrimStart)+' – '+fmtTrimPoint(te, baseTrimEnd==null?danceDur:baseTrimEnd);
   $('offRead').textContent='Audio '+effOffset().toFixed(3)+'s';
   syncOffsetInput();
+  try{ updateApplyEditsState(); }catch(e){}
   requestAnimationFrame(drawWaveform);
 }
 vid.addEventListener('loadedmetadata',function(){ if(vid.duration&&isFinite(vid.duration)){ danceDur=vid.duration; if(vid.videoWidth){ danceVideoW=vid.videoWidth; danceVideoH=vid.videoHeight; } if(generatedOnce) $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); } });
@@ -1568,8 +1577,39 @@ $('btnResync').addEventListener('click',function(){
 window.addEventListener('resize',function(){ layoutTimeline(); buildFilmstrip(); });
 
 // ---------- settings ----------
-document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — any direct-export result is now invalidated like a cached export; no render happens until Share/Download/Open or the next Generate (which will use the direct-export path only if the new quality is Full with no trim, otherwise the proxy path).'); }); });
-$('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.value,10)/100; $('blendVal').textContent=e.target.value+'%'; });
+document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); updatePreviewSub(); updateApplyEditsState(); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — any direct-export result is now invalidated like a cached export; no render happens until Share/Download/Open or the next Generate (which will use the direct-export path only if the new quality is Full with no trim, otherwise the proxy path).'); }); });
+$('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.value,10)/100; $('blendVal').textContent=e.target.value+'%'; updateApplyEditsState(); });
+
+// ---------- Apply edits enablement + Preview subheading ----------
+// Apply edits is DISABLED whenever the editor's current settings exactly
+// match appliedSnapshot (the last applied/generated settings, or a
+// payload-restored version's settings). Any change — offset (incl. the
+// additional-offset delta, via effOffset), trim start/end, room-audio
+// blend, export quality — enables it; reverting every change back to the
+// snapshot disables it again. A successful apply updates the snapshot
+// (addHistory) and the button disables; it also stays disabled while a
+// generation run is in flight.
+function currentEditorSettings(){
+  var qe=document.querySelector('input[name=quality]:checked');
+  return {eff:effOffset(), tStart:trimStartSec, tEnd:trimEnd(), blend:blendVal, q:qe?qe.value:'full'};
+}
+function settingsMatchApplied(){
+  if(!appliedSnapshot) return false;
+  var c=currentEditorSettings(), a=appliedSnapshot;
+  return Math.abs(c.eff-a.eff)<0.0005 && Math.abs(c.tStart-a.tStart)<0.0005 && Math.abs(c.tEnd-a.tEnd)<0.0005 && Math.abs(c.blend-a.blend)<0.001 && c.q===a.q;
+}
+function updateApplyEditsState(){
+  var b=$('btnGenerate'); if(!b) return;
+  var busy=false; try{ busy=!!(isGenerating||pipelineRunning); }catch(e){}
+  b.disabled = busy || !danceFile || !songFile || settingsMatchApplied();
+}
+function updatePreviewSub(){
+  var el=$('previewSub'); if(!el) return;
+  var qe=document.querySelector('input[name=quality]:checked');
+  var label='Full';
+  if(qe){ var sp=qe.parentElement?qe.parentElement.querySelector('span'):null; if(sp&&sp.textContent) label=sp.textContent; }
+  el.textContent='Preview only — save for '+label+' video';
+}
 $('blend').addEventListener('change',invalidateDownload);
 
 
@@ -1691,7 +1731,10 @@ async function opfsSweepStale(keepNames, reason){
   var removed=0, bytes=0;
   for(var i=0;i<entries.length;i++){
     var h=entries[i];
-    if(!h||h.kind!=='file'||!opfsIsStagedName(h.name)) continue;
+    // The 'versions' namespace (a directory holding stored History videos)
+    // is EXEMPT from every sweep — version payloads must survive renders,
+    // Start over, and the startup cleanup of previous sessions' files.
+    if(!h||h.name==='versions'||h.kind!=='file'||!opfsIsStagedName(h.name)) continue;
     if(keepNames&&keepNames[h.name]) continue;
     try{ var f=await h.getFile(); if(f) bytes+=f.size||0; }catch(e){}
     try{ await opfsRoot.removeEntry(h.name); removed++; }catch(e){}
@@ -2367,8 +2410,9 @@ async function readRenderOutput(ff, fsOutName, opfsName){
   return {blob:blob, backend:'MEMFS', opfsName:null};
 }
 // ---------- Processing progress bar (export only) ----------
-// A second, independent progress bar directly under the Share/Download/Open
-// row, visible only while a full-quality export renders. Same discrete-
+// A second, independent progress bar sitting between the Share/Download/
+// Open row and the "Edit video" header, visible only while a full-quality
+// export renders. Same discrete-
 // event style as the main ladder: 2% render requested · 8% inputs staged
 // to converter · 15% encode starts · ffmpeg progress 15%->95% · 96%
 // read-out/stream-out · 100% done. Percentage text is one persistent
@@ -2713,7 +2757,9 @@ function cachePut(sig,entry){
     // in showResult — never revoke the live resultURL for an old entry).
     if(oe&&oe.url){ try{ URL.revokeObjectURL(oe.url); }catch(e){} oe.url=null; }
     if(oe&&oe.opfsName){ opfsDelete(oe.opfsName); oe.opfsName=null; }
-    historyEntries.forEach(function(h){ if(h.sig===old) h.available=false; });
+    // An entry whose video also lives in the OPFS versions store stays
+    // restorable even when its in-memory cache payload is evicted.
+    historyEntries.forEach(function(h){ if(h.sig===old&&!h.versionFile) h.available=false; });
     evictedAny=true;
     log('Cache eviction — evicted oldest output ('+(oe?fmtSize(oe.blob.size):'?')+') | reason: '+(outOrder.length>=MAX_OUTPUTS?'count cap '+MAX_OUTPUTS:'byte cap '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB')+' | cache now holds '+outCache.size+' entries, '+fmtBytesMB(cacheTotalBytes())+' total: '+outOrder.map(function(k){ var e=outCache.get(k); return e?fmtSize(e.blob.size):'?'; }).join(', '));
   }
@@ -2819,6 +2865,10 @@ function showEditor(){
 function showResult(blob, opts){
   opts=opts||{};
   lastResultIsDirect=!!opts.isDirect;
+  // Generation is fully complete — only NOW does the Preview block appear
+  // (header + subheading + player + Share/Download/Open row).
+  $('resultBox').classList.add('show');
+  var _psub=$('previewSub'); if(_psub){ _psub.classList.add('show'); updatePreviewSub(); }
   // A result on screen means a generation has completed successfully:
   // this unlocks Generate (for re-generating after edits), Cancel
   // during subsequent runs, and the single bottom Start over button.
@@ -2887,15 +2937,118 @@ function showResult(blob, opts){
 }
 function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
 var historyCounter=0; // sequential Video N numbering — survives New/resets
-function addHistory(sig,snap,size,available){
+var VERSIONS_KEEP=5; // stored version videos kept in OPFS — older entries degrade to settings-only
+function addHistory(sig,snap,size,available,blob){
   historyCounter++;
-  var hasPayload=(available!==false);
-  historyEntries.unshift({sig:sig, snap:snap, size:size, when:new Date(), available:hasPayload, num:historyCounter});
-  if(!hasPayload) log('History: entry stored without its video payload (size '+fmtBytesMB(size)+' exceeds the History cache caps — max '+MAX_OUTPUTS+' outputs / '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — restore requires re-generate.');
+  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, versionFile:null, payloadSize:null};
+  historyEntries.unshift(entry);
+  if(available===false&&!blob) log('History: entry stored without its video payload (size '+fmtBytesMB(size)+' exceeds the History cache caps — max '+MAX_OUTPUTS+' outputs / '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — restore requires re-generate.');
+  // A completed apply/generation becomes the applied-settings snapshot:
+  // Apply edits disables until the editor diverges from these settings.
+  appliedSnapshot={eff:snap.eff, tStart:snap.tStart, tEnd:snap.tEnd, blend:snap.blend, q:snap.q};
   // This generation becomes the base trim the readouts compose against.
   baseTrimStart=snap.tStart; baseTrimEnd=snap.tEnd;
   renderHistory();
   layoutTimeline();
+  updateApplyEditsState();
+  // Persist the actual video bytes so this version can be played and
+  // edited later, not just its settings (fire-and-forget; logs its own
+  // outcome to the diagnostics journal).
+  if(blob) storeVersionPayload(entry, blob);
+}
+// ---------- version video storage (OPFS 'versions' namespace) ----------
+// Each completed generation's output bytes are written to
+// OPFS versions/v<N>.mp4 and the History entry records the payload
+// reference + size (entry.versionFile / entry.payloadSize). Only the
+// newest VERSIONS_KEEP payloads are kept; evicting one deletes its file
+// and marks the entry settings-only. If OPFS is unavailable the version
+// stays settings-only (the previous behavior) and the reason is logged.
+function storeVersionPayload(entry, blob){
+  (async function(){
+    try{
+      if(!blob||!blob.size){ log('Version '+entry.num+': no video bytes to store — version kept settings-only.'); if(!outCache.has(entry.sig)){ entry.available=false; renderHistory(); } return; }
+      // Identical settings already stored by an earlier version — share
+      // its payload instead of writing a duplicate copy.
+      for(var i=0;i<historyEntries.length;i++){
+        var o=historyEntries[i];
+        if(o!==entry&&o.sig===entry.sig&&o.versionFile){
+          entry.versionFile=o.versionFile; entry.payloadSize=o.payloadSize||blob.size; entry.available=true;
+          log('Version '+entry.num+': identical settings already stored as '+o.versionFile+' — reusing that stored video ('+fmtBytesMB(entry.payloadSize)+').');
+          renderHistory();
+          return;
+        }
+      }
+      var ok=await detectStorageBackend();
+      if(!ok||!opfsRoot){
+        log('Version '+entry.num+': OPFS unavailable ('+diagStorage.note+') — falling back to settings-only; restore will require re-generate.');
+        if(!outCache.has(entry.sig)){ entry.available=false; renderHistory(); }
+        return;
+      }
+      var dir=await opfsRoot.getDirectoryHandle('versions',{create:true});
+      var name='v'+entry.num+'.mp4';
+      var handle=await dir.getFileHandle(name,{create:true});
+      var writable=await handle.createWritable();
+      var CH=4*1024*1024;
+      try{
+        for(var off=0; off<blob.size; off+=CH){
+          var chunk=await blob.slice(off, Math.min(blob.size, off+CH)).arrayBuffer();
+          await writable.write(chunk);
+        }
+        await writable.close();
+      }catch(we){ try{ await writable.abort(); }catch(_){} throw we; }
+      entry.versionFile='versions/'+name;
+      entry.payloadSize=blob.size;
+      entry.available=true;
+      log('Version '+entry.num+' stored: '+blob.size+' bytes → OPFS versions/'+name);
+      renderHistory();
+      await evictOldVersionPayloads();
+      try{ await refreshStorageEstimate(); }catch(e){}
+    }catch(e){
+      logError('version-store',e);
+      log('Version '+entry.num+': storing the video failed ('+(e.message||e)+') — version kept settings-only; restore requires re-generate.');
+      if(!outCache.has(entry.sig)){ entry.available=false; renderHistory(); }
+    }
+  })();
+}
+async function evictOldVersionPayloads(){
+  if(!opfsRoot) return;
+  var withPayload=historyEntries.filter(function(h){ return !!h.versionFile; });
+  if(withPayload.length<=VERSIONS_KEEP) return;
+  var evict=withPayload.slice(VERSIONS_KEEP); // historyEntries is newest-first
+  for(var i=0;i<evict.length;i++){
+    var h=evict[i], fname=h.versionFile;
+    h.versionFile=null; h.payloadSize=null;
+    if(!outCache.has(h.sig)) h.available=false;
+    log('Version '+h.num+' payload evicted — keeping only the newest '+VERSIONS_KEEP+' stored version videos; this entry is now settings-only (restore requires re-generate).');
+    var stillUsed=historyEntries.some(function(x){ return x.versionFile===fname; });
+    if(!stillUsed&&fname){
+      try{ var dir=await opfsRoot.getDirectoryHandle('versions'); await dir.removeEntry(fname.split('/').pop()); log('Version storage: deleted OPFS '+fname+'.'); }catch(e){}
+    }
+  }
+  renderHistory();
+}
+// Load a stored version video from OPFS into the Preview as the current
+// result (Share/Download/Open then act on it via showResult, as usual).
+function loadVersionPayload(h){
+  (async function(){
+    try{
+      var ok=await detectStorageBackend();
+      if(!ok||!opfsRoot) throw new Error('OPFS unavailable: '+diagStorage.note);
+      var dir=await opfsRoot.getDirectoryHandle('versions');
+      var handle=await dir.getFileHandle(h.versionFile.split('/').pop());
+      var file=await handle.getFile();
+      if(!file||!file.size) throw new Error('the stored version file is empty');
+      log('Version '+h.num+' restored from storage: OPFS '+h.versionFile+' ('+file.size+' bytes) loaded into the Preview.');
+      generatedOnce=true;
+      try{ cachePut(h.sig,{blob:file, opfsName:null}); }catch(e){}
+      showResult(file,{isDirect:!!(h.snap&&h.snap.isDirect)});
+      if(h.snap&&h.snap.isDirect){ log('History: restored version is a direct export — Share/Download/Open deliver this stored file.'); }
+    }catch(e){
+      logError('version-restore',e);
+      h.versionFile=null; h.payloadSize=null; h.available=false; renderHistory();
+      log('Version '+h.num+': the stored video could not be loaded ('+(e.message||e)+') — settings restored; restore requires re-generate — tap Apply edits to rebuild it.');
+    }
+  })();
 }
 function renderHistory(){
   var wrap=$('historyWrap'), list=$('historyList'); if(!wrap||!list) return;
@@ -2921,10 +3074,19 @@ function restoreHistory(h){
   baseTrimStart=s.tStart; baseTrimEnd=s.tEnd; // restored version's trim becomes the composition base
   audioPos=-s.eff;
   layoutTimeline();
+  updatePreviewSub();
   log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
+  // A version WITH a playable payload becomes the applied-settings
+  // snapshot (Apply edits starts disabled; any edit branches a new
+  // version on apply). A settings-only entry must NOT become the
+  // snapshot — Apply edits stays enabled so it can be re-generated.
+  if(outCache.has(h.sig)||h.versionFile){ appliedSnapshot={eff:effOffset(), tStart:trimStartSec, tEnd:trimEnd(), blend:blendVal, q:s.q}; }
+  else { appliedSnapshot=null; }
+  updateApplyEditsState();
   var e=cacheGet(h.sig);
   if(e){ var isDir=!!(s.isDirect); showResult(e.blob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(e.blob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(e.blob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
-  else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Generate to rebuild it.'); }
+  else if(h.versionFile){ loadVersionPayload(h); }
+  else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
 }
 
 // ---------- New (full reset to initial state) ----------
@@ -2971,7 +3133,7 @@ function resetAll(){
   danceFile=null; songFile=null;
   dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
-  trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0;
+  trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0; appliedSnapshot=null;
   analysisState='idle'; analysisPromise=null; analysisVersion=-1;
   autoGenForVersion=-1; generatedOnce=false; firstGenDone=false; pipelineRestartPending=false;
   pcmCache={}; pcmPromiseCache={}; stripCache={};
@@ -2997,7 +3159,7 @@ function resetAll(){
   $('blend').value=0; $('blendVal').textContent='0%';
   $('offInput').value='0.000';
   $('btnResync').disabled=true;
-  $('resultBox').classList.remove('show'); $('offsetBig').textContent='Preview'; $('candRow').innerHTML='';
+  $('resultBox').classList.remove('show'); var _ps9=$('previewSub'); if(_ps9) _ps9.classList.remove('show'); updatePreviewSub(); $('offsetBig').textContent='Preview'; $('candRow').innerHTML='';
   $('downloadWrap').innerHTML='';
   var area=$('resultArea'); area.innerHTML=''; area.classList.remove('show');
   $('filmstrip').innerHTML='';
@@ -3079,7 +3241,7 @@ async function doGenerate(opts){
         if(!dHitOut&&dHitBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dHitBlob, opfsName:null}); }catch(e){} }
         if(!dHitExp){ try{ exportCachePut(exportSig,{blob:dHitBlob, opfsName:dHitOpfs, q:q}); }catch(e){} }
         showResult(dHitBlob,{isDirect:true});
-        addHistory(exportSig,snap,dHitBlob.size, dHitBlob.size<=MAX_CACHE_BYTES);
+        addHistory(exportSig,snap,dHitBlob.size, dHitBlob.size<=MAX_CACHE_BYTES, dHitBlob);
         log('Direct export loaded from cache — identical settings, no re-render. ('+fmtSize(dHitBlob.size)+')');
         try{ journalMarkCompleted(true); }catch(e){}
         return;
@@ -3104,7 +3266,7 @@ async function doGenerate(opts){
       if(dFits){ try{ cachePut(exportSig,{blob:dBlob, opfsName:null}); }catch(e){} }
       else { log('History: direct result '+fmtBytesMB(dBlob.size)+' does not fit the History byte cap ('+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — storing the History entry without the payload; restore requires re-generate.'); }
       showResult(dBlob,{isDirect:true});
-      addHistory(exportSig,snap,dBlob.size,dFits);
+      addHistory(exportSig,snap,dBlob.size,dFits,dBlob);
       log('Done — direct export ready: '+tDur.toFixed(2)+'s output, '+fmtSize(dBlob.size)+', generated in '+dSecs+'s · stage 1: size='+(dRes.s1Size!=null?fmtBytesMB(dRes.s1Size):'n/a')+' duration='+Number(dRes.s1DurSec).toFixed(1)+'s · stage 2: duration='+Number(dRes.s2DurSec).toFixed(1)+'s · audio clipped to video duration (no audio beyond video). This IS the full-quality export — Share, Download and Open deliver it immediately, no further render.');
       try{ journalMarkCompleted(true); }catch(e){}
       return;
@@ -3115,7 +3277,7 @@ async function doGenerate(opts){
       diagProxy.size=hit.blob.size; diagProxy.durationSec=0; diagProxy.backend=hit.opfsName?'OPFS':'MEMFS';
       log('Proxy encode skipped — cache hit for identical settings (no re-encode). Proxy blob '+fmtBytesMB(hit.blob.size)+'.');
       showResult(hit.blob);
-      addHistory(sig,snap,hit.blob.size);
+      addHistory(sig,snap,hit.blob.size,true,hit.blob);
       log('Proxy loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
       try{ journalMarkCompleted(true); }catch(e){}
       return;
@@ -3247,7 +3409,7 @@ async function doGenerate(opts){
     cachePut(sig,{blob:blob, opfsName:outRes.opfsName});
     await refreshStorageEstimate();
     showResult(blob);
-    addHistory(sig,snap,blob.size);
+    addHistory(sig,snap,blob.size,true,blob);
     log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Share, Download or Open.');
     try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
@@ -3258,8 +3420,9 @@ async function doGenerate(opts){
     directStageLabel='';
     stopRunClock();
     setCancelVisible(false);
-    btn.disabled=!(danceFile&&songFile);
+    updateApplyEditsState();
     isGenerating=false;
+    updateApplyEditsState();
     flushFilmstrip();
   }
 }
