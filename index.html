@@ -2,8 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"/>
 <meta name="color-scheme" content="dark light"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1115"/>
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f6f4"/>
 <link rel="icon" href="data:,"/>
 <title>Video/Audio Syncer</title>
 <script src="assets/ffmpeg/ffmpeg.js"></script>
@@ -17,8 +22,11 @@
   :root{--bg:#f6f6f4;--card:#ffffff;--card2:#f0efe9;--line:#e2ddd2;--text:#181713;--muted:#6b675e;--accent:#e84525;}
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.4}
-.wrap{max-width:760px;margin:0 auto;padding:16px 14px 36px}
+button,input,select,textarea,a,label,.pill,.pill span,.drop,.saveBtn,.offBtn,.cand,.histRow{touch-action:manipulation}
+html{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%;background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.4;touch-action:manipulation;min-height:100vh;min-height:100dvh}
+.wrap{max-width:760px;margin:0 auto;min-height:100vh;min-height:100dvh;padding:calc(16px + env(safe-area-inset-top,0px)) calc(14px + env(safe-area-inset-right,0px)) calc(36px + env(safe-area-inset-bottom,0px)) calc(14px + env(safe-area-inset-left,0px))}
+input[type="text"],input[type="number"],input[type="search"],input[type="tel"],input[type="url"],input[type="email"],input[type="password"],textarea,select{font-size:16px}
 h1{font-size:22px;margin:2px 0 4px;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:13.5px;margin:0 0 14px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -41,22 +49,21 @@ button{appearance:none;border:0;border-radius:999px;padding:11px 16px;font-weigh
 .diagBar{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
 .diagBar .secondary{padding:8px 14px;font-size:13px}
 #diagCopyStatus{font-size:12.5px;color:var(--ok)}
-#diagFallback{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;pointer-events:none}
+#diagFallback{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;pointer-events:none;font-size:16px}
 .errline{color:#ff8a75;font-size:13px;margin-top:8px;display:none}
 .errline.show{display:block}
 .progress{margin-top:10px;display:none}
-.progress .barTrack{position:relative;flex:1;height:22px;background:var(--card2);border-radius:999px;overflow:hidden}
+.progress .barTrack{position:relative;flex:1;width:100%;height:22px;background:var(--card2);border-radius:999px;overflow:hidden}
+#generateRow{display:none;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
+#generateRow.show{display:flex}
+#generateRow .primary{width:auto;margin-top:0}
+.previewHeader{font-size:20px;font-weight:800;letter-spacing:-.02em}
 .progress i{display:block;height:100%;background:var(--accent);width:0%;transition:width .45s ease;border-radius:999px}
 #progText,#exportProgText{position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,Menlo,monospace;font-size:12px;font-weight:700;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7),0 0 3px rgba(0,0,0,.55);white-space:nowrap;pointer-events:none}
 .procWrap{align-items:center;gap:10px}
 .procLabel{font-size:13px;font-weight:700;white-space:nowrap}
 #exportProgWrap .secondary{padding:7px 14px;font-size:13px;flex:none}
-.steps{display:none;justify-content:space-between;gap:4px;margin-top:6px;font-size:11.5px;color:var(--muted)}
-.steps.show{display:flex}
-.steps span{flex:1;text-align:center;white-space:nowrap}
-.steps span:first-child{text-align:left}.steps span:last-child{text-align:right}
-.steps span.active{color:var(--text);font-weight:700}
-.steps span.done{color:var(--ok);font-weight:700}
+.steps{display:none!important}
 .result{margin-top:10px;display:none;align-items:center;gap:10px;flex-wrap:wrap}
 .result.show{display:flex}
 .bigoffset{font-size:22px;font-weight:800;letter-spacing:-.02em}
@@ -71,7 +78,7 @@ video.main.sourceHidden{display:none!important}
 .offsetRow{display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:nowrap}
 .offlabel{font-size:12.5px;color:var(--muted);white-space:nowrap;flex:none}
 .offBtn{width:30px;height:30px;flex:none;padding:0;border-radius:50%;background:var(--card2);color:var(--text);border:1px solid var(--line);font-size:11px;display:flex;align-items:center;justify-content:center;cursor:pointer}
-.offInput{flex:0 1 100px;min-width:9.5ch;width:100px;padding:7px 2px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-family:ui-monospace,Menlo,monospace;font-size:14px;text-align:center}
+.offInput{flex:0 1 100px;min-width:9.5ch;width:100px;padding:7px 2px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-family:ui-monospace,Menlo,monospace;font-size:16px;text-align:center}
 .offsetRow .secondary{padding:6px 10px;font-size:12.5px;margin-left:auto;flex:none;white-space:nowrap}
 .offsetRow .secondary:disabled{opacity:.45;cursor:not-allowed}
 /* ---- timeline ---- */
@@ -116,8 +123,10 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 .saveBtn svg{width:16px;height:16px;flex:none}
 .startover{background:var(--accent);color:#fff}
 .startover:disabled{background:var(--card2);color:var(--muted);border:1px solid var(--line);cursor:not-allowed}
-#topResetWrap{margin-top:10px}
+#topResetWrap{margin-top:10px;display:none}
+#topResetWrap.show{display:block}
 #newWrap{margin-top:14px;display:none}
+#newWrap.show{display:block}
 .dlstatus{margin-top:12px;font-size:13px;background:#14231c;border:1px solid #24543e;border-radius:10px;padding:9px 12px;color:#e6f7ee}
 @media (prefers-color-scheme:light){.dlstatus{background:#e7f5ec;border-color:#bfe3cd;color:#14402a}}
 .recoveredNotice{margin:0 0 12px;background:#2a1a12;border:1px solid #7a3b22;border-radius:10px;padding:10px 12px;font-size:13px;color:#ffd9c7;display:none;align-items:flex-start;gap:10px}
@@ -144,19 +153,15 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
   </div>
   <div id="topResetWrap"><button type="button" class="startover" id="btnStartOverTop" disabled>Start over</button></div>
 
-  <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
-  <div class="steps" id="stepsRow"><span id="step1" data-label="Video">Video</span><span id="step2" data-label="Audio">Audio</span><span id="step3" data-label="Sync">Sync</span><span id="step4" data-label="Generate">Generate</span></div>
-  <div class="errline" id="errLine"></div>
-  <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
-
-  <div class="result" id="resultBox">
-    <span class="bigoffset" id="offsetBig"></span>
-    <div class="cands" id="candRow"></div>
-  </div>
-
   <section class="playerSec" id="playerSec">
     <video class="main sourceHidden" id="vid" playsinline preload="metadata"></video>
+    <div class="result" id="resultBox">
+      <span class="bigoffset previewHeader" id="offsetBig">Preview</span>
+      <div class="cands" id="candRow"></div>
+    </div>
     <div id="resultArea"></div>
+    <div id="downloadWrap"></div>
+    <div class="progress procWrap" id="exportProgWrap"><span class="procLabel">Exporting</span><div class="barTrack"><i id="exportProgBar"></i><span id="exportProgText"></span></div><button type="button" class="secondary" id="btnExportCancel">Cancel</button></div>
 
     <div class="timeline" id="timeline">
       <div class="tl-read"><span id="trimRead"></span><span id="offRead"></span></div>
@@ -197,21 +202,29 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
         <input type="range" id="blend" min="0" max="100" step="1" value="0" aria-label="Room audio">
         <span class="blendval" id="blendVal">0%</span>
       </div>
-      <div class="setrow">
-        <button class="primary" id="btnGenerate" style="width:auto;margin-top:0">Generate</button>
-        <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
-      </div>
-      <div id="downloadWrap"></div>
-      <div class="progress procWrap" id="exportProgWrap"><span class="procLabel">Processing</span><div class="barTrack"><i id="exportProgBar"></i><span id="exportProgText"></span></div><button type="button" class="secondary" id="btnExportCancel">Cancel</button></div>
-      <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
     </div>
   </section>
+
+  <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
+  <div id="generateRow">
+    <button class="primary" id="btnGenerate">Generate</button>
+    <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
+  </div>
+  <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
+  <div class="errline" id="errLine"></div>
+  <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
   <div id="historyWrap"><h4>History</h4><div id="historyList"></div></div>
 </div>
 
 <script>
 (function(){
 "use strict";
+// iOS Safari zoom prevention: suppress double-tap and pinch-gesture zoom so
+// the page stays at fullscreen size (the timeline uses pointer events, not
+// native pinch, so its interactions are unaffected).
+try{ document.addEventListener('dblclick',function(e){ e.preventDefault(); },{passive:false}); }catch(e){}
+try{ document.addEventListener('gesturestart',function(e){ e.preventDefault(); },{passive:false}); }catch(e){}
+try{ document.addEventListener('gesturechange',function(e){ e.preventDefault(); },{passive:false}); }catch(e){}
 var TARGET_SR=22050, FFT_SIZE=2048, HOP=1024;
 var danceFile=null, songFile=null;
 var dancePCM=null, songPCM=null;
@@ -433,7 +446,7 @@ function journalShowRecoveredNotice(){
   try{
     var el=document.getElementById('recoveredNotice');
     var tx=document.getElementById('recoveredNoticeText');
-    if(tx) tx.textContent='Previous session ended unexpectedly during '+(journalRecovered.stage||journalRecovered.rawStage||'unknown stage')+' \u2014 its log was recovered.';
+    if(tx) tx.textContent='Previous session ended unexpectedly during '+(journalRecovered.stage||journalRecovered.rawStage||'unknown stage')+'.';
     if(el) el.classList.add('show');
   }catch(e){}
 }
@@ -701,7 +714,7 @@ async function copyDiagnostics(){
     setDiagStatus('Copied ✓ — paste it anywhere to share.');
     try{ log('Diagnostics copied via '+copyMethod+' ('+text.length+' chars).'); }catch(e){}
   } else {
-    setDiagStatus('Copy failed — diagnostics are selected in the box; press Copy, or open Details and copy the log.');
+    setDiagStatus('Copy failed — the text is selected in the box; press Copy.');
     try{ log('Diagnostics copy FAILED via all methods. Last error: '+diagErrText(copyErr||new Error('unknown'))); var ta2=$('diagFallback'); if(ta2){ ta2.value=buildDiagnosticsText(); ta2.focus(); ta2.select(); } }catch(e){}
   }
   setTimeout(function(){ setDiagStatus(''); },6000);
@@ -711,29 +724,39 @@ function setStatus(t,err){ if(t) log(t); }
 function showError(msg){ var el=$('errLine'); if(!el) return; el.textContent=msg; el.classList.add('show'); try{ log('UI error shown: '+msg); }catch(e){} }
 function clearError(){ var el=$('errLine'); if(!el) return; el.textContent=''; el.classList.remove('show'); }
 var stepState={1:false,2:false,3:false,4:false};
-var barPct=0;
-// Progress advances ONLY on discrete verifiable events (step start / step end);
-// it never moves backwards within a run. Event ladder:
-//   converter load starts 2% · converter ready 6%
-//   dance decode starts 9% · dance decode ends 26%
-//   song decode starts 29% · song decode ends 46%
-//   analysis starts 49% · coarse match ends 56% · fine offset ends 63%
-//   encode starts 66% · ffmpeg encode progress 66%->97% · encode ends 100%
-// Persistent progress readout: ONE element (#progText), created in the markup,
-// updated in place via textContent only — never created/destroyed or
-// hidden/shown on value changes, so the percentage can't flicker. It shows
-// "<pct>% · <elapsed>", overlaid inside the bar track itself.
+var barPct=0, barCeiling=5, progPhase='', progressEverShown=false;
+// Progress milestone ladder — percentage ALLOCATION (not bar width; the
+// track itself stays full width): the pre-render phases together fill
+// roughly the first half of the range, and the render fills the second
+// half. Decoding is the largest share of the pre-render half.
+//   converter load starts 2% · converter ready 5%
+//   video decode starts 7% · video decode ends 25%
+//   audio decode starts 27% · audio decode ends 40%
+//   analysis starts 42% · spectrograms done 45% · coarse search done 47%
+//   candidate verification done 49% · analysis done / render starts 50%
+//   render progress 50%->97% · done 100%
+// Between milestones the displayed percentage creeps slowly toward the
+// next milestone (asymptotically — it approaches but never reaches it
+// until the milestone actually fires), so the bar visibly moves during
+// long operations instead of sitting frozen. The visible text is only
+// "<pct>%" plus at most one plain phase word (Loading / Decoding /
+// Analyzing / Generating / Exporting / Done).
+var PROG_LADDER=[2,5,7,25,27,40,42,45,47,49,50,97,100];
+function progNextCeiling(p){ for(var i=0;i<PROG_LADDER.length;i++){ if(PROG_LADDER[i]>p+0.001) return PROG_LADDER[i]; } return 100; }
+function markProgressShown(){ if(!progressEverShown){ progressEverShown=true; } try{ updateNewBtn(); }catch(e){} }
 var runT0=0, runClockTimer=null;
 var directStageLabel='', lastResultIsDirect=false;
 function fmtClock(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
-function renderProgText(){ var el=$('progText'); if(!el) return; if(barPct>=100){ el.textContent='Done'; return; } var t=runT0?fmtClock(Date.now()-runT0):'0:00'; el.textContent=Math.round(barPct)+'% · '+t+(directStageLabel?(' · '+directStageLabel):''); }
-function startRunClock(){ runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(renderProgText,1000); renderProgText(); }
+function setProgPhase(p){ if(p) progPhase=p; renderProgText(); }
+function renderProgText(){ var el=$('progText'); if(!el) return; if(barPct>=100){ el.textContent='100% · Done'; return; } el.textContent=Math.round(barPct)+'%'+(progPhase?(' · '+progPhase):''); }
+function creepTick(){ if(barPct<100&&barCeiling>barPct){ var gap=barCeiling-barPct; var inc=gap*0.025; if(inc>0){ barPct=Math.min(barCeiling-0.05, barPct+inc); var b=$('progBar'); if(b) b.style.width=barPct+'%'; } } renderProgText(); }
+function startRunClock(){ runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(creepTick,250); renderProgText(); }
 function stopRunClock(){ if(runClockTimer){ clearInterval(runClockTimer); runClockTimer=null; } renderProgText(); }
-function setBarPct(pct){ pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; var w=$('progWrap'); w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); $('progBar').style.width=pct+"%"; renderProgText(); }
+function setBarPct(pct,phase){ if(phase) progPhase=phase; pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; if(barPct>=100){ progPhase='Done'; barCeiling=100; } else { barCeiling=progNextCeiling(barPct); } markProgressShown(); var w=$('progWrap'); if(w) w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); var pb=$('progBar'); if(pb) pb.style.width=pct+"%"; renderProgText(); }
 function markStepDone(n){ stepState[n]=true; var el=$('step'+n); if(el){ el.classList.remove('active'); el.classList.add('done'); el.textContent='\u2713 '+el.dataset.label; } var next=$('step'+(n+1)); if(next&&!stepState[n+1]) next.classList.add('active'); }
 function markStepActive(n){ var el=$('step'+n); if(el&&!stepState[n]) el.classList.add('active'); }
-function resetProgress(full){ clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; $('progBar').style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=66; $('progBar').style.width="66%"; } startRunClock(); }
-function progressForGenerate(ratio){ if(ratio==null) return; setBarPct(66+Math.max(0,Math.min(1,ratio))*31); }
+function resetProgress(full){ clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); if(w) w.style.display="flex"; markProgressShown(); var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; barCeiling=progNextCeiling(0); progPhase='Loading'; var pb0=$('progBar'); if(pb0) pb0.style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=50; barCeiling=progNextCeiling(50); progPhase='Generating'; var pb1=$('progBar'); if(pb1) pb1.style.width="50%"; } startRunClock(); }
+function progressForGenerate(ratio){ if(ratio==null) return; setBarPct(50+Math.max(0,Math.min(1,ratio))*47,'Generating'); }
 var analysisState="idle", analysisPromise=null, filesVersion=0, analysisVersion=-1, confidence=0, lastCandidates=[];
 var _scratchDanceSpec=null, _scratchSongSpec=null, _scratchCoarse=null, _scratchEvals=null;
 function releaseAnalysisScratch(where){
@@ -785,9 +808,7 @@ function trimEnd(){ return trimEndSec==null?danceDur:trimEndSec; }
 // visible. No base trim → plain m:ss exactly as before.
 function baseTrimActive(){ return danceDur>0&&(baseTrimStart>0.001||(baseTrimEnd!=null&&baseTrimEnd<danceDur-0.001)); }
 function fmtTrimPoint(cur, base){
-  if(!baseTrimActive()) return fmtT(cur);
-  var d=cur-base;
-  return base.toFixed(2)+' '+(d<0?'\u2212':'+')+' '+Math.abs(d).toFixed(2);
+  return Number(cur).toFixed(2);
 }
 
 // ---------- files ----------
@@ -806,6 +827,7 @@ function handleFile(f,which){
   try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
   if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; danceVideoW=0; danceVideoH=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
   detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null;
+  try{ var _tl0=$('timeline'); if(_tl0) _tl0.classList.remove('show'); var _ss0=$('settingsSec'); if(_ss0) _ss0.classList.remove('show'); }catch(e){}
   var rb=$('btnResync'); if(rb) rb.disabled=true;
   $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show');
   $(which==='dance'?'metaDance':'metaSong').textContent=f.name+' · '+fmtSize(f.size);
@@ -826,7 +848,10 @@ function handleFile(f,which){
     danceURL=URL.createObjectURL(f);
     $('vid').src=danceURL;
     $('playerSec').classList.add('show');
-    $('settingsSec').classList.add('show');
+    var _gr=$('generateRow'); if(_gr) _gr.classList.add('show');
+    // Editor stays hidden until a generation completes (showEditor).
+    $('settingsSec').classList.remove('show');
+    $('timeline').classList.remove('show');
   }
   try{ detectStorageBackend().then(function(ok){ if(ok) opfsStageInput(f, which); }); }catch(e){}
   updateNewBtn();
@@ -834,7 +859,7 @@ function handleFile(f,which){
 }
 function checkReady(){
   var gen=$('btnGenerate'); if(gen) gen.disabled=!(danceFile&&songFile);
-  if(danceDur>0){ $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); }
+  if(danceDur>0){ if(generatedOnce) $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); }
   if(danceFile&&songFile&&analysisState==="idle"){ runAutoPipeline(); }
 }
 setupDrop('dropDance','fileDance','dance');
@@ -924,7 +949,7 @@ async function ensureFFmpeg(onProgress){
   var diagLoadT0=Date.now();
   diagConverter.attempted=true; diagConverter.loadStartIso=new Date(diagLoadT0).toISOString();
   if(!window.FFmpegWASM||!window.FFmpegUtil){ var missErr=new Error('Converter failed to load — reload the page.'); diagConverter.loadErrors.push(diagStamp()+' '+diagErrText(missErr)); logError('converter-load',missErr); throw missErr; }
-  setBarPct(2); // event: converter load starts
+  setBarPct(2,'Loading'); // event: converter load starts
   log('Converter load starts: FFmpegWASM present='+!!window.FFmpegWASM+' | FFmpegUtil present='+!!window.FFmpegUtil);
   ffmpeg=new FFmpegWASM.FFmpeg();
   try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
@@ -954,13 +979,13 @@ async function ensureFFmpeg(onProgress){
   try{ await ffmpeg.load({ classWorkerURL: base+'814.ffmpeg.js', coreURL: base+'ffmpeg-core.js', wasmURL: wasmURL }); }
   catch(loadErr){ diagConverter.loadErrors.push(diagStamp()+' '+diagErrText(loadErr)); diagConverter.loadDurationMs=Date.now()-diagLoadT0; logError('converter-load',loadErr); throw loadErr; }
   diagConverter.loadDurationMs=Date.now()-diagLoadT0; diagConverter.loaded=true;
-  ffmpegLoaded=true; setBarPct(6); log('Converter ready in '+diagConverter.loadDurationMs+'ms.'); return ffmpeg; // event: converter ready
+  ffmpegLoaded=true; setBarPct(5,'Loading'); log('Converter ready in '+diagConverter.loadDurationMs+'ms.'); return ffmpeg; // event: converter ready
 }
 async function decodeViaFFmpeg(file,startPct){
   return withFFmpegLock(async function(){
     log('Loading ffmpeg (audio-only extraction)…');
     var ff=await withTimeout(ensureFFmpeg(null),60000,'Loading ffmpeg for '+file.name);
-    if(startPct) setBarPct(startPct); // event: decode starts (converter ready, extraction begins)
+    if(startPct) setBarPct(startPct,'Decoding'); // event: decode starts (converter ready, extraction begins)
     var ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,'')||'bin';
     var inName='in.'+ext, outName='out.wav';
     log('ffmpeg: writing '+file.name+' ('+fmtSize(file.size)+')…');
@@ -984,6 +1009,7 @@ async function decodeFileAudio(file,label,startPct){
   var isVideoFile=(typeof danceFile!=='undefined'&&danceFile&&fileKey(file)===fileKey(danceFile));
   var dd=isVideoFile?diagFiles.video:diagFiles.audio;
   dd.decodeRoute='ffmpeg wasm — extract audio only (-vn -ac 1 -ar '+TARGET_SR+' pcm_s16le WAV) then parseWavToMonoFloat32';
+  try{ setProgPhase('Decoding'); }catch(e){}
   log('Decode starts ['+dd.role+']: '+file.name+' | route=ffmpeg-wasm audio extraction | target mono '+TARGET_SR+' Hz');
   var hb=startHeartbeat(label,file,t0);
   try{
@@ -1185,7 +1211,7 @@ function showCandidates(coarse){
     var b=document.createElement('button'); b.className='cand'; b.type='button'; b.textContent=sec.toFixed(2)+'s';
     b.addEventListener('click',function(){
       var f=fineAlign(dancePCM,songPCM,sec); detectedOffset=f.offset; confidence=f.confidence; audioPos=-detectedOffset;
-      $('offsetBig').textContent='Offset '+detectedOffset.toFixed(3)+'s';
+      $('offsetBig').textContent='Preview';
       log('Candidate '+sec.toFixed(3)+'s → fine offset '+detectedOffset.toFixed(3)+'s · confidence '+confidence.toFixed(3));
       layoutTimeline(); invalidateDownload();
     });
@@ -1202,28 +1228,29 @@ function runAnalysis(){
       markStepActive(1);
       log('Analysis pipeline starts | filesVersion='+ver+' | Video='+danceFile.name+' ('+fmtBytesMB(danceFile.size)+', '+(danceFile.type||'no MIME')+') | Audio='+songFile.name+' ('+fmtBytesMB(songFile.size)+', '+(songFile.type||'no MIME')+')');
       log('Decoding Video: '+danceFile.name+' …');
-      var d=await cancellable(fileToMono22050(danceFile,'Decoding Video',9)); if(ver!==filesVersion||tok!==runToken){ if(tok!==runToken) analysisState="idle"; return; }
-      dancePCM=d.pcm; danceDur=d.duration; diagStage='decode-audio'; setBarPct(26); markStepDone(1); markStepActive(2); // event: video decode ends
+      var d=await cancellable(fileToMono22050(danceFile,'Decoding Video',7)); if(ver!==filesVersion||tok!==runToken){ if(tok!==runToken) analysisState="idle"; return; }
+      dancePCM=d.pcm; danceDur=d.duration; diagStage='decode-audio'; setBarPct(25,'Decoding'); markStepDone(1); markStepActive(2); // event: video decode ends
       log('Video: '+d.duration.toFixed(2)+'s · RMS '+d.rms.toFixed(4)+' · peak '+d.peak.toFixed(3));
       if(d.rms<0.004||d.peak<0.02) log('⚠ Video near-silent — sync needs its background music audible.');
       log('Decoding Audio: '+songFile.name+' …');
-      var s=await cancellable(fileToMono22050(songFile,'Decoding Audio',29)); if(ver!==filesVersion||tok!==runToken){ if(tok!==runToken) analysisState="idle"; return; }
-      songPCM=s.pcm; songDur=s.duration; diagStage='analysis'; setBarPct(46); markStepDone(2); markStepActive(3); // event: audio decode ends
+      var s=await cancellable(fileToMono22050(songFile,'Decoding Audio',27)); if(ver!==filesVersion||tok!==runToken){ if(tok!==runToken) analysisState="idle"; return; }
+      songPCM=s.pcm; songDur=s.duration; diagStage='analysis'; setBarPct(40,'Analyzing'); markStepDone(2); markStepActive(3); // event: audio decode ends
       log('Audio: '+s.duration.toFixed(2)+'s · RMS '+s.rms.toFixed(4)+' · peak '+s.peak.toFixed(3));
       if(!dancePCM.length||!songPCM.length) throw new Error('No audio decoded — a file has no audio track.');
       if(s.rms<0.001) throw new Error('Audio file is silent.');
-      setBarPct(49); // event: analysis starts
+      setBarPct(42,'Analyzing'); // event: analysis starts
       log('Analysis starts: building mel spectrograms (32 bands, FFT '+FFT_SIZE+', hop '+HOP+')…');
       log('Analyzing — building mel spectrograms…');
       await tick();
       var dSpec=melSpectrogram(dancePCM), sSpec=melSpectrogram(songPCM);
       _scratchDanceSpec=dSpec; _scratchSongSpec=sSpec;
       log('Spectrograms: video '+dSpec[0].length+' frames · audio '+sSpec[0].length+' frames');
+      setBarPct(45,'Analyzing'); // event: spectrograms done
       log('Coarse alignment — cross-correlating 32 bands…');
       await tick();
       var coarse=coarseAlign(dSpec,sSpec);
       _scratchCoarse=coarse;
-      setBarPct(56); // event: coarse match ends
+      setBarPct(47,'Analyzing'); // event: coarse match ends
       // CANDIDATE VERIFICATION: the raw coarse argmax is NOT trusted — with
       // looping tracks a repetition mirage can outscore the true alignment
       // (IMG_0038: mirage +8.499s beat the true -6.266s on raw score, while
@@ -1245,6 +1272,7 @@ function runAnalysis(){
       }
       evals.sort(function(a,b){ if(Math.abs(b.verifiedScore-a.verifiedScore)>1e-9) return b.verifiedScore-a.verifiedScore; return a.spread-b.spread; });
       _scratchEvals=evals;
+      setBarPct(49,'Analyzing'); // event: candidate verification done
       log('Verified candidates (verified = median of top-half window scores):');
       evals.forEach(function(e3,i){ log('  '+(i+1)+'. coarse '+e3.coarseSec.toFixed(3)+'s · verified '+e3.verifiedScore.toFixed(4)+' · best window '+e3.bestScore.toFixed(4)+' · median offset '+e3.medianOffset.toFixed(3)+'s · spread '+(isFinite(e3.spread)?e3.spread.toFixed(3)+'s':'n/a')+' · windows '+e3.wins.length+' · raw score '+e3.rawScore.toFixed(1)); });
       var winner=evals[0];
@@ -1264,14 +1292,14 @@ function runAnalysis(){
         log('Fine gate: passed — final offset = median of winner\'s top-half window offsets ('+winner.medianOffset.toFixed(3)+'s).');
         fine={offset:winner.medianOffset, confidence:winner.verifiedScore};
       }
-      detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(63); markStepDone(3); markStepActive(4); // event: fine offset ends
+      detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(50,'Generating'); markStepDone(3); markStepActive(4); // event: fine offset ends
       log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
       analysisState="done"; analysisVersion=ver;
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
       $('resultBox').classList.add('show');
-      $('offsetBig').textContent='Offset '+detectedOffset.toFixed(3)+'s';
+      $('offsetBig').textContent='Preview';
       showCandidates(coarse);
-      $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip();
+      if(generatedOnce) $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip();
       log('Fine offset '+detectedOffset.toFixed(3)+'s · confidence '+confidence.toFixed(3));
       log('Sync done.'); flushFilmstrip(); if(window.__autoAfterAnalysis){ var cb=window.__autoAfterAnalysis; window.__autoAfterAnalysis=null; try{ cb(); }catch(e){} }
     }catch(err){
@@ -1303,7 +1331,7 @@ function layoutTimeline(){
   syncOffsetInput();
   requestAnimationFrame(drawWaveform);
 }
-vid.addEventListener('loadedmetadata',function(){ if(vid.duration&&isFinite(vid.duration)){ danceDur=vid.duration; if(vid.videoWidth){ danceVideoW=vid.videoWidth; danceVideoH=vid.videoHeight; } $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); } });
+vid.addEventListener('loadedmetadata',function(){ if(vid.duration&&isFinite(vid.duration)){ danceDur=vid.duration; if(vid.videoWidth){ danceVideoW=vid.videoWidth; danceVideoH=vid.videoHeight; } if(generatedOnce) $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); } });
 function drawWaveform(){
   var c=$('wave'), block=$('audioBlock'); if(!c||!block) return;
   var w=block.clientWidth, h=block.clientHeight; if(w<4||h<4) return;
@@ -2209,11 +2237,11 @@ async function readRenderOutput(ff, fsOutName, opfsName){
 // read-out/stream-out · 100% done. Percentage text is one persistent
 // element updated in place.
 var exportBarPct=0, exportT0=0, exportClockTimer=null, exportLastMilestone=-1;
-function renderExportProgText(){ var el=$('exportProgText'); if(!el) return; if(exportBarPct>=100){ el.textContent='Done'; return; } el.textContent=Math.round(exportBarPct)+'%'+(exportT0?(' · '+fmtClock(Date.now()-exportT0)):''); }
+function renderExportProgText(){ var el=$('exportProgText'); if(!el) return; if(exportBarPct>=100){ el.textContent='100% · Done'; return; } el.textContent=Math.round(exportBarPct)+'% · Exporting'; }
 function setExportBarPct(pv){ pv=Math.max(0,Math.min(100,pv)); if(pv<exportBarPct) pv=exportBarPct; exportBarPct=pv; var b=$('exportProgBar'); if(b) b.style.width=pv+'%'; renderExportProgText(); }
 function showExportProgress(v){
   var w=$('exportProgWrap'); if(!w) return;
-  if(v){ w.style.display='flex'; exportBarPct=0; var b=$('exportProgBar'); if(b) b.style.width='0%'; exportLastMilestone=-1; exportT0=Date.now(); if(exportClockTimer) clearInterval(exportClockTimer); exportClockTimer=setInterval(renderExportProgText,1000); renderExportProgText(); }
+  if(v){ w.style.display='flex'; markProgressShown(); exportBarPct=0; var b=$('exportProgBar'); if(b) b.style.width='0%'; exportLastMilestone=-1; exportT0=Date.now(); if(exportClockTimer) clearInterval(exportClockTimer); exportClockTimer=setInterval(renderExportProgText,1000); renderExportProgText(); }
   else { w.style.display='none'; if(exportClockTimer){ clearInterval(exportClockTimer); exportClockTimer=null; } }
 }
 var exportProgLo=15, exportProgHi=95; // ffmpeg-progress window for the CURRENT export exec — the two-stage export narrows it per stage (stage 1 audio 15→50, stage 2 copy mux 50→95); single-graph renders use the full 15→95
@@ -2377,7 +2405,7 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
   var directLastMilestone=-1;
   var ff=await cancellable(ensureFFmpeg(function(ratio){
     if(ratio==null) return;
-    var lo=(directStageNum===1)?66:85, hi=(directStageNum===1)?85:97;
+    var lo=(directStageNum===1)?50:75, hi=(directStageNum===1)?75:97;
     setBarPct(lo+Math.max(0,Math.min(1,ratio))*(hi-lo));
     var m=Math.floor(ratio*10)*10;
     if(m>directLastMilestone){ directLastMilestone=m; log('Direct export '+(directStageNum===1?'stage 1 (audio)':'stage 2 (mux)')+' progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); }
@@ -2405,9 +2433,9 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
       await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for direct export');
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
-    setBarPct(66);
+    setBarPct(50,'Generating');
     // Stage 1 — processed audio alone (existing audio filter graph).
-    directStageNum=1; directStageLabel='Stage 1/2 · Audio'; renderProgText();
+    directStageNum=1; directStageLabel=''; progPhase='Generating'; renderProgText();
     var s1Args=buildRenderArgs({encHeight:0, audioOnly:true, outName:'stage1-audio.m4a', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
     diagStage='export-stage-1';
     log('Direct export stage 1 (audio): rendering the processed audio track only → stage1-audio.m4a | ffmpeg args='+s1Args.join(' '));
@@ -2417,9 +2445,9 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
     try{ var s1Data=await ff.readFile('stage1-audio.m4a'); if(s1Data) s1Size=s1Data.length||s1Data.byteLength||0; s1Data=null; }catch(e){}
     if(s1Size==null||s1Size===0) throw new Error('Direct export stage 1 (audio) produced no audio file.');
     log('Direct export stage 1 (audio): size='+fmtBytesMB(s1Size)+' | duration='+s1DurSec.toFixed(1)+'s');
-    setBarPct(85);
+    setBarPct(75,'Exporting');
     // Stage 2 — pure stream-copy mux.
-    directStageNum=2; directStageLabel='Stage 2/2 · Mux'; renderProgText(); directLastMilestone=-1;
+    directStageNum=2; directStageLabel=''; progPhase='Exporting'; renderProgText(); directLastMilestone=-1;
     var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'dance-synced.mp4'];
     diagStage='export-stage-2';
     log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | ffmpeg args='+s2Args.join(' '));
@@ -2434,7 +2462,7 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
     directStageLabel=''; renderProgText();
     throw renderErr;
   }
-  setBarPct(96);
+  setBarPct(97,'Exporting');
   log('Direct export encode ends — freeing inputs from converter FS before reading output…');
   await freeConverterInputs(ff,dExt,sExt);
   if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }
@@ -2601,6 +2629,14 @@ function saveResult(){
   log('Save/Share tapped → fallback shown (share unavailable): canShare=false → fallback shown | '+why);
   log(msg); showError(msg);
 }
+function showEditor(){
+  // Editor (timeline / offset / trim / blend / Export quality / Re-sync)
+  // appears only once a generation has completed successfully.
+  var tl=$('timeline'); if(tl) tl.classList.add('show');
+  var ss=$('settingsSec'); if(ss) ss.classList.add('show');
+  try{ layoutTimeline(); }catch(e){}
+  try{ buildFilmstrip(); }catch(e){}
+}
 function showResult(blob, opts){
   opts=opts||{};
   lastResultIsDirect=!!opts.isDirect;
@@ -2660,13 +2696,8 @@ function showResult(blob, opts){
   saveRow.appendChild(dl);
   saveRow.appendChild(openA);
   wrap.appendChild(saveRow);
-  var guide=document.createElement('p'); guide.className='note';
-  if(lastResultIsDirect){
-    guide.textContent='The player above is the full-quality export itself (Full quality, no trim — generated directly). Share, Download and Open deliver this exact file immediately, with no extra rendering. In the share sheet, pick "Save Video" or "Save to Files" to keep it.';
-  } else {
-    guide.textContent='The player above is a lightweight 480p proxy for editing. Share, Download and Open first render the full export at the selected Export quality — watch the Processing bar under the buttons — then deliver that file. In the share sheet, pick "Save Video" or "Save to Files" to keep it.';
-  }
-  wrap.appendChild(guide);
+  // No explanatory text under the download buttons (item 5).
+  showEditor();
   updateNewBtn();
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
 }
@@ -2698,7 +2729,7 @@ function restoreHistory(h){
   var s=h.snap;
   // After a New reset the editor/result sections are hidden; restoring a
   // History entry must bring them back so its video can be watched/saved.
-  $('playerSec').classList.add('show'); $('settingsSec').classList.add('show');
+  $('playerSec').classList.add('show'); var _gr2=$('generateRow'); if(_gr2) _gr2.classList.add('show');
   var qEl=document.querySelector('input[name=quality][value="'+s.q+'"]'); if(qEl) qEl.checked=true;
   blendVal=s.blend; var bl=$('blend'); bl.value=Math.round(s.blend*100); $('blendVal').textContent=Math.round(s.blend*100)+'%';
   trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
@@ -2729,17 +2760,25 @@ function restoreHistory(h){
 function sessionActive(){ return !!(danceFile||songFile||historyEntries.length>0); }
 function updateNewBtn(){
   var active=sessionActive();
-  var w=$('newWrap'); if(w) w.style.display=active?'block':'none';
+  var visible=!!(progressEverShown&&active);
+  var w=$('newWrap'); if(w){ w.style.display=''; w.classList.toggle('show',visible); }
+  var tw=$('topResetWrap'); if(tw){ tw.style.display=''; tw.classList.toggle('show',progressEverShown); }
   var top=$('btnStartOverTop'); if(top) top.disabled=!active;
   var bn=$('btnNew'); if(bn) bn.disabled=!active;
 }
 function resetAll(){
-  var running=isGenerating||pipelineRunning||analysisState==='running';
+  // Start over cancels any in-flight work first (generation, export, or
+  // analysis): bump tokens, terminate the converter worker (aborts the
+  // running ffmpeg exec; the WebCodecs pipeline checks runToken), and
+  // reject both cancel signals so pending stages abort.
+  var running=isGenerating||pipelineRunning||analysisState==='running'||isExporting;
   runToken++; filesVersion++;
+  exportToken++;
+  if(running&&cancelReject) cancelReject(new Error('Cancelled'));
+  if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
   if(running){
     ffmpegChain=Promise.resolve();
     if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; ffmpegProgressCb=null; }
-    if(cancelReject) cancelReject(new Error('Cancelled'));
   }
   danceFile=null; songFile=null;
   dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
@@ -2770,18 +2809,18 @@ function resetAll(){
   $('blend').value=0; $('blendVal').textContent='0%';
   $('offInput').value='0.000';
   $('btnResync').disabled=true;
-  $('resultBox').classList.remove('show'); $('offsetBig').textContent=''; $('candRow').innerHTML='';
+  $('resultBox').classList.remove('show'); $('offsetBig').textContent='Preview'; $('candRow').innerHTML='';
   $('downloadWrap').innerHTML='';
   var area=$('resultArea'); area.innerHTML=''; area.classList.remove('show');
   $('filmstrip').innerHTML='';
   $('timeline').classList.remove('show');
-  $('playerSec').classList.remove('show'); $('settingsSec').classList.remove('show');
+  $('playerSec').classList.remove('show'); $('settingsSec').classList.remove('show'); var _gr3=$('generateRow'); if(_gr3) _gr3.classList.remove('show');
   $('btnGenerate').disabled=true;
   clearError(); stopRunClock(); setCancelVisible(false);
   stepState={1:false,2:false,3:false,4:false};
   for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } }
   barPct=0; $('progBar').style.width='0%'; $('progText').textContent='';
-  $('progWrap').style.display='none'; $('stepsRow').classList.remove('show');
+  $('progWrap').style.display='none'; var _sr=$('stepsRow'); if(_sr) _sr.classList.remove('show'); progPhase=''; barCeiling=5;
   diagStage='boot'; diagRunT0=0; diagResult.blobSize=null; diagResult.hasObjectURL=false; diagResult.urlPrefix=''; diagResult.settings=null;
   diagFiles.video={role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
   diagFiles.audio={role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
@@ -2816,7 +2855,7 @@ async function doGenerate(opts){
       else log('Generate: running sync analysis…');
       try{ await cancellable(withTimeout(runAnalysis(),300000,'Sync analysis for '+danceFile.name+' ('+fmtSize(danceFile.size)+') + '+songFile.name+' ('+fmtSize(songFile.size)+')')); }
       catch(timeoutErr){ analysisState="error"; analysisPromise=null; throw new Error('Sync analysis did not finish: '+(timeoutErr.message||timeoutErr)); }
-      if(analysisState!=="done") throw new Error('Sync analysis failed — see log above.');
+      if(analysisState!=="done") throw new Error('Sync analysis failed');
       log('Generate: sync analysis done — building video…');
     }
     var qEl=document.querySelector('input[name=quality]:checked');
@@ -2865,7 +2904,7 @@ async function doGenerate(opts){
       markStepActive(4);
       if(diagStorage.opfsAvailable&&!opfsStaged.dance){ try{ await opfsStageInput(danceFile,'dance'); }catch(e){} }
       if(diagStorage.opfsAvailable&&!opfsStaged.song){ try{ await opfsStageInput(songFile,'song'); }catch(e){} }
-      setBarPct(66); // event: direct export encode starts (stage progress then maps 66%->97%)
+      setBarPct(50,'Generating'); // event: direct export starts (stage progress then maps 50%->97%)
       var dRes=await renderDirectExportForGenerate(exportSig,tStart,tEnd,tDur,eff);
       var dBlob=dRes.blob;
       var dSecs=((Date.now()-t0)/1000).toFixed(1);
@@ -2976,7 +3015,7 @@ async function doGenerate(opts){
       log('Proxy: -lowres not used (source height '+(srcH?srcH+'p':'unknown')+' — below the 1440p threshold).');
     }
     var args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:wantLowres});
-    setBarPct(66); // event: proxy encode starts (ffmpeg progress then interpolates 66% -> 97%)
+    setBarPct(50,'Generating'); // event: render starts (ffmpeg progress then interpolates 50% -> 97%)
     log('Proxy encode exec: ffmpeg args='+args.join(' '));
     var proxyExecErr=null, proxyExecRC=null;
     try{ proxyExecRC=await cancellable(withFFmpegLock(async function(){ return await withTimeout(ff.exec(args),600000,'Generating proxy video from '+danceFile.name); })); }
@@ -3026,7 +3065,7 @@ async function doGenerate(opts){
     try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
-    else { console.error(err); logError('generate',err); log('❌ Generate failed: '+(err.message||err)); showError('❌ Generate failed: '+(err.message||err)); try{ journalMarkHandledError(); }catch(e){} }
+    else { console.error(err); logError('generate',err); var genMsg=(err.message||err); var genShown=(genMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Generate failed: '+genMsg); log(genShown); showError(genShown); try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     if(typeof proxyMounted!=='undefined'&&proxyMounted&&proxyMounted.ok&&ffmpeg){ try{ await unmountInputsWorkerFS(ffmpeg); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }catch(e){} proxyMounted=null; }
     directStageLabel='';
@@ -3062,21 +3101,21 @@ async function runAutoPipeline(){
       await new Promise(function(resolve,reject){
         window.__autoAfterAnalysis=function(){ resolve(); };
         var p=runAnalysis();
-        if(p&&p.then) p.then(function(){ setTimeout(function(){ if(analysisState==="done") resolve(); else if(analysisState==="error") reject(new Error('Sync analysis failed — see log above.')); },50); }).catch(function(e){ reject(e); });
+        if(p&&p.then) p.then(function(){ setTimeout(function(){ if(analysisState==="done") resolve(); else if(analysisState==="error") reject(new Error('Sync analysis failed')); },50); }).catch(function(e){ reject(e); });
         setTimeout(function(){ if(analysisState==="done") resolve(); else if(analysisState==="error") reject(new Error('Sync analysis failed')); },305000);
       });
       // If analysis completed but callback already consumed, continue
       window.__autoAfterAnalysis=null;
-      if(analysisState!=="done") throw new Error('Sync analysis failed — see log above.');
+      if(analysisState!=="done") throw new Error('Sync analysis failed');
     } else {
-      setBarPct(26); markStepDone(1); setBarPct(46); markStepDone(2); setBarPct(63); markStepDone(3);
+      setBarPct(25,'Decoding'); markStepDone(1); setBarPct(40,'Analyzing'); markStepDone(2); setBarPct(50,'Generating'); markStepDone(3);
     }
     if(ver!==filesVersion) return;
     autoGenForVersion=ver;
     await doGenerate({fullRun:true});
   }catch(autoErr){
     if(isCancelErr(autoErr)){ /* cancelled — already logged */ }
-    else { console.error(autoErr); log('❌ Auto-generate: '+(autoErr.message||autoErr)); showError('❌ Auto-generate: '+(autoErr.message||autoErr)); try{ journalMarkHandledError(); }catch(e){} }
+    else { console.error(autoErr); var autoMsg=(autoErr.message||autoErr); var autoShown=(autoMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Auto-generate: '+autoMsg); log(autoShown); showError(autoShown); try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     pipelineRunning=false;
     if(!isGenerating){ stopRunClock(); setCancelVisible(false); }
