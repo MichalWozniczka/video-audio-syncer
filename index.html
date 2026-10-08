@@ -83,6 +83,11 @@ video.main.sourceHidden{display:none!important}
 .offInput{flex:0 1 100px;min-width:9.5ch;width:100px;padding:7px 2px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-family:ui-monospace,Menlo,monospace;font-size:16px;text-align:center}
 .offsetRow .secondary{padding:6px 10px;font-size:12.5px;margin-left:auto;flex:none;white-space:nowrap}
 .offsetRow .secondary:disabled{opacity:.45;cursor:not-allowed}
+.offBtn:disabled{opacity:.45;cursor:not-allowed}
+.offInput:disabled{opacity:.55;cursor:not-allowed}
+.timeline.locked .handle,.timeline.locked #audioBlock{pointer-events:none;opacity:.55}
+#restoreNote{display:none;font-size:12.5px;color:var(--muted);margin:10px 2px 0}
+#restoreNote.show{display:block}
 /* ---- timeline ---- */
 .timeline{margin-top:10px;display:none;user-select:none;-webkit-user-select:none;padding:0 28px;box-sizing:border-box}
 .timeline.show{display:block}
@@ -184,6 +189,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
           <div id="audioBlock"><canvas id="wave"></canvas></div>
         </div>
       </div>
+      <div id="restoreNote">Re-upload the video and audio files to edit this version.</div>
       <div class="offsetRow">
         <span class="offlabel">Additional offset (s):</span>
         <button type="button" class="offBtn" id="offMinus" aria-label="Offset minus 0.02 seconds">◀</button>
@@ -231,6 +237,8 @@ var TARGET_SR=22050, FFT_SIZE=2048, HOP=1024;
 var danceFile=null, songFile=null;
 var dancePCM=null, songPCM=null;
 var danceDur=0, songDur=0;
+var restoredDur=0, restoredSongDur=0; // source durations carried by a History entry's metadata — used to display the editor (trim/offset readouts, offset input) after a post-reload restore, when no source files are loaded and danceDur/songDur are still 0
+var restoreNeedsSources=false; // true after a post-reload History restore (no source files): timeline dragging + Re-sync disabled, Apply edits disabled, and the editor shows the re-upload note until the sources are uploaded again
 var detectedOffset=0;
 var trimStartSec=0, trimEndSec=null; // null = full duration
 var baseTrimStart=0, baseTrimEnd=null; // trim of the restored/last-generated version; readouts compose against it when it differs from full range
@@ -824,13 +832,15 @@ function withFFmpegLock(fn){
 // Edits NEVER touch the generated result: once a result video exists it stays
 // visible until a new Generate/auto-run completes and replaces it.
 function invalidateDownload(){ invalidateExport('settings edit'); if(generatedOnce) log('Edits changed — proxy preview stays on screen until you tap Generate; any cached export is now stale and will re-render on the next Share/Download/Open.'); }
-function trimEnd(){ return trimEndSec==null?danceDur:trimEndSec; }
+function editorDur(){ return danceDur>0?danceDur:(restoredDur||0); } // duration the editor displays against: the loaded source's, or the restored History entry's stored duration when no source is loaded
+function editorSongDur(){ return songDur>0?songDur:(restoredSongDur||0); }
+function trimEnd(){ return trimEndSec==null?editorDur():trimEndSec; }
 // Cumulative trim readout: when the version on screen was itself trimmed
 // (restored from History or just generated with a non-full trim), show each
 // endpoint as "{base} + {delta}" / "{base} − {delta}" in plain seconds with
 // two decimals, so re-trimming a cropped video keeps its original timeline
 // visible. No base trim → plain m:ss exactly as before.
-function baseTrimActive(){ return danceDur>0&&(baseTrimStart>0.001||(baseTrimEnd!=null&&baseTrimEnd<danceDur-0.001)); }
+function baseTrimActive(){ var d=editorDur(); return d>0&&(baseTrimStart>0.001||(baseTrimEnd!=null&&baseTrimEnd<d-0.001)); }
 function fmtTrimPoint(cur, base){
   return Number(cur).toFixed(2);
 }
@@ -903,6 +913,7 @@ function handleFile(f,which){
   try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
   if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; danceVideoW=0; danceVideoH=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
   detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null; appliedSnapshot=null;
+  restoredDur=0; restoredSongDur=0; try{ setRestoreNeedsSources(false); }catch(e){} // a fresh source upload ends any post-reload display-only restore state; the new files drive the editor from here
   try{ var _tl0=$('timeline'); if(_tl0) _tl0.classList.remove('show'); var _ss0=$('settingsSec'); if(_ss0) _ss0.classList.remove('show'); var _eh0=$('editVideoHeader'); if(_eh0) _eh0.classList.remove('show'); }catch(e){}
   var rb=$('btnResync'); if(rb) rb.disabled=true;
   $('resultBox').classList.remove('show'); var _ps0=$('previewSub'); if(_ps0) _ps0.classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show'); resultVideoEl=null;
@@ -1402,9 +1413,14 @@ function runAnalysis(){
 // ---------- timeline ----------
 var vid=$('vid');
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
-function pct(t){ return danceDur>0?(t/danceDur*100):0; }
+function pct(t){ var d=editorDur(); return d>0?(t/d*100):0; }
 function layoutTimeline(){
-  if(!danceDur) return;
+  var dur=editorDur();
+  if(!dur){
+    // No duration from anywhere yet (no source loaded, nothing restored):
+    // positioning is impossible, but never leave stale readouts behind.
+    return;
+  }
   var ts=trimStartSec, te=trimEnd();
   $('hL').style.left=pct(ts)+'%';
   $('hR').style.left=pct(te)+'%';
@@ -1412,7 +1428,8 @@ function layoutTimeline(){
   var dr=$('dimR'); dr.style.left=pct(te)+'%'; dr.style.width=(100-pct(te))+'%';
   var sb=$('selBorder'); sb.style.left=pct(ts)+'%'; sb.style.width=(pct(te)-pct(ts))+'%';
   var block=$('audioBlock');
-  if(songDur>0){ block.style.display='block'; block.style.left=pct(audioPos)+'%'; block.style.width=(songDur/danceDur*100)+'%'; }
+  var sDur=editorSongDur();
+  if(sDur>0){ block.style.display='block'; block.style.left=pct(audioPos)+'%'; block.style.width=(sDur/dur*100)+'%'; }
   else block.style.display='none';
   $('trimRead').textContent=fmtTrimPoint(ts, baseTrimStart)+' – '+fmtTrimPoint(te, baseTrimEnd==null?danceDur:baseTrimEnd);
   $('offRead').textContent='Audio '+effOffset().toFixed(3)+'s';
@@ -1546,6 +1563,7 @@ function laneTime(clientX,lane){
 }
 function dragHandle(el,isLeft){
   el.addEventListener('pointerdown',function(e){
+    if(restoreNeedsSources) return; // timeline is display-only until the source files are re-uploaded
     e.preventDefault(); e.stopPropagation();
     try{ el.setPointerCapture(e.pointerId); }catch(err){}
     var lane=$('videoLane');
@@ -1564,6 +1582,7 @@ dragHandle($('hL'),true); dragHandle($('hR'),false);
 (function(){
   var block=$('audioBlock');
   block.addEventListener('pointerdown',function(e){
+    if(restoreNeedsSources) return; // timeline is display-only until the source files are re-uploaded
     e.preventDefault(); e.stopPropagation();
     try{ block.setPointerCapture(e.pointerId); }catch(err){}
     var lane=$('audioLane'), startX=e.clientX, startPos=audioPos, width=lane.getBoundingClientRect().width||1;
@@ -1636,7 +1655,24 @@ function settingsMatchApplied(){
 function updateApplyEditsState(){
   var b=$('btnGenerate'); if(!b) return;
   var busy=false; try{ busy=!!(isGenerating||pipelineRunning); }catch(e){}
-  b.disabled = busy || !danceFile || !songFile || settingsMatchApplied();
+  b.disabled = busy || restoreNeedsSources || !danceFile || !songFile || settingsMatchApplied();
+}
+// Post-reload History restore state: the restored version plays and its
+// real values are on display, but nothing on the timeline can be edited
+// until the source files exist again. Lock the timeline controls
+// (trim handles, audio-block drag, offset input/steppers, Re-sync),
+// keep Apply edits disabled (updateApplyEditsState), and show the one
+// plain note in the editor. Cleared as soon as a source file is picked
+// (handleFile resets the session) or on Start over.
+function setRestoreNeedsSources(on){
+  restoreNeedsSources=!!on;
+  var note=$('restoreNote'); if(note) note.classList.toggle('show',restoreNeedsSources);
+  var tl=$('timeline'); if(tl) tl.classList.toggle('locked',restoreNeedsSources);
+  var rb=$('btnResync'); if(rb) rb.disabled=restoreNeedsSources?true:rb.disabled;
+  var inp=$('offInput'); if(inp) inp.disabled=restoreNeedsSources;
+  var mn=$('offMinus'); if(mn) mn.disabled=restoreNeedsSources;
+  var pl=$('offPlus'); if(pl) pl.disabled=restoreNeedsSources;
+  try{ updateApplyEditsState(); }catch(e){}
 }
 function updatePreviewSub(){
   var el=$('previewSub'); if(!el) return;
@@ -3189,13 +3225,34 @@ function restoreHistory(h){
   $('playerSec').classList.add('show'); var _gr2=$('generateRow'); if(_gr2) _gr2.classList.toggle('show',firstGenDone);
   var qEl=document.querySelector('input[name=quality][value="'+s.q+'"]'); if(qEl) qEl.checked=true;
   blendVal=s.blend; var bl=$('blend'); bl.value=Math.round(s.blend*100); $('blendVal').textContent=Math.round(s.blend*100)+'%';
+  // Restore the entry's own context from its metadata BEFORE laying out
+  // the editor: the detected offset (so the Additional offset input shows
+  // eff − detected, the value the user actually set — not 0.000) and the
+  // source durations (so layoutTimeline can position the timeline and
+  // fill the trim/offset readouts). After a reload none of this survives
+  // in memory — danceDur/songDur/detectedOffset are all 0 — which is
+  // exactly why the editor used to show blank readouts and a 0.000
+  // offset. Entries saved before this metadata existed fall back to
+  // their trim end as the duration.
+  var sourcesAbsent=!(danceFile&&songFile);
+  if(typeof s.detected==='number'&&isFinite(s.detected)) detectedOffset=s.detected;
+  restoredDur=(typeof s.srcDur==='number'&&isFinite(s.srcDur)&&s.srcDur>0)?s.srcDur:(s.tEnd||0);
+  restoredSongDur=(typeof s.songDur==='number'&&isFinite(s.songDur)&&s.songDur>0)?s.songDur:0;
   trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
   trimEndSec=(danceDur>0&&s.tEnd>=danceDur-0.01)?null:s.tEnd;
   baseTrimStart=s.tStart; baseTrimEnd=s.tEnd; // restored version's trim becomes the composition base
   audioPos=-s.eff;
+  // Without the source files the restored values are display-only:
+  // lock the timeline + Re-sync, keep Apply edits disabled, and show
+  // the re-upload note in the editor. With sources loaded (in-session
+  // restore) everything stays editable exactly as before.
+  setRestoreNeedsSources(sourcesAbsent);
+  showEditor();
   layoutTimeline();
+  syncOffsetInput();
   updatePreviewSub();
   log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
+  if(sourcesAbsent) log('History: restored after reload with no source files loaded — editor displays the restored values (additional offset '+(manualDelta()>=0?'+':'')+manualDelta().toFixed(3)+'s, trim '+trimStartSec.toFixed(2)+'–'+trimEnd().toFixed(2)+'s, effective offset '+effOffset().toFixed(3)+'s, duration '+editorDur().toFixed(2)+'s from the entry metadata); timeline dragging, Re-sync and Apply edits are disabled until the source files are re-uploaded.');
   // A version WITH a playable payload becomes the applied-settings
   // snapshot (Apply edits starts disabled; any edit branches a new
   // version on apply). A settings-only entry must NOT become the
@@ -3203,10 +3260,27 @@ function restoreHistory(h){
   if(outCache.has(h.sig)||h.versionFile){ appliedSnapshot={eff:effOffset(), tStart:trimStartSec, tEnd:trimEnd(), blend:blendVal, q:s.q}; }
   else { appliedSnapshot=null; }
   updateApplyEditsState();
-  var e=cacheGet(h.sig);
-  if(e){ var isDir=!!(s.isDirect); var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(useBlob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
-  else if(h.versionFile){ loadVersionPayload(h); }
-  else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
+  // DEFECT FIX (in-session HEVC restore): a version WITH a stored OPFS
+  // payload is ALWAYS restored through the stored-File path
+  // (loadVersionPayload embeds the OPFS File with the exact same
+  // construction as generation and as a post-reload restore) — never
+  // through the in-memory cached blob, even when the cache still holds
+  // it. In-session, the cache-hit shortcut below used to hand the player
+  // the cached blob for direct-export (HEVC) versions and the player
+  // rejected it (code 4 MEDIA_ELEMENT_ERROR), while the identical
+  // stored file — restored after a reload via loadVersionPayload —
+  // played fine. The cached blob is still used for Share/Download
+  // delivery (showResult / the export caches), just never as the
+  // restore embed when a stored File exists.
+  if(h.versionFile){
+    log('History: restoring Version '+h.num+' via its stored OPFS File ('+h.versionFile+') — the stored-File path is used for every payload restore, in-session and post-reload alike; the in-memory cached blob is not handed to the player.');
+    loadVersionPayload(h);
+  }
+  else {
+    var e=cacheGet(h.sig);
+    if(e){ var isDir=!!(s.isDirect); var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(useBlob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
+    else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
+  }
 }
 
 // ---------- New (full reset to initial state) ----------
@@ -3254,6 +3328,7 @@ function resetAll(){
   dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
   trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0; appliedSnapshot=null;
+  restoredDur=0; restoredSongDur=0; try{ setRestoreNeedsSources(false); }catch(e){}
   analysisState='idle'; analysisPromise=null; analysisVersion=-1;
   autoGenForVersion=-1; generatedOnce=false; firstGenDone=false; pipelineRestartPending=false;
   pcmCache={}; pcmPromiseCache={}; stripCache={};
@@ -3337,7 +3412,7 @@ async function doGenerate(opts){
     else log('generate path: proxy');
     var sig=settingsSignature('proxy480',tStart,tEnd,eff,blendVal);
     var exportSig=settingsSignature(q,tStart,tEnd,eff,blendVal);
-    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal,proxySig:sig,isDirect:isDirect,exportSig:exportSig};
+    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal,proxySig:sig,isDirect:isDirect,exportSig:exportSig,detected:detectedOffset,srcDur:danceDur,songDur:songDur}; // detected + source durations ride in the entry metadata so a post-reload restore can display the true additional offset (eff − detected) and the trim/offset readouts without the source files
     if(isDirect){
       // DIRECT EXPORT AS GENERATE: no 480p proxy at all. The two-stage
       // export (audio render + stream-copy mux) IS the generation step;
