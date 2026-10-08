@@ -120,12 +120,18 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 #newWrap{margin-top:14px;display:none}
 .dlstatus{margin-top:12px;font-size:13px;background:#14231c;border:1px solid #24543e;border-radius:10px;padding:9px 12px;color:#e6f7ee}
 @media (prefers-color-scheme:light){.dlstatus{background:#e7f5ec;border-color:#bfe3cd;color:#14402a}}
+.recoveredNotice{margin:0 0 12px;background:#2a1a12;border:1px solid #7a3b22;border-radius:10px;padding:10px 12px;font-size:13px;color:#ffd9c7;display:none;align-items:flex-start;gap:10px}
+.recoveredNotice.show{display:flex}
+.recoveredNotice span{flex:1}
+.recoveredNotice button{flex:none;padding:6px 12px;font-size:12.5px;background:var(--card2);color:var(--text);border:1px solid var(--line)}
+@media (prefers-color-scheme:light){.recoveredNotice{background:#fdeee7;border-color:#e5a58c;color:#5c2413}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Video/Audio Syncer</h1>
   <p class="sub">Upload a video with the music playing in the background, plus the clean audio (a music file, video, or screen recording), and get your video back with the music auto-synced on top.</p>
+  <div class="recoveredNotice" id="recoveredNotice" role="alert"><span id="recoveredNoticeText"></span><button type="button" id="btnDismissRecovered">Dismiss</button></div>
   <div class="grid">
     <div class="drop" id="dropDance" tabindex="0">
       <h3>Video</h3><p id="metaDance">Upload</p>
@@ -234,7 +240,7 @@ var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',duration
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
 var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:''};
-var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a'};
+var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
 function effOffset(){ return -audioPos; }
@@ -255,14 +261,256 @@ function log(msg){
   var line=diagStamp()+' '+String(msg);
   diagEntries.push(line);
   if(diagEntries.length>200) diagEntries=diagEntries.slice(diagEntries.length-200);
+  try{
+    var isMemCheckpoint=String(msg).indexOf('memory:')===0;
+    if(isMemCheckpoint) journalLastMemoryCheckpoint=journalTruncate(line,600);
+    if(isMemCheckpoint||diagStage!==journalLastStage){ journalLastStage=diagStage; journalPersistNow(); }
+    else journalSchedulePersist();
+  }catch(e){}
   var el=$('log'); if(!el) return;
   el.textContent=diagEntries.join('\n');
   el.scrollTop=el.scrollHeight;
 }
 function logError(stage,err){
   diagStage=stage||diagStage;
+  try{ journalLastError=journalTruncate(diagErrText(err),1200); }catch(e){}
   log('ERROR in stage "'+diagStage+'": '+diagErrText(err));
+  try{ journalPersistNow(); }catch(e){}
 }
+// ================= SESSION JOURNAL (crash-surviving diagnostics) =================
+// Persisted in localStorage under JOURNAL_KEY so the pipeline log and a
+// compact run-state record survive a tab crash / reload (the export crash
+// kills the tab, and with it the in-memory log). Every log() line is
+// appended to the journal (writes throttled in small batches via
+// journalSchedulePersist, flushed synchronously on stage transitions,
+// memory checkpoints, and errors). journalCompleted is set true ONLY when
+// a run finishes cleanly (journalMarkCompleted) or surfaces a handled
+// error in the UI (journalMarkHandledError); a new run resets it to false
+// (journalBeginRun), so a stored journal with completed=false on load
+// means the previous session died mid-run. All localStorage access is
+// wrapped in try/catch — a quota or privacy-mode failure must never break
+// the pipeline. The journal is bounded: diagEntries is capped at the last
+// 200 lines and the state record is a few hundred bytes, so the whole
+// journal stays at a few tens of KB, well under the localStorage quota.
+var JOURNAL_KEY='dance-sync.session-journal.v1';
+var JOURNAL_RECOVERED_KEY='dance-sync.session-journal.recovered.v1';
+var journalRecovered=null;
+var journalCompleted=false;
+var journalSessionStartedAt=new Date().toISOString();
+var journalSessionStartedMs=Date.now();
+var journalLastMemoryCheckpoint='';
+var journalLastError='';
+var journalLastStage='';
+var journalPersistTimer=null;
+function journalTruncate(s,n){ s=String(s==null?'':s); return s.length>n?(s.slice(0,n)+'…[truncated]'):s; }
+function journalNormalizeStage(raw){
+  var s=String(raw||'boot');
+  if(s.indexOf('export-stage-2')===0||s==='stage2'||s.indexOf('stage 2')!==-1) return 'export-stage-2';
+  if(s.indexOf('export-stage-1')===0||s==='stage1'||s.indexOf('stage 1')!==-1) return 'export-stage-1';
+  if(s.indexOf('proxy')!==-1) return 'proxy-encode';
+  if(s.indexOf('decode')!==-1) return 'decode';
+  if(s.indexOf('analysis')!==-1) return 'analysis';
+  if(s.indexOf('export')===0) return 'export-stage-1';
+  if(s==='result'||s==='share'||s==='download'||s==='open-video'||s==='delivery'||s.indexOf('export-')===0) return 'delivery';
+  return s;
+}
+function journalBuildState(){
+  var inputs={video:{name:'(none)',size:null},audio:{name:'(none)',size:null}};
+  try{
+    if(typeof danceFile!=='undefined'&&danceFile){ inputs.video={name:danceFile.name,size:danceFile.size}; }
+    else if(diagFiles&&diagFiles.video){ inputs.video={name:diagFiles.video.name,size:diagFiles.video.sizeBytes}; }
+    if(typeof songFile!=='undefined'&&songFile){ inputs.audio={name:songFile.name,size:songFile.size}; }
+    else if(diagFiles&&diagFiles.audio){ inputs.audio={name:diagFiles.audio.name,size:diagFiles.audio.sizeBytes}; }
+  }catch(e){}
+  var mountMode='';
+  try{ mountMode=(diagStorage&&(diagStorage.mountNote||diagStorage.lastInputs))||''; }catch(e){}
+  var renderTargets={};
+  try{
+    // Explicit render-target dimensions: proxy is capped at 480 high
+    // (width scales with the source aspect, even-rounded like the scale
+    // filter); export targets the selected quality height, or the full
+    // source size at Full. Byte size/duration fill in once a render lands.
+    var srcW=(typeof danceVideoW!=='undefined'&&danceVideoW)?danceVideoW:0;
+    var srcH=(typeof danceVideoH!=='undefined'&&danceVideoH)?danceVideoH:0;
+    if((!srcW||!srcH)&&typeof vid!=='undefined'&&vid&&vid.videoWidth){ srcW=vid.videoWidth; srcH=vid.videoHeight; }
+    function scaledDims(capH){
+      if(!srcW||!srcH) return {targetWidth:null,targetHeight:capH||null};
+      var h=Math.min(capH||srcH,srcH);
+      var w=Math.round(srcW*h/srcH/2)*2;
+      return {targetWidth:w,targetHeight:h};
+    }
+    var proxyDims=scaledDims(480);
+    var qNow='full'; try{ var qeJ=document.querySelector('input[name=quality]:checked'); if(qeJ) qNow=qeJ.value; }catch(e){}
+    if((typeof diagExport!=='undefined'&&diagExport&&diagExport.quality)) qNow=String(diagExport.quality).replace('p','');
+    var exportDims=(qNow==='full'||!isFinite(parseInt(qNow,10)))?{targetWidth:srcW||null,targetHeight:srcH||null}:scaledDims(parseInt(qNow,10));
+    renderTargets={
+      proxy:{size:(typeof diagProxy!=='undefined'&&diagProxy)?diagProxy.size:null,durationSec:(typeof diagProxy!=='undefined'&&diagProxy)?diagProxy.durationSec:null,backend:(typeof diagProxy!=='undefined'&&diagProxy)?diagProxy.backend:null,maxHeight:480,targetWidth:proxyDims.targetWidth,targetHeight:proxyDims.targetHeight,sourceWidth:srcW||null,sourceHeight:srcH||null},
+      export:{size:(typeof diagExport!=='undefined'&&diagExport)?diagExport.size:null,durationSec:(typeof diagExport!=='undefined'&&diagExport)?diagExport.durationSec:null,quality:(typeof diagExport!=='undefined'&&diagExport&&diagExport.quality)?diagExport.quality:qNow,backend:(typeof diagExport!=='undefined'&&diagExport)?diagExport.backend:null,stages:(typeof diagExport!=='undefined'&&diagExport)?diagExport.stages:null,targetWidth:exportDims.targetWidth,targetHeight:exportDims.targetHeight,sourceWidth:srcW||null,sourceHeight:srcH||null}
+    };
+  }catch(e){}
+  var off=null;
+  try{ off=(typeof analysisState!=='undefined'&&analysisState==='done'&&typeof detectedOffset!=='undefined'&&detectedOffset!=null)?detectedOffset:null; }catch(e){}
+  return {
+    version:1,
+    startedAt:journalSessionStartedAt,
+    sessionStartedAt:journalSessionStartedAt,
+    startedAtMs:journalSessionStartedMs,
+    updatedAt:new Date().toISOString(),
+    completed:!!journalCompleted,
+    stage:journalNormalizeStage(diagStage),
+    rawStage:String(diagStage||'boot'),
+    mountMode:mountMode,
+    mountNote:mountMode,
+    inputs:inputs,
+    inputSizes:{video:inputs.video.size,audio:inputs.audio.size},
+    detectedOffset:off,
+    renderTargets:renderTargets,
+    lastMemoryCheckpoint:journalLastMemoryCheckpoint||'',
+    lastError:journalLastError||'',
+    entries:diagEntries.slice(-200)
+  };
+}
+function journalPersistNow(){
+  if(journalPersistTimer){ try{ clearTimeout(journalPersistTimer); }catch(e){} journalPersistTimer=null; }
+  try{
+    var st=journalBuildState();
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(st));
+  }catch(e){}
+}
+function journalSchedulePersist(){
+  if(journalPersistTimer) return;
+  try{
+    journalPersistTimer=setTimeout(function(){ journalPersistTimer=null; journalPersistNow(); },150);
+  }catch(e){ journalPersistNow(); }
+}
+function journalBeginRun(){
+  if(journalCompleted) journalCompleted=false;
+  journalPersistNow();
+}
+function journalMarkCompleted(clean){
+  journalCompleted=true;
+  if(clean&&journalRecovered){ journalRecovered=null; journalHideRecoveredNotice(); journalSafeClearRecovered(); }
+  journalPersistNow();
+}
+function journalMarkHandledError(){
+  journalCompleted=true;
+  journalPersistNow();
+}
+function journalSafeClear(){
+  try{ localStorage.removeItem(JOURNAL_KEY); }catch(e){}
+}
+function journalSafeClearRecovered(){
+  try{ localStorage.removeItem(JOURNAL_RECOVERED_KEY); }catch(e){}
+}
+function journalPersistRecovered(){
+  // The recovered record lives under its OWN key so the current session's
+  // journal writes (same main key, every log line) can never overwrite it;
+  // it survives further reloads/crashes until dismissal or a clean run.
+  if(!journalRecovered) return;
+  try{ localStorage.setItem(JOURNAL_RECOVERED_KEY, JSON.stringify(journalRecovered)); }catch(e){}
+}
+function journalReadRecoveredStored(){
+  try{
+    var raw=localStorage.getItem(JOURNAL_RECOVERED_KEY);
+    if(!raw) return null;
+    var parsed=JSON.parse(raw);
+    return (parsed&&typeof parsed==='object')?parsed:null;
+  }catch(e){ return null; }
+}
+function journalReadStored(){
+  try{
+    var raw=localStorage.getItem(JOURNAL_KEY);
+    if(!raw) return null;
+    var parsed=JSON.parse(raw);
+    return (parsed&&typeof parsed==='object')?parsed:null;
+  }catch(e){ return null; }
+}
+function journalHideRecoveredNotice(){
+  try{ var el=document.getElementById('recoveredNotice'); if(el) el.classList.remove('show'); }catch(e){}
+}
+function journalShowRecoveredNotice(){
+  if(!journalRecovered) return;
+  try{
+    var el=document.getElementById('recoveredNotice');
+    var tx=document.getElementById('recoveredNoticeText');
+    if(tx) tx.textContent='Previous session ended unexpectedly during '+(journalRecovered.stage||journalRecovered.rawStage||'unknown stage')+' \u2014 its log was recovered.';
+    if(el) el.classList.add('show');
+  }catch(e){}
+}
+function journalDismissRecovered(){
+  journalSafeClear();
+  journalSafeClearRecovered();
+  journalRecovered=null;
+  journalHideRecoveredNotice();
+}
+function journalRecoveredText(){
+  if(!journalRecovered) return '';
+  var r=journalRecovered;
+  var entries=Array.isArray(r.entries)?r.entries:[];
+  var stateCopy={};
+  try{ Object.keys(r).forEach(function(k){ if(k!=='entries') stateCopy[k]=r[k]; }); }catch(e){}
+  var lines=[
+    'RECOVERED PREVIOUS SESSION',
+    'Session started: '+(r.startedAt||r.sessionStartedAt||'unknown'),
+    'Session updated: '+(r.updatedAt||'unknown'),
+    'Completed: '+String(r.completed),
+    'Stage: '+(r.stage||r.rawStage||'unknown'),
+    'Mount mode: '+(r.mountMode||r.mountNote||'unknown'),
+    'Inputs: '+JSON.stringify(r.inputs||r.inputSizes||{}),
+    'Input sizes: '+JSON.stringify(r.inputSizes||{}),
+    'Detected offset: '+(r.detectedOffset!=null?String(r.detectedOffset):'unknown'),
+    'Render targets: '+JSON.stringify(r.renderTargets||{}),
+    'Last memory checkpoint: '+(r.lastMemoryCheckpoint||'none recorded'),
+    'Last error: '+(r.lastError||'none recorded'),
+    '--- RECOVERED RUN STATE ---',
+    JSON.stringify(stateCopy,null,2),
+    '--- RECOVERED PIPELINE LOG ---',
+    entries.length?entries.join('\n'):(typeof r.log==='string'&&r.log?r.log:'(no log lines recovered)')
+  ];
+  return lines.join('\n');
+}
+function journalRecordGlobalError(kind,errLike){
+  try{
+    var name='Error', msg='', stack='';
+    if(errLike instanceof Error){ name=errLike.name||'Error'; msg=errLike.message||String(errLike); stack=errLike.stack||''; }
+    else if(errLike&&typeof errLike==='object'){ name=errLike.name||'Error'; msg=errLike.message||String(errLike); stack=errLike.stack||''; }
+    else { msg=String(errLike==null?'unknown error':errLike); }
+    var summary=name+': '+msg+(stack?(' | stack: '+String(stack).split('\n').slice(0,3).join(' <- ')):'');
+    journalLastError=journalTruncate(summary,1200);
+    var line=diagStamp()+' ERROR in stage "'+diagStage+'" (global '+kind+'): '+summary;
+    diagEntries.push(line);
+    if(diagEntries.length>200) diagEntries=diagEntries.slice(diagEntries.length-200);
+    try{ var el=document.getElementById('log'); if(el){ el.textContent=diagEntries.join('\n'); el.scrollTop=el.scrollHeight; } }catch(e){}
+    journalPersistNow();
+  }catch(e){
+    try{ localStorage.setItem(JOURNAL_KEY, JSON.stringify({version:1,startedAt:journalSessionStartedAt,sessionStartedAt:journalSessionStartedAt,completed:false,stage:journalNormalizeStage(diagStage),lastError:journalTruncate(String(errLike&&errLike.message||errLike),1200),entries:diagEntries.slice(-200)})); }catch(_){}
+  }
+}
+// Read any previous session's journal NOW — before the first log() call of
+// this session can overwrite the stored journal with the new session's
+// state. A previous journal with completed=false is a crashed session: its
+// copy is kept in memory (journalRecovered) for the diagnostics dump until
+// the user dismisses it or a new run completes cleanly and replaces it.
+try{
+  var _prevJournal=journalReadStored();
+  if(_prevJournal&&_prevJournal.completed===false){ journalRecovered=_prevJournal; journalPersistRecovered(); }
+  else {
+    // No fresh crash in the main journal, but an earlier recovered record
+    // may still be awaiting dismissal / a clean run — keep showing it.
+    var _keptRecovered=journalReadRecoveredStored();
+    if(_keptRecovered&&_keptRecovered.completed===false) journalRecovered=_keptRecovered;
+  }
+}catch(e){}
+// Global error handlers: registered early and writing SYNCHRONOUSLY to
+// the journal, so an uncaught error / unhandled rejection is on disk
+// before anything else can die with the tab.
+try{
+  window.addEventListener('error',function(ev){ try{ journalRecordGlobalError('error', ev.error||new Error(ev.message||'window error')); }catch(_){} });
+  window.addEventListener('unhandledrejection',function(ev){ try{ journalRecordGlobalError('unhandledrejection', ev.reason); }catch(_){} });
+}catch(e){}
+try{ journalShowRecoveredNotice(); }catch(e){}
+try{ var _dbtn=document.getElementById('btnDismissRecovered'); if(_dbtn) _dbtn.addEventListener('click',function(){ journalDismissRecovered(); }); }catch(e){}
+
 function collectEnvProbes(){
   var p={};
   try{ p.inIframe=(window.self!==window.top)?'yes':'no'; }catch(e){ p.inIframe='threw '+(e.name||'Error')+': '+(e.message||e); }
@@ -287,6 +535,8 @@ function collectEnvProbes(){
   p.mediaSourceType=typeof MediaSource;
   p.videoDecoderType=typeof VideoDecoder;
   p.audioDecoderType=typeof AudioDecoder;
+  p.videoEncoderType=(typeof VideoEncoder!=='undefined')?typeof VideoEncoder:'undefined';
+  p.audioEncoderType=(typeof AudioEncoder!=='undefined')?typeof AudioEncoder:'undefined';
   try{ p.maxTouchPoints=String(navigator.maxTouchPoints); }catch(e){ p.maxTouchPoints='unknown'; }
   p.userAgent=String((typeof navigator!=='undefined'&&navigator.userAgent)||'');
   p.platform=String((typeof navigator!=='undefined'&&navigator.platform)||'');
@@ -318,6 +568,8 @@ function probesToText(p){
     'typeof MediaSource: '+p.mediaSourceType,
     'typeof VideoDecoder (WebCodecs): '+p.videoDecoderType,
     'typeof AudioDecoder (WebCodecs): '+p.audioDecoderType,
+    'typeof VideoEncoder (WebCodecs): '+(p.videoEncoderType||'undefined'),
+    'typeof AudioEncoder (WebCodecs): '+(p.audioEncoderType||'undefined'),
     'navigator.maxTouchPoints: '+p.maxTouchPoints,
     'User agent: '+p.userAgent,
     'navigator.platform: '+p.platform,
@@ -401,12 +653,13 @@ function buildDiagnosticsText(){
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
       'mount (last render): '+diagStorage.mountNote,
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'),
-      'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres,
+      'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'n/a')+(diagProxy.webcodecs?(' | webcodecs stages: demux '+(diagProxy.webcodecs.timings.demuxMs/1000).toFixed(2)+'s · decode+encode '+(diagProxy.webcodecs.timings.decodeEncodeMs/1000).toFixed(1)+'s · audio '+(diagProxy.webcodecs.timings.audioMs/1000).toFixed(1)+'s · mux '+(diagProxy.webcodecs.timings.muxMs/1000).toFixed(1)+'s · '+diagProxy.webcodecs.frames+' frames · '+diagProxy.webcodecs.outW+'x'+diagProxy.webcodecs.outH+' @ '+diagProxy.webcodecs.fps+' fps · '+diagProxy.webcodecs.srcCodec+' → '+diagProxy.webcodecs.encCodec):''),
       'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
     ].join('\n');
   }catch(e){}
   var parts=[];
   parts.push('--- HEADER ---'); parts.push(headerLines);
+  if(typeof journalRecovered!=='undefined'&&journalRecovered){ parts.push('--- RECOVERED PREVIOUS SESSION ---'); try{ parts.push(journalRecoveredText()); }catch(e){ parts.push('(recovered session present but could not be rendered: '+(e.message||e)+')'); } }
   parts.push('--- ENVIRONMENT (AT LOAD) ---'); parts.push(probesToText(diagEnvAtLoad));
   parts.push('--- ENVIRONMENT (AT COPY TIME) ---'); parts.push(probesToText(probesNow));
   parts.push('--- CONVERTER ---'); parts.push(convLines);
@@ -471,8 +724,9 @@ var barPct=0;
 // hidden/shown on value changes, so the percentage can't flicker. It shows
 // "<pct>% · <elapsed>", overlaid inside the bar track itself.
 var runT0=0, runClockTimer=null;
+var directStageLabel='', lastResultIsDirect=false;
 function fmtClock(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
-function renderProgText(){ var el=$('progText'); if(!el) return; if(barPct>=100){ el.textContent='Done'; return; } var t=runT0?fmtClock(Date.now()-runT0):'0:00'; el.textContent=Math.round(barPct)+'% · '+t; }
+function renderProgText(){ var el=$('progText'); if(!el) return; if(barPct>=100){ el.textContent='Done'; return; } var t=runT0?fmtClock(Date.now()-runT0):'0:00'; el.textContent=Math.round(barPct)+'% · '+t+(directStageLabel?(' · '+directStageLabel):''); }
 function startRunClock(){ runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(renderProgText,1000); renderProgText(); }
 function stopRunClock(){ if(runClockTimer){ clearInterval(runClockTimer); runClockTimer=null; } renderProgText(); }
 function setBarPct(pct){ pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; var w=$('progWrap'); w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); $('progBar').style.width=pct+"%"; renderProgText(); }
@@ -944,7 +1198,7 @@ function runAnalysis(){
   var ver=filesVersion, tok=runToken; analysisState="running"; ffmpegProgressCb=null;
   analysisPromise=(async function(){
     try{
-      diagStage='decode-video';
+      diagStage='decode-video'; try{ journalBeginRun(); }catch(e){}
       markStepActive(1);
       log('Analysis pipeline starts | filesVersion='+ver+' | Video='+danceFile.name+' ('+fmtBytesMB(danceFile.size)+', '+(danceFile.type||'no MIME')+') | Audio='+songFile.name+' ('+fmtBytesMB(songFile.size)+', '+(songFile.type||'no MIME')+')');
       log('Decoding Video: '+danceFile.name+' …');
@@ -1023,7 +1277,7 @@ function runAnalysis(){
     }catch(err){
       if(ver!==filesVersion) return;
       if(isCancelErr(err)||tok!==runToken){ analysisState="idle"; analysisPromise=null; return; }
-      analysisState="error"; console.error(err); logError('analysis',err); log('❌ '+(err.message||err)); showError('❌ '+(err.message||err));
+      analysisState="error"; console.error(err); logError('analysis',err); log('❌ '+(err.message||err)); showError('❌ '+(err.message||err)); try{ journalMarkHandledError(); }catch(e){}
     }
   })();
   return analysisPromise;
@@ -1241,7 +1495,7 @@ $('btnResync').addEventListener('click',function(){
 window.addEventListener('resize',function(){ layoutTimeline(); buildFilmstrip(); });
 
 // ---------- settings ----------
-document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — this selects the EXPORT quality only; the 480p proxy preview is unchanged and no render happens until Share/Download/Open.'); }); });
+document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — any direct-export result is now invalidated like a cached export; no render happens until Share/Download/Open or the next Generate (which will use the direct-export path only if the new quality is Full with no trim, otherwise the proxy path).'); }); });
 $('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.value,10)/100; $('blendVal').textContent=e.target.value+'%'; });
 $('blend').addEventListener('change',invalidateDownload);
 
@@ -1462,6 +1716,449 @@ function buildRenderArgs(o){
   args.push(o.outName);
   return args;
 }
+// ---------- WebCodecs proxy engine (hardware decode/encode) ----------
+// The proxy render first tries a hardware-accelerated WebCodecs pipeline
+// so a large 4K clip no longer needs ~155 s of single-threaded wasm
+// software decoding:
+//   1. the source video is demuxed by the minimal MP4/MOV demuxer below
+//      (avc1 tracks only), decoded with VideoDecoder, scaled to max
+//      480 tall (rotation-aware canvas draw), and re-encoded with
+//      VideoEncoder (H.264, avc format) — see tryWebCodecsProxy;
+//   2. the processed audio track comes from the EXISTING ffmpeg audio
+//      pipeline: buildRenderArgs in audioOnly mode (the same args the
+//      two-stage export uses for its stage 1) rendered to
+//      stage1-audio.m4a;
+//   3. the encoded video is muxed into a video-only MP4 by the minimal
+//      muxer below, written into the converter FS, and combined with the
+//      stage-1 audio by an ffmpeg stream-copy mux (same shape as the
+//      two-stage export's stage 2) into dance-synced.mp4.
+// Sync: video samples keep their source presentation timestamps, rebased
+// so the first kept frame sits at ~0; the audio track starts at exactly
+// 0 by construction of the filter graph — A/V alignment matches the
+// ffmpeg proxy for the same settings. No frame-rate conversion: frames
+// are encoded 1:1 at their source timestamps and the encoder framerate
+// is the source's. ANY failure or unsupported configuration throws an
+// error tagged with wcReason and the caller falls back to the ffmpeg
+// proxy encode unchanged. All parsing/muxing code is hand-rolled below —
+// no external library, nothing fetched.
+function wcFail(reason){ var e=new Error(reason); e.wcReason=reason; return e; }
+function wcHex2(v){ var s=(v&255).toString(16); return s.length<2?('0'+s):s; }
+function mp4TypeAt(dv, off){ return String.fromCharCode(dv.getUint8(off),dv.getUint8(off+1),dv.getUint8(off+2),dv.getUint8(off+3)); }
+function mp4EachBox(dv, start, end, cb){
+  var p=start;
+  while(p+8<=end){
+    var size=dv.getUint32(p), type=mp4TypeAt(dv,p+4), header=8;
+    if(size===1){ if(p+16>end) break; size=Number(dv.getBigUint64(p+8)); header=16; }
+    else if(size===0){ size=end-p; }
+    if(size<header||p+size>end) break;
+    if(cb(type, p+header, size-header)===false) return;
+    p+=size;
+  }
+}
+// Parse one trak box into raw tables + the avcC of an avc1 video track.
+function mp4ParseTrak(dv, s, len){
+  var tr={isVideo:false, codecType:'', avcC:null, codedW:0, codedH:0, matrix:[1,0,0,0,1,0], timescale:0, mdDuration:0,
+          elstCount:0, elstMediaTime:0, elstSegDur:0,
+          stts:[], ctts:null, cttsVersion:0, stss:null, stsc:[], stszSize:0, stszCount:0, stszTable:null, chunkOffsets:[]};
+  mp4EachBox(dv, s, s+len, function(type, cs, cl){
+    if(type==='tkhd'){
+      var ver=dv.getUint8(cs);
+      var mOff=cs+(ver===1?52:40); // offset of the display matrix within tkhd content
+      for(var i=0;i<6;i++) tr.matrix[i]=dv.getInt32(mOff+i*4)/65536;
+    } else if(type==='edts'){
+      mp4EachBox(dv, cs, cs+cl, function(t2, s2, l2){
+        if(t2!=='elst') return;
+        var v=dv.getUint8(s2), cnt=dv.getUint32(s2+4);
+        tr.elstCount=cnt;
+        if(cnt>=1){
+          if(v===1){ tr.elstSegDur=Number(dv.getBigUint64(s2+8)); tr.elstMediaTime=Number(dv.getBigInt64(s2+16)); }
+          else { tr.elstSegDur=dv.getUint32(s2+8); tr.elstMediaTime=dv.getInt32(s2+12); }
+        }
+      });
+    } else if(type==='mdia'){
+      mp4EachBox(dv, cs, cs+cl, function(t2, s2, l2){
+        if(t2==='mdhd'){ tr.timescale=(dv.getUint8(s2)===1)?dv.getUint32(s2+20):dv.getUint32(s2+12); tr.mdDuration=(dv.getUint8(s2)===1)?Number(dv.getBigUint64(s2+24)):dv.getUint32(s2+16); }
+        else if(t2==='hdlr'){ tr.isVideo=(mp4TypeAt(dv,s2+8)==='vide'); }
+        else if(t2==='minf'){
+          mp4EachBox(dv, s2, s2+l2, function(t3, s3, l3){
+            if(t3!=='stbl') return;
+            mp4EachBox(dv, s3, s3+l3, function(t4, s4, l4){
+              var cnt, i2;
+              if(t4==='stsd'){
+                cnt=dv.getUint32(s4+4);
+                if(cnt>=1){
+                  var e=s4+8, eSize=dv.getUint32(e);
+                  tr.codecType=mp4TypeAt(dv,e+4);
+                  if(tr.codecType==='avc1'&&eSize>=86){
+                    tr.codedW=dv.getUint16(e+32); tr.codedH=dv.getUint16(e+34);
+                    mp4EachBox(dv, e+86, e+eSize, function(t5, s5, l5){
+                      if(t5==='avcC'){ tr.avcC=new Uint8Array(dv.buffer, dv.byteOffset+s5, l5).slice(); }
+                    });
+                  }
+                }
+              } else if(t4==='stts'){
+                cnt=dv.getUint32(s4+4);
+                for(i2=0;i2<cnt;i2++) tr.stts.push([dv.getUint32(s4+8+i2*8), dv.getUint32(s4+12+i2*8)]);
+              } else if(t4==='ctts'){
+                tr.cttsVersion=dv.getUint8(s4); tr.ctts=[]; cnt=dv.getUint32(s4+4);
+                for(i2=0;i2<cnt;i2++) tr.ctts.push([dv.getUint32(s4+8+i2*8), dv.getUint32(s4+12+i2*8)]);
+              } else if(t4==='stss'){
+                tr.stss={}; cnt=dv.getUint32(s4+4);
+                for(i2=0;i2<cnt;i2++) tr.stss[dv.getUint32(s4+8+i2*4)]=true;
+              } else if(t4==='stsc'){
+                cnt=dv.getUint32(s4+4);
+                for(i2=0;i2<cnt;i2++) tr.stsc.push([dv.getUint32(s4+8+i2*12), dv.getUint32(s4+12+i2*12), dv.getUint32(s4+16+i2*12)]);
+              } else if(t4==='stsz'){
+                tr.stszSize=dv.getUint32(s4+4); tr.stszCount=dv.getUint32(s4+8);
+                if(tr.stszSize===0){ tr.stszTable=[]; for(i2=0;i2<tr.stszCount;i2++) tr.stszTable.push(dv.getUint32(s4+12+i2*4)); }
+              } else if(t4==='stco'){
+                cnt=dv.getUint32(s4+4);
+                for(i2=0;i2<cnt;i2++) tr.chunkOffsets.push(dv.getUint32(s4+8+i2*4));
+              } else if(t4==='co64'){
+                cnt=dv.getUint32(s4+4);
+                for(i2=0;i2<cnt;i2++) tr.chunkOffsets.push(Number(dv.getBigUint64(s4+8+i2*8)));
+              }
+            });
+          });
+        }
+      });
+    }
+  });
+  return tr;
+}
+// Demux the video track of an MP4/MOV File: returns per-sample timing /
+// offset tables (decode order, microsecond timestamps) + codec config.
+async function mp4DemuxVideo(file){
+  if(!file||!file.size) throw wcFail('demux: source file is empty');
+  var moovOff=-1, moovSize=0, pos=0, guard=0;
+  while(pos+8<=file.size&&guard++<100000){
+    var hdr=new DataView(await file.slice(pos, Math.min(file.size, pos+16)).arrayBuffer());
+    var size=hdr.getUint32(0), type=mp4TypeAt(hdr,4), header=8;
+    if(size===1){ size=Number(hdr.getBigUint64(8)); header=16; }
+    else if(size===0){ size=file.size-pos; }
+    if(size<header) throw wcFail('demux: malformed top-level box at offset '+pos);
+    if(type==='moov'){ moovOff=pos+header; moovSize=size-header; break; }
+    pos+=size;
+  }
+  if(moovOff<0) throw wcFail('demux: no moov box found — the source is not an MP4/MOV file the webcodecs path can read');
+  var dv=new DataView(await file.slice(moovOff, moovOff+moovSize).arrayBuffer());
+  var movieTimescale=1000, track=null;
+  mp4EachBox(dv, 0, moovSize, function(type, cs, cl){
+    if(type==='mvhd'){ movieTimescale=(dv.getUint8(cs)===1)?dv.getUint32(cs+20):dv.getUint32(cs+12); }
+    else if(type==='trak'){ var tr=mp4ParseTrak(dv, cs, cl); if(tr&&tr.isVideo&&!track) track=tr; }
+  });
+  if(!track) throw wcFail('demux: no video track found in the source');
+  if(track.codecType!=='avc1') throw wcFail('demux: source video codec is "'+(track.codecType||'unknown')+'" — the webcodecs path handles H.264 (avc1) sources; other codecs use the ffmpeg proxy');
+  if(!track.avcC||track.avcC.length<7) throw wcFail('demux: no avcC configuration found in the source video track');
+  if(!track.timescale) throw wcFail('demux: video track has no timescale');
+  if(!track.codedW||!track.codedH) throw wcFail('demux: video track dimensions missing');
+  var n=track.stszCount;
+  if(!n||n>2000000) throw wcFail('demux: implausible sample count ('+n+')');
+  if(!track.stsc.length||!track.chunkOffsets.length) throw wcFail('demux: missing chunk tables (stsc/stco)');
+  var scale=1000000/track.timescale;
+  var durArr=new Float64Array(n), dtsArr=new Float64Array(n), ctoArr=new Float64Array(n);
+  var idx=0, tt=0, ri, rk;
+  for(ri=0;ri<track.stts.length&&idx<n;ri++){ for(rk=0;rk<track.stts[ri][0]&&idx<n;rk++){ durArr[idx]=track.stts[ri][1]; dtsArr[idx]=tt; tt+=track.stts[ri][1]; idx++; } }
+  if(idx<n) throw wcFail('demux: stts covers '+idx+' of '+n+' samples');
+  if(track.ctts){ idx=0; for(ri=0;ri<track.ctts.length&&idx<n;ri++){ var offv=track.ctts[ri][1]; if(track.cttsVersion===1&&offv>=2147483648) offv-=4294967296; for(rk=0;rk<track.ctts[ri][0]&&idx<n;rk++){ ctoArr[idx]=offv; idx++; } } }
+  // Edit list → presentation start offset (media_time shifts the media
+  // timeline; an empty first edit delays presentation instead).
+  var startOffsetUs=0;
+  if(track.elstCount>1) throw wcFail('demux: multi-entry edit list on the video track is not handled by the webcodecs path');
+  if(track.elstCount===1){
+    if(track.elstMediaTime>0) startOffsetUs=-track.elstMediaTime*scale;
+    else if(track.elstMediaTime===-1) startOffsetUs=track.elstSegDur*1000000/(movieTimescale||1000);
+    else if(track.elstMediaTime<0) throw wcFail('demux: negative edit-list media_time ('+track.elstMediaTime+') is not handled');
+  }
+  var samples=new Array(n), chunks=[], sIdx=0;
+  for(var ci=0; ci<track.chunkOffsets.length; ci++){
+    var spc=0;
+    for(ri=0;ri<track.stsc.length;ri++){ if(track.stsc[ri][0]<=ci+1) spc=track.stsc[ri][1]; }
+    var coff=track.chunkOffsets[ci], cstart=sIdx, csize=0;
+    for(rk=0;rk<spc&&sIdx<n;rk++){
+      var sz=(track.stszSize!==0)?track.stszSize:track.stszTable[sIdx];
+      samples[sIdx]={offset:coff, size:sz, chunk:ci, ptsUs:Math.round((dtsArr[sIdx]+ctoArr[sIdx])*scale+startOffsetUs), dtsUs:Math.round(dtsArr[sIdx]*scale+startOffsetUs), durUs:Math.max(1,Math.round(durArr[sIdx]*scale)), key:track.stss?!!track.stss[sIdx+1]:true};
+      coff+=sz; csize+=sz; sIdx++;
+    }
+    chunks.push({offset:track.chunkOffsets[ci], size:csize, first:cstart, count:sIdx-cstart});
+  }
+  if(sIdx<n) throw wcFail('demux: chunk tables cover '+sIdx+' of '+n+' samples');
+  var totalDurSec=track.mdDuration?(track.mdDuration/track.timescale):((samples[n-1].ptsUs+samples[n-1].durUs)/1000000);
+  var fps=totalDurSec>0?(n/totalDurSec):30;
+  return {codecStr:'avc1.'+wcHex2(track.avcC[1])+wcHex2(track.avcC[2])+wcHex2(track.avcC[3]), avcC:track.avcC, codedW:track.codedW, codedH:track.codedH, matrix:track.matrix, samples:samples, chunks:chunks, fps:fps, defaultDurUs:Math.max(1,Math.round(1000000/Math.max(1,fps))), durationSec:totalDurSec};
+}
+// ---------- minimal MP4 muxer (video-only, used for the WebCodecs leg) ----------
+function mp4B4(v){ var b=new Uint8Array(4); new DataView(b.buffer).setUint32(0, v>>>0); return b; }
+function mp4B2(v){ var b=new Uint8Array(2); new DataView(b.buffer).setUint16(0, v&0xffff); return b; }
+function mp4B2s(v){ var b=new Uint8Array(2); new DataView(b.buffer).setInt16(0, v|0); return b; }
+function mp4TB(t){ return new Uint8Array([t.charCodeAt(0)&255,t.charCodeAt(1)&255,t.charCodeAt(2)&255,t.charCodeAt(3)&255]); }
+function mp4Cat(parts){ var tot=0, i; for(i=0;i<parts.length;i++) tot+=parts[i].length; var out=new Uint8Array(tot), o=0; for(i=0;i<parts.length;i++){ out.set(parts[i], o); o+=parts[i].length; } return out; }
+function mp4Box(type, parts){ var payload=mp4Cat(parts); return mp4Cat([mp4B4(payload.length+8), mp4TB(type), payload]); }
+function mp4FullBox(type, version, flags, parts){ var head=new Uint8Array(4); head[0]=version&255; head[1]=(flags>>>16)&255; head[2]=(flags>>>8)&255; head[3]=flags&255; return mp4Box(type, [head].concat(parts)); }
+function mp4IdentMatrix(){ return mp4Cat([mp4B4(0x00010000),mp4B4(0),mp4B4(0), mp4B4(0),mp4B4(0x00010000),mp4B4(0), mp4B4(0),mp4B4(0),mp4B4(0x40000000)]); }
+function mp4Rle(values){ var runs=[], i=0; while(i<values.length){ var v=values[i], c=1; while(i+c<values.length&&values[i+c]===v) c++; runs.push([c, v]); i+=c; } return runs; }
+// chunks: [{data:Uint8Array, timestamp:µs (presentation), type:'key'|'delta'}]
+// in decode order. Returns {bytes, startOffsetUs, durationUs}. The decode
+// timeline origin is shifted (via a one-entry edit list, the same device
+// ffmpeg uses) so every composition offset is >= 0 — B-frame reorder can
+// never force a negative offset or a timestamp clamp.
+function mp4MuxVideoOnly(chunks, avcDesc, width, height){
+  var n=chunks.length, i, idx;
+  if(!n) throw wcFail('mux: no encoded chunks to mux');
+  var order=chunks.map(function(_,k){ return k; }).sort(function(x,y){ return chunks[x].timestamp-chunks[y].timestamp; });
+  var durs=new Array(n);
+  for(i=0;i<n;i++){ idx=order[i]; var nextTs=(i+1<n)?chunks[order[i+1]].timestamp:null; durs[idx]=(nextTs!=null)?Math.max(1, nextTs-chunks[idx].timestamp):((i>0)?durs[order[i-1]]:33333); }
+  var shift=chunks[order[0]].timestamp; // earliest presentation time becomes exactly 0
+  var prefix=new Array(n), pAcc=0;
+  for(i=0;i<n;i++){ prefix[i]=pAcc; pAcc+=durs[i]; }
+  var dts0=0; // decode timeline origin: <= 0, chosen so all cto >= 0
+  for(i=0;i<n;i++){ var cand=(chunks[i].timestamp-shift)-prefix[i]; if(cand<dts0) dts0=cand; }
+  var ctts=new Array(n), totalDurUs=0;
+  for(i=0;i<n;i++){
+    ctts[i]=(chunks[i].timestamp-shift)-(prefix[i]+dts0);
+    var end=(chunks[i].timestamp-shift)+durs[i]; if(end>totalDurUs) totalDurUs=end;
+  }
+  var nowS=Math.floor(Date.now()/1000)+2082844800;
+  var durMs=Math.round(totalDurUs/1000);
+  var sttsRuns=mp4Rle(durs), cttsRuns=mp4Rle(ctts);
+  var sttsParts=[mp4B4(sttsRuns.length)]; sttsRuns.forEach(function(r){ sttsParts.push(mp4B4(r[0]), mp4B4(r[1])); });
+  var avcBody=new Uint8Array(78), av=new DataView(avcBody.buffer);
+  av.setUint16(6, 1); // data_reference_index
+  av.setUint16(24, width); av.setUint16(26, height);
+  av.setUint32(28, 0x00480000); av.setUint32(32, 0x00480000); // 72 dpi
+  av.setUint16(40, 1); // frame_count
+  av.setUint16(74, 0x0018); av.setInt16(76, -1); // depth, pre_defined
+  var avcCBox=mp4Box('avcC', [avcDesc]);
+  var avcEntry=mp4Cat([mp4B4(8+78+avcCBox.length), mp4TB('avc1'), avcBody, avcCBox]);
+  var stblParts=[mp4FullBox('stsd', 0, 0, [mp4B4(1), avcEntry]), mp4FullBox('stts', 0, 0, sttsParts)];
+  var anyCtts=false; for(i=0;i<n;i++){ if(ctts[i]>0){ anyCtts=true; break; } }
+  if(anyCtts){ var cp=[mp4B4(cttsRuns.length)]; cttsRuns.forEach(function(r){ cp.push(mp4B4(r[0]), mp4B4(r[1])); }); stblParts.push(mp4FullBox('ctts', 0, 0, cp)); }
+  var keyIdx=[]; chunks.forEach(function(ch,k){ if(ch.type==='key') keyIdx.push(k+1); });
+  if(keyIdx.length&&keyIdx.length<n){ var kp=[mp4B4(keyIdx.length)]; keyIdx.forEach(function(k){ kp.push(mp4B4(k)); }); stblParts.push(mp4FullBox('stss', 0, 0, kp)); }
+  stblParts.push(mp4FullBox('stsc', 0, 0, [mp4B4(1), mp4B4(1), mp4B4(n), mp4B4(1)]));
+  var szp=[mp4B4(0), mp4B4(n)]; chunks.forEach(function(ch){ szp.push(mp4B4(ch.data.length)); });
+  stblParts.push(mp4FullBox('stsz', 0, 0, szp));
+  function buildMoov(chunkOffset){
+    var stbl=mp4Box('stbl', stblParts.concat([mp4FullBox('stco', 0, 0, [mp4B4(1), mp4B4(chunkOffset)])]));
+    var dinf=mp4Box('dinf', [mp4FullBox('dref', 0, 0, [mp4B4(1), mp4FullBox('url ', 0, 1, [])])]);
+    var minf=mp4Box('minf', [mp4FullBox('vmhd', 0, 1, [mp4B2(0), mp4B2(0), mp4B2(0), mp4B2(0)]), dinf, stbl]);
+    var hdlr=mp4FullBox('hdlr', 0, 0, [mp4B4(0), mp4TB('vide'), mp4B4(0), mp4B4(0), mp4B4(0), mp4TB('VideoHandler'), mp4B4(0)]); // handler name, NUL-terminated by the trailing zero bytes
+    var mdhd=mp4FullBox('mdhd', 0, 0, [mp4B4(nowS), mp4B4(nowS), mp4B4(1000000), mp4B4(totalDurUs), mp4B2(0x55c4), mp4B2(0)]);
+    var mdia=mp4Box('mdia', [mdhd, hdlr, minf]);
+    var tkhd=mp4FullBox('tkhd', 0, 7, [mp4B4(nowS), mp4B4(nowS), mp4B4(1), mp4B4(0), mp4B4(durMs), mp4B4(0), mp4B4(0), mp4B2s(0), mp4B2s(0), mp4B2(0), mp4B2(0), mp4IdentMatrix(), mp4B4(width*65536), mp4B4(height*65536)]);
+    // One-entry edit list: media_time = -dts0 (media timescale = µs here)
+    // aligns the track timeline so the first presented frame sits at 0.
+    var elst=mp4FullBox('elst', 0, 0, [mp4B4(1), mp4B4(durMs), mp4B4(-dts0), mp4B2s(1), mp4B2s(0)]);
+    var edts=mp4Box('edts', [elst]);
+    var trak=mp4Box('trak', [tkhd, edts, mdia]);
+    var mvhd=mp4FullBox('mvhd', 0, 0, [mp4B4(nowS), mp4B4(nowS), mp4B4(1000), mp4B4(durMs), mp4B4(0x00010000), mp4B2(0x0100), mp4B2(0), mp4B4(0), mp4B4(0), mp4IdentMatrix(), mp4B4(0), mp4B4(0), mp4B4(0), mp4B4(0), mp4B4(0), mp4B4(0), mp4B4(2)]);
+    return mp4Box('moov', [mvhd, trak]);
+  }
+  var ftyp=mp4Box('ftyp', [mp4TB('isom'), mp4B4(512), mp4TB('isom'), mp4TB('iso2'), mp4TB('avc1'), mp4TB('mp41')]);
+  var moov=buildMoov(ftyp.length+buildMoov(0).length+8);
+  var mdatSize=8; chunks.forEach(function(ch){ mdatSize+=ch.data.length; });
+  var mdatHead=mp4Cat([mp4B4(mdatSize), mp4TB('mdat')]);
+  var parts=[ftyp, moov, mdatHead]; chunks.forEach(function(ch){ parts.push(ch.data); });
+  return {bytes:mp4Cat(parts), startOffsetUs:-dts0, durationUs:totalDurUs};
+}
+// tryWebCodecsProxy(ctx): runs the full WebCodecs proxy pipeline and
+// leaves the finished proxy at 'dance-synced.mp4' in the converter FS,
+// exactly where the ffmpeg proxy path leaves it, so the caller's
+// read-out/tail is shared. Returns {timings, frames, outW, outH, fps,
+// srcCodec, encCodec}. Throws wcFail-tagged errors (message = fallback
+// reason) on ANY unsupported/failing step; cancellation rethrows as an
+// error with message 'Cancelled'. ctx: {ff, dFile, sFile, danceIn,
+// songIn, dExt, sExt, tStart, tEnd, tDur, eff, isCancelled}.
+async function tryWebCodecsProxy(ctx){
+  var wcT0=Date.now();
+  var timings={demuxMs:0, decodeEncodeMs:0, audioMs:0, muxMs:0};
+  var savedCb=ffmpegProgressCb;
+  var dec=null, enc=null, stage1Made=false, wcVideoMade=false;
+  try{
+    if(typeof VideoDecoder==='undefined'||typeof VideoEncoder==='undefined') throw wcFail('WebCodecs unavailable in this browser (typeof VideoDecoder='+(typeof VideoDecoder)+', typeof VideoEncoder='+(typeof VideoEncoder)+')');
+    // ---- demux the source video ----
+    var t0=Date.now();
+    var dem=await mp4DemuxVideo(ctx.dFile);
+    timings.demuxMs=Date.now()-t0;
+    log('Proxy (webcodecs) demux: '+dem.codecStr+' '+dem.codedW+'x'+dem.codedH+' · '+dem.samples.length+' samples · '+dem.fps.toFixed(2)+' fps · duration '+dem.durationSec.toFixed(2)+'s · demux took '+(timings.demuxMs/1000).toFixed(2)+'s');
+    // Display geometry from the tkhd display matrix. Only pure 90°-step
+    // rotations (entries in {0, ±1}, determinant +1) are baked into the
+    // canvas draw; anything else (mirror, scale, skew) falls back.
+    var ma=dem.matrix[0], mb=dem.matrix[1], mc=dem.matrix[3], md=dem.matrix[4];
+    function isStep(v){ return Math.abs(v)<0.001||Math.abs(Math.abs(v)-1)<0.001; }
+    if(!(isStep(ma)&&isStep(mb)&&isStep(mc)&&isStep(md))) throw wcFail('display matrix ['+dem.matrix.join(', ')+'] is not a 90°-step rotation — not handled by the webcodecs path');
+    var det=ma*md-mb*mc;
+    if(Math.abs(det-1)>0.01) throw wcFail('display matrix determinant '+det.toFixed(3)+' (mirror or scale) is not handled by the webcodecs path');
+    var corners=[[0,0],[dem.codedW,0],[0,dem.codedH],[dem.codedW,dem.codedH]].map(function(p){ return [ma*p[0]+mc*p[1], mb*p[0]+md*p[1]]; });
+    var minX=Math.min(corners[0][0],corners[1][0],corners[2][0],corners[3][0]), maxX=Math.max(corners[0][0],corners[1][0],corners[2][0],corners[3][0]);
+    var minY=Math.min(corners[0][1],corners[1][1],corners[2][1],corners[3][1]), maxY=Math.max(corners[0][1],corners[1][1],corners[2][1],corners[3][1]);
+    var dispW=Math.round(maxX-minX), dispH=Math.round(maxY-minY);
+    if(dispW<2||dispH<2) throw wcFail('demux produced a degenerate display size '+dispW+'x'+dispH);
+    var sFrac=dispH>480?(480/dispH):1;
+    var outW=Math.max(2, Math.round(dispW*sFrac/2)*2), outH=Math.max(2, Math.round(dispH*sFrac/2)*2);
+    // ---- feature-detect the decode config ----
+    var decCfg={codec:dem.codecStr, codedWidth:dem.codedW, codedHeight:dem.codedH, description:dem.avcC};
+    var decSup=null;
+    try{ decSup=await VideoDecoder.isConfigSupported(decCfg); }catch(e){ throw wcFail('VideoDecoder.isConfigSupported threw: '+(e.message||e)); }
+    if(!decSup||!decSup.supported) throw wcFail('VideoDecoder does not support decoding '+dem.codecStr+' at '+dem.codedW+'x'+dem.codedH+' in this browser');
+    // ---- feature-detect the encode config (H.264, avc format) ----
+    var fps=Math.round(dem.fps*1000)/1000; if(!(fps>=1&&fps<=240)) fps=30;
+    var bitrate=Math.round(Math.min(3000000, Math.max(500000, outW*outH*fps*0.12)));
+    var encCfg=null, encCodecStr='';
+    var codecCands=['avc1.640033','avc1.640028','avc1.64001f','avc1.4d0028','avc1.42001f'];
+    var hwCands=['prefer-hardware','no-preference'];
+    encSearch:
+    for(var ci2=0; ci2<codecCands.length; ci2++){
+      for(var hi=0; hi<hwCands.length; hi++){
+        var cand={codec:codecCands[ci2], width:outW, height:outH, bitrate:bitrate, framerate:fps, latencyMode:'quality', hardwareAcceleration:hwCands[hi], avc:{format:'avc'}};
+        var sup=null;
+        try{ sup=await VideoEncoder.isConfigSupported(cand); }catch(e){ sup=null; }
+        if(sup&&sup.supported){ encCfg=cand; encCodecStr=codecCands[ci2]+' · '+hwCands[hi]; break encSearch; }
+      }
+    }
+    if(!encCfg) throw wcFail('VideoEncoder does not support H.264 (avc) encoding at '+outW+'x'+outH+' in this browser (tried avc1.640033 / 640028 / 64001f / 4d0028 / 42001f)');
+    log('Proxy (webcodecs) config: decode '+dem.codecStr+' '+dem.codedW+'x'+dem.codedH+' → encode '+encCodecStr+' '+outW+'x'+outH+' @ '+fps+' fps · bitrate '+(bitrate/1000).toFixed(0)+' kbps · display '+dispW+'x'+dispH+((dispW!==dem.codedW||dispH!==dem.codedH)?' (source rotation baked into the frames)':''));
+    // ---- processed audio via the EXISTING ffmpeg filter graph ----
+    ffmpegProgressCb=function(ratio){ if(ratio!=null) progressForGenerate(ratio*0.12); };
+    var aT0=Date.now();
+    var s1Args=buildRenderArgs({encHeight:0, audioOnly:true, outName:'stage1-audio.m4a', tStart:ctx.tStart, tDur:ctx.tDur, eff:ctx.eff, dExt:ctx.dExt, sExt:ctx.sExt, proxy:false, danceIn:ctx.danceIn, songIn:ctx.songIn});
+    log('Proxy (webcodecs) audio stage: rendering the processed audio track only → stage1-audio.m4a (existing ffmpeg audio filter graph — offset/gap-fill/blend/exact duration) | ffmpeg args='+s1Args.join(' '));
+    await cancellable(withFFmpegLock(async function(){ await withTimeout(ctx.ff.exec(s1Args),600000,'WebCodecs proxy audio stage'); }));
+    stage1Made=true;
+    var s1Size=null; try{ var sd=await ctx.ff.readFile('stage1-audio.m4a'); if(sd) s1Size=sd.length||sd.byteLength||0; sd=null; }catch(e){}
+    if(!s1Size) throw wcFail('the audio stage produced no stage1-audio.m4a');
+    timings.audioMs=Date.now()-aT0;
+    log('Proxy (webcodecs) audio stage: size='+fmtBytesMB(s1Size)+' | duration='+(timings.audioMs/1000).toFixed(1)+'s');
+    // ---- hardware decode → canvas scale → hardware encode ----
+    ffmpegProgressCb=null; // this stage drives the progress bar directly
+    var eT0=Date.now();
+    var tStartUs=Math.round(ctx.tStart*1000000), tDurUs=Math.round(ctx.tDur*1000000), endUs=tStartUs+tDurUs;
+    var samples=dem.samples, si;
+    var startIdx=0, bestKeyPts=-Infinity;
+    for(si=0; si<samples.length; si++){ if(samples[si].key&&samples[si].ptsUs<=tStartUs&&samples[si].ptsUs>=bestKeyPts){ bestKeyPts=samples[si].ptsUs; startIdx=si; } }
+    var expected=0;
+    for(si=0; si<samples.length; si++){ if(samples[si].ptsUs>=tStartUs&&samples[si].ptsUs<endUs) expected++; }
+    if(expected<1) throw wcFail('no source frames fall inside the trim window');
+    var encChunks=[], encAvcDesc=null, decFrames=[], decErr=null, encErr=null;
+    var pokeRes=null;
+    function poke(){ if(pokeRes){ var r=pokeRes; pokeRes=null; r(); } }
+    function waitPoke(ms){ return new Promise(function(res){ pokeRes=res; setTimeout(res, ms); }); }
+    enc=new VideoEncoder({
+      output:function(chunk, meta){
+        try{
+          var buf=new Uint8Array(chunk.byteLength); chunk.copyTo(buf);
+          encChunks.push({data:buf, timestamp:chunk.timestamp, type:chunk.type});
+          if(meta&&meta.decoderConfig&&meta.decoderConfig.description&&!encAvcDesc){ var dd=meta.decoderConfig.description; encAvcDesc=(dd instanceof ArrayBuffer)?new Uint8Array(dd):new Uint8Array(dd); }
+        }catch(e){ if(!encErr) encErr=e; }
+        poke();
+      },
+      error:function(e){ if(!encErr) encErr=e; poke(); }
+    });
+    try{ enc.configure(encCfg); }catch(e){ throw wcFail('VideoEncoder.configure failed for '+encCfg.codec+': '+(e.message||e)); }
+    dec=new VideoDecoder({
+      output:function(f){ decFrames.push(f); poke(); },
+      error:function(e){ if(!decErr) decErr=e; poke(); }
+    });
+    try{ dec.configure(decCfg); }catch(e){ throw wcFail('VideoDecoder.configure failed for '+dem.codecStr+': '+(e.message||e)); }
+    var scaler=null;
+    try{ if(typeof OffscreenCanvas!=='undefined') scaler=new OffscreenCanvas(outW, outH); }catch(e){ scaler=null; }
+    if(!scaler){ scaler=document.createElement('canvas'); scaler.width=outW; scaler.height=outH; }
+    var sctx=scaler.getContext('2d');
+    if(!sctx) throw wcFail('could not get a 2D canvas context for scaling');
+    var sxF=outW/dispW, syF=outH/dispH;
+    var framesEncoded=0, lastAct=Date.now(), lastProgMilestone=-1;
+    async function handleFrame(fr){
+      var ts=fr.timestamp;
+      if(ts==null||ts<tStartUs||ts>=endUs){ try{ fr.close(); }catch(e){} return; }
+      while(enc.encodeQueueSize>=12){
+        if(encErr) throw wcFail('VideoEncoder error: '+(encErr.message||encErr));
+        if(ctx.isCancelled()) throw new Error('Cancelled');
+        await waitPoke(150);
+        if(Date.now()-lastAct>90000) throw wcFail('webcodecs encode stalled (no progress for 90 s)');
+      }
+      sctx.setTransform(sxF*ma, syF*mb, sxF*mc, syF*md, -minX*sxF, -minY*syF);
+      sctx.drawImage(fr, 0, 0);
+      var dur=(typeof fr.duration==='number'&&fr.duration>0)?fr.duration:dem.defaultDurUs;
+      var outTs=ts-tStartUs; if(outTs<0) outTs=0;
+      var vf=null;
+      try{ vf=new VideoFrame(scaler, {timestamp:outTs, duration:dur, alpha:'discard'}); }
+      catch(e){ try{ fr.close(); }catch(_){} throw wcFail('VideoFrame(canvas) construction failed: '+(e.message||e)); }
+      try{ fr.close(); }catch(e){}
+      enc.encode(vf, {keyFrame:framesEncoded===0});
+      try{ vf.close(); }catch(e){}
+      framesEncoded++; lastAct=Date.now();
+      var frac=expected>0?(framesEncoded/expected):0;
+      progressForGenerate(0.15+Math.min(1, frac)*0.69);
+      var m=Math.floor(frac*10)*10;
+      if(m>lastProgMilestone){ lastProgMilestone=m; log('Proxy (webcodecs) decode+encode progress: '+m+'% ('+framesEncoded+'/'+expected+' frames)'); }
+    }
+    var groupIdx=samples[startIdx].chunk, feedDone=false, decFlushed=false;
+    while(true){
+      if(decErr) throw wcFail('VideoDecoder error: '+(decErr.message||decErr));
+      if(encErr) throw wcFail('VideoEncoder error: '+(encErr.message||encErr));
+      if(ctx.isCancelled()) throw new Error('Cancelled');
+      while(decFrames.length){ await handleFrame(decFrames.shift()); lastAct=Date.now(); }
+      if(feedDone){
+        if(!decFlushed){ decFlushed=true; try{ await dec.flush(); }catch(e){ if(!decErr) decErr=e; } continue; }
+        break;
+      }
+      if(dec.decodeQueueSize>=12){ await waitPoke(150); if(Date.now()-lastAct>90000) throw wcFail('webcodecs decode stalled (no progress for 90 s)'); continue; }
+      var grp=dem.chunks[groupIdx];
+      if(!grp){ feedDone=true; continue; }
+      var gbuf=await ctx.dFile.slice(grp.offset, grp.offset+grp.size).arrayBuffer();
+      var fedAny=false;
+      for(var gi=grp.first; gi<grp.first+grp.count; gi++){
+        if(gi<startIdx) continue;
+        var smp=samples[gi];
+        if(smp.dtsUs>endUs+1000){ feedDone=true; break; }
+        dec.decode(new EncodedVideoChunk({type:smp.key?'key':'delta', timestamp:smp.ptsUs, duration:smp.durUs, data:new Uint8Array(gbuf, smp.offset-grp.offset, smp.size)}));
+        fedAny=true; lastAct=Date.now();
+      }
+      groupIdx++;
+      if(groupIdx>=dem.chunks.length) feedDone=true;
+      if(!fedAny&&!feedDone) await waitPoke(50);
+    }
+    if(decErr) throw wcFail('VideoDecoder error: '+(decErr.message||decErr));
+    try{ await enc.flush(); }catch(e){ if(!encErr) encErr=e; }
+    if(encErr) throw wcFail('VideoEncoder error: '+(encErr.message||encErr));
+    if(!framesEncoded) throw wcFail('webcodecs decode produced no frames inside the trim window');
+    if(encChunks.length!==framesEncoded) throw wcFail('the encoder emitted '+encChunks.length+' chunks for '+framesEncoded+' submitted frames (dropped or merged frames would break sync)');
+    if(encChunks[0].type!=='key') throw wcFail('the first encoded chunk is not a keyframe');
+    if(!encAvcDesc||!encAvcDesc.length) throw wcFail('the encoder never emitted an avcC decoderConfig description');
+    timings.decodeEncodeMs=Date.now()-eT0;
+    log('Proxy (webcodecs) decode+encode: '+framesEncoded+' frames → '+outW+'x'+outH+' · duration='+(timings.decodeEncodeMs/1000).toFixed(1)+'s');
+    // ---- mux: JS video-only MP4 + ffmpeg stream-copy mux with the audio ----
+    ffmpegProgressCb=function(ratio){ if(ratio!=null) progressForGenerate(0.86+Math.min(1, ratio)*0.11); };
+    var mT0=Date.now();
+    var muxed=mp4MuxVideoOnly(encChunks, encAvcDesc, outW, outH);
+    if(muxed.startOffsetUs>0) log('Proxy (webcodecs) mux: encoder used frame reordering — edit-list start offset '+muxed.startOffsetUs+'µs written so presentation starts at exactly 0 (no timestamps clamped).');
+    await ctx.ff.writeFile('proxy-video-wc.mp4', muxed.bytes);
+    wcVideoMade=true;
+    var mArgs=['-y','-i','proxy-video-wc.mp4','-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',ctx.tDur.toFixed(3),'dance-synced.mp4'];
+    log('Proxy (webcodecs) mux: video-only MP4 ('+fmtBytesMB(muxed.bytes.length)+') + stage-1 audio → ffmpeg stream-copy mux (audio starts at exactly 0; video timestamps start at 0) | ffmpeg args='+mArgs.join(' '));
+    var muxRc=null;
+    await cancellable(withFFmpegLock(async function(){ muxRc=await withTimeout(ctx.ff.exec(mArgs),600000,'WebCodecs proxy final mux'); }));
+    if(muxRc!=null&&muxRc!==0) throw wcFail('the final stream-copy mux failed (ffmpeg exit code '+muxRc+')');
+    var chk=null; try{ chk=await ctx.ff.readFile('dance-synced.mp4'); }catch(e){}
+    if(!chk||!chk.length) throw wcFail('the final stream-copy mux produced no output');
+    chk=null;
+    try{ await ctx.ff.deleteFile('stage1-audio.m4a'); stage1Made=false; }catch(e){}
+    try{ await ctx.ff.deleteFile('proxy-video-wc.mp4'); wcVideoMade=false; }catch(e){}
+    timings.muxMs=Date.now()-mT0;
+    log('Proxy (webcodecs) mux: duration='+(timings.muxMs/1000).toFixed(1)+'s (JS video mux + ffmpeg stream-copy mux)');
+    return {timings:timings, frames:framesEncoded, outW:outW, outH:outH, fps:fps, srcCodec:dem.codecStr, encCodec:encCodecStr, totalMs:Date.now()-wcT0};
+  }catch(err){
+    if(stage1Made){ try{ await ctx.ff.deleteFile('stage1-audio.m4a'); }catch(e){} }
+    if(wcVideoMade){ try{ await ctx.ff.deleteFile('proxy-video-wc.mp4'); }catch(e){} }
+    // A dance-synced.mp4 left behind by a failed mux needs no cleanup:
+    // the ffmpeg fallback re-creates it with -y.
+    throw err;
+  }finally{
+    ffmpegProgressCb=savedCb;
+    if(dec){ try{ dec.close(); }catch(e){} }
+    if(enc){ try{ enc.close(); }catch(e){} }
+  }
+}
 async function freeConverterInputs(ff, dExt, sExt){
   var freedBytes=0;
   var fsCleanup=[
@@ -1575,7 +2272,7 @@ async function renderExport(sig){
   var eff=effOffset(), tStart=trimStartSec, tEnd=trimEnd(), tDur=Math.max(0,tEnd-tStart);
   if(tDur<0.5) throw new Error('Clip too short — widen the trim.');
   releaseAnalysisScratch('before export');
-  diagStage='export';
+  diagStage='export-stage-1'; try{ journalBeginRun(); }catch(e){}
   var renderT0=Date.now();
   log('Export render starts: quality='+(height?(q+'p'):'full')+' | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | signature='+sig);
   await detectStorageBackend();
@@ -1618,6 +2315,7 @@ async function renderExport(sig){
     if(twoStage){
       exportProgLo=15; exportProgHi=50;
       var s1Args=buildRenderArgs({encHeight:0, audioOnly:true, outName:'stage1-audio.m4a', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
+      diagStage='export-stage-1';
       log('Export stage 1 (audio): rendering the processed audio track only → stage1-audio.m4a | ffmpeg args='+s1Args.join(' '));
       var s1T0=Date.now();
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(s1Args),600000,'Export stage 1 (audio) from '+songFile.name); }));
@@ -1629,6 +2327,7 @@ async function renderExport(sig){
       setExportBarPct(50);
       exportProgLo=50; exportProgHi=95;
       var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'dance-synced.mp4'];
+      diagStage='export-stage-2';
       log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | ffmpeg args='+s2Args.join(' '));
       var s2T0=Date.now();
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Export stage 2 (copy mux) from '+danceFile.name); }));
@@ -1637,6 +2336,7 @@ async function renderExport(sig){
     } else {
       exportProgLo=15; exportProgHi=95;
       var args=buildRenderArgs({encHeight:height, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
+      diagStage='export-stage-1';
       log('Export exec: ffmpeg args='+args.join(' '));
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Exporting video from '+danceFile.name); }));
     }
@@ -1661,15 +2361,103 @@ async function renderExport(sig){
   exportCachePut(sig, entry);
   return entry;
 }
+// ---------- direct export as Generate (Full + no trim) ----------
+// Same two stages as renderExport's two-stage path, but driven by the
+// GENERATION progress UI (main bar, 66%->97%) instead of the export
+// Processing bar: stage 1 (audio) maps ffmpeg progress to 66%->85%,
+// stage 2 (copy mux) to 85%->97%. Returns {blob, backend, opfsName,
+// s1Size, s1DurSec, s2DurSec, totalDurSec}. Cancellation uses the main
+// run's cancel signal (cancellable), not the export cancel signal.
+async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff){
+  diagStage='export-stage-1';
+  var renderT0=Date.now();
+  log('Direct export: stage 1 renders the processed audio only, stage 2 stream-copies the video (no video re-encode) — this file becomes the result; Share/Download/Open will deliver it immediately with no Processing render.');
+  await detectStorageBackend();
+  var directStageNum=1;
+  var directLastMilestone=-1;
+  var ff=await cancellable(ensureFFmpeg(function(ratio){
+    if(ratio==null) return;
+    var lo=(directStageNum===1)?66:85, hi=(directStageNum===1)?85:97;
+    setBarPct(lo+Math.max(0,Math.min(1,ratio))*(hi-lo));
+    var m=Math.floor(ratio*10)*10;
+    if(m>directLastMilestone){ directLastMilestone=m; log('Direct export '+(directStageNum===1?'stage 1 (audio)':'stage 2 (mux)')+' progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); }
+  }));
+  await tryMountOPFS(ff);
+  var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
+  var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate';
+  var mounted=null;
+  var s1Size=null, s1DurSec=0, s2DurSec=0;
+  try{
+    mounted=await mountInputsWorkerFS(ff, dFile, sFile);
+    var danceIn, songIn;
+    if(mounted.ok){
+      danceIn=mounted.danceIn; songIn=mounted.songIn;
+      diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
+      log('mount: inputs=WORKERFS (/mnt)');
+      log('Direct export: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+    } else {
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+mounted.reason;
+      log('mount: inputs=MEMFS (writeFile fallback) — '+mounted.reason);
+      log('Direct export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for direct export');
+      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for direct export');
+      danceIn='dance.'+dExt; songIn='song.'+sExt;
+    }
+    setBarPct(66);
+    // Stage 1 — processed audio alone (existing audio filter graph).
+    directStageNum=1; directStageLabel='Stage 1/2 · Audio'; renderProgText();
+    var s1Args=buildRenderArgs({encHeight:0, audioOnly:true, outName:'stage1-audio.m4a', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
+    diagStage='export-stage-1';
+    log('Direct export stage 1 (audio): rendering the processed audio track only → stage1-audio.m4a | ffmpeg args='+s1Args.join(' '));
+    var s1T0=Date.now();
+    await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(s1Args),600000,'Direct export stage 1 (audio) from '+songFile.name); }));
+    s1DurSec=(Date.now()-s1T0)/1000;
+    try{ var s1Data=await ff.readFile('stage1-audio.m4a'); if(s1Data) s1Size=s1Data.length||s1Data.byteLength||0; s1Data=null; }catch(e){}
+    if(s1Size==null||s1Size===0) throw new Error('Direct export stage 1 (audio) produced no audio file.');
+    log('Direct export stage 1 (audio): size='+fmtBytesMB(s1Size)+' | duration='+s1DurSec.toFixed(1)+'s');
+    setBarPct(85);
+    // Stage 2 — pure stream-copy mux.
+    directStageNum=2; directStageLabel='Stage 2/2 · Mux'; renderProgText(); directLastMilestone=-1;
+    var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'dance-synced.mp4'];
+    diagStage='export-stage-2';
+    log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | ffmpeg args='+s2Args.join(' '));
+    var s2T0=Date.now();
+    await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Direct export stage 2 (copy mux) from '+danceFile.name); }));
+    s2DurSec=(Date.now()-s2T0)/1000;
+    log('Direct export stage 2 (copy mux): duration='+s2DurSec.toFixed(1)+'s (pure stream copy — no decode, no encode)');
+    try{ await ff.deleteFile('stage1-audio.m4a'); log('memory: deleted FS stage-1 audio stage1-audio.m4a ('+fmtBytesMB(s1Size)+') after the mux'); }catch(e){}
+  }catch(renderErr){
+    if(mounted&&mounted.ok){ try{ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted after the failed direct export'); }catch(e){} }
+    try{ await ff.deleteFile('stage1-audio.m4a'); }catch(e){}
+    directStageLabel=''; renderProgText();
+    throw renderErr;
+  }
+  setBarPct(96);
+  log('Direct export encode ends — freeing inputs from converter FS before reading output…');
+  await freeConverterInputs(ff,dExt,sExt);
+  if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }
+  var outRes=await readRenderOutput(ff,'dance-synced.mp4','export-'+hashStr(exportSig)+'.mp4');
+  var totalDurSec=(Date.now()-renderT0)/1000;
+  diagStorage.lastOutput=outRes.backend;
+  diagExport.size=outRes.blob.size; diagExport.durationSec=Number(totalDurSec.toFixed(2)); diagExport.quality='full'; diagExport.backend=outRes.backend;
+  diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate | stage 1: size='+(s1Size!=null?fmtBytesMB(s1Size):'n/a')+' duration='+s1DurSec.toFixed(1)+'s | stage 2: duration='+s2DurSec.toFixed(1)+'s';
+  log('storage: inputs='+diagStorage.lastInputs+' output='+outRes.backend+(outRes.backend==='OPFS'?'':' | storage: fallback=MEMFS'));
+  log('Direct export render: size='+fmtBytesMB(outRes.blob.size)+' | duration='+totalDurSec.toFixed(1)+'s | quality=full | stage 1: size='+(s1Size!=null?fmtBytesMB(s1Size):'n/a')+' duration='+s1DurSec.toFixed(1)+'s | stage 2: duration='+s2DurSec.toFixed(1)+'s');
+  await refreshStorageEstimate();
+  directStageLabel=''; renderProgText();
+  return {blob:outRes.blob, backend:outRes.backend, opfsName:outRes.opfsName, s1Size:s1Size, s1DurSec:s1DurSec, s2DurSec:s2DurSec, totalDurSec:totalDurSec};
+}
 function performExportAction(action){
   if(!liveExport) return;
-  diagStage='export-'+action;
+  diagStage='delivery';
   if(action==='share'){
     if(liveExport.file&&liveExport.canShare&&navigator.share){
       var pr=null, syncErr=null;
       try{ pr=navigator.share({files:[liveExport.file]}); }catch(err){ syncErr=err; }
       if(syncErr){ log('Share (export) → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
-      log('Share (export) → navigator.share({files:[export File '+fmtBytesMB(liveExport.file.size)+']}) called with the pre-built export File. If this share followed a Processing render, iOS may have expired the original tap activation — a NotAllowedError below means: tap Share again (export is cached, the next tap shares instantly).');
+      log('Share (export) → navigator.share({files:[export File '+fmtBytesMB(liveExport.file.size)+']}) called with the pre-built export File. If this share followed a Processing render, iOS may have expired the original tap activation — a NotAllowedError below means: tap Share again (export is cached, the next tap shares instantly).'); try{ journalMarkCompleted(true); }catch(e){}
       if(pr&&pr.then) pr.then(function(){ log('Share (export) → navigator.share resolved.'); },function(err){
         if(err&&err.name==='AbortError'){ log('Share (export) → dismissed by user (AbortError, not a failure).'); }
         else { log('Share (export) → navigator.share rejected: '+diagErrText(err)); if(err&&err.name==='NotAllowedError'){ showError('Export is ready ('+fmtSize(liveExport.size)+') — tap Share again to open the share sheet.'); } else shareFailed(err); }
@@ -1681,11 +2469,11 @@ function performExportAction(action){
     return;
   }
   if(action==='download'){
-    if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; log('Download (export) → activating the in-DOM download anchor for the export file '+fmtBytesMB(liveExport.size)+' (href is the export object URL; if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).'); dlAnchorEl.click(); }
+    if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; log('Download (export) → activating the in-DOM download anchor for the export file '+fmtBytesMB(liveExport.size)+' (href is the export object URL; if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).'); dlAnchorEl.click(); try{ journalMarkCompleted(true); }catch(e){} }
     return;
   }
   if(action==='open'){
-    if(openAnchorEl){ openAnchorEl.href=liveExport.url; log('Open (export) → activating the in-DOM Open anchor for the export file '+fmtBytesMB(liveExport.size)+' (if the browser blocks the automatic open after Processing, tap Open again — the export is cached).'); openAnchorEl.click(); }
+    if(openAnchorEl){ openAnchorEl.href=liveExport.url; log('Open (export) → activating the in-DOM Open anchor for the export file '+fmtBytesMB(liveExport.size)+' (if the browser blocks the automatic open after Processing, tap Open again — the export is cached).'); openAnchorEl.click(); try{ journalMarkCompleted(true); }catch(e){} }
     return;
   }
 }
@@ -1712,7 +2500,7 @@ async function ensureExport(action){
     if(act) performExportAction(act);
   }catch(err){
     if(isExportCancelErr(err)||tok!==exportToken){ log('Export processing cancelled.'); }
-    else { console.error(err); logError('export',err); log('❌ Export failed: '+(err.message||err)); showError('❌ Export failed: '+(err.message||err)); }
+    else { console.error(err); logError('export',err); log('❌ Export failed: '+(err.message||err)); showError('❌ Export failed: '+(err.message||err)); try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     isExporting=false; ffmpegProgressCb=null;
     setTimeout(function(){ if(!isExporting) showExportProgress(false); },1200);
@@ -1782,11 +2570,12 @@ function cacheGet(sig){
 //    kills the player, the share source, and the download link at once.
 var resultBlob=null, resultFile=null, resultCanShare=false;
 function shareFailed(err){
-  diagStage='share';
+  diagStage='delivery';
   var msg='Share failed: '+((err&&err.name)||'Error')+((err&&err.message)?' — '+err.message:'');
   log('Save/Share attempt FAILED: '+diagErrText(err));
   log(msg+' — use Download or Open video below the result instead.');
   showError(msg+'. Use Download or Open video below the result.');
+  try{ journalMarkHandledError(); }catch(e){}
 }
 function saveResult(){
   // iOS rule: navigator.share() must fire inside the tap's transient
@@ -1812,7 +2601,9 @@ function saveResult(){
   log('Save/Share tapped → fallback shown (share unavailable): canShare=false → fallback shown | '+why);
   log(msg); showError(msg);
 }
-function showResult(blob){
+function showResult(blob, opts){
+  opts=opts||{};
+  lastResultIsDirect=!!opts.isDirect;
   diagStage='result';
   // A new proxy on screen means any previous live export belongs to older
   // settings — drop it (the cached-export check below re-arms it instantly
@@ -1870,16 +2661,22 @@ function showResult(blob){
   saveRow.appendChild(openA);
   wrap.appendChild(saveRow);
   var guide=document.createElement('p'); guide.className='note';
-  guide.textContent='The player above is a lightweight 480p proxy for editing. Share, Download and Open first render the full export at the selected Export quality — watch the Processing bar under the buttons — then deliver that file. In the share sheet, pick "Save Video" or "Save to Files" to keep it.';
+  if(lastResultIsDirect){
+    guide.textContent='The player above is the full-quality export itself (Full quality, no trim — generated directly). Share, Download and Open deliver this exact file immediately, with no extra rendering. In the share sheet, pick "Save Video" or "Save to Files" to keep it.';
+  } else {
+    guide.textContent='The player above is a lightweight 480p proxy for editing. Share, Download and Open first render the full export at the selected Export quality — watch the Processing bar under the buttons — then deliver that file. In the share sheet, pick "Save Video" or "Save to Files" to keep it.';
+  }
   wrap.appendChild(guide);
   updateNewBtn();
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
 }
 function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
 var historyCounter=0; // sequential Video N numbering — survives New/resets
-function addHistory(sig,snap,size){
+function addHistory(sig,snap,size,available){
   historyCounter++;
-  historyEntries.unshift({sig:sig, snap:snap, size:size, when:new Date(), available:true, num:historyCounter});
+  var hasPayload=(available!==false);
+  historyEntries.unshift({sig:sig, snap:snap, size:size, when:new Date(), available:hasPayload, num:historyCounter});
+  if(!hasPayload) log('History: entry stored without its video payload (size '+fmtBytesMB(size)+' exceeds the History cache caps — max '+MAX_OUTPUTS+' outputs / '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — restore requires re-generate.');
   // This generation becomes the base trim the readouts compose against.
   baseTrimStart=snap.tStart; baseTrimEnd=snap.tEnd;
   renderHistory();
@@ -1892,7 +2689,7 @@ function renderHistory(){
   list.innerHTML='';
   historyEntries.forEach(function(h){
     var b=document.createElement('button'); b.type='button'; b.className='histRow';
-    b.textContent='Version '+h.num;
+    b.textContent='Version '+h.num+(h.available?'':' — restore requires re-generate');
     b.addEventListener('click',function(){ restoreHistory(h); });
     list.appendChild(b);
   });
@@ -1911,8 +2708,8 @@ function restoreHistory(h){
   layoutTimeline();
   log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
   var e=cacheGet(h.sig);
-  if(e){ showResult(e.blob); generatedOnce=true; log('History: proxy preview restored instantly from cache ('+fmtSize(e.blob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
-  else { h.available=false; renderHistory(); log('History: that video was evicted from the cache — settings restored; tap Generate to rebuild it.'); }
+  if(e){ var isDir=!!(s.isDirect); showResult(e.blob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(e.blob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(e.blob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
+  else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Generate to rebuild it.'); }
 }
 
 // ---------- New (full reset to initial state) ----------
@@ -1963,7 +2760,7 @@ function resetAll(){
   if(opfsStaged.song) opfsDelete(opfsStaged.song.name);
   opfsStaged={dance:null, song:null};
   if(resultURL){ URL.revokeObjectURL(resultURL); resultURL=null; }
-  resultBlob=null; resultFile=null; resultCanShare=false;
+  resultBlob=null; resultFile=null; resultCanShare=false; lastResultIsDirect=false; directStageLabel='';
   if(danceURL){ URL.revokeObjectURL(danceURL); danceURL=null; }
   vid.removeAttribute('src'); try{ vid.load(); }catch(e){}
   $('fileDance').value=''; $('fileSong').value='';
@@ -2005,7 +2802,7 @@ async function doGenerate(opts){
   if(!danceFile||!songFile) return;
   if(isGenerating) return;
   if(pipelineRunning&&!opts.fullRun) return;
-  isGenerating=true;
+  isGenerating=true; try{ journalBeginRun(); }catch(e){}
   var btn=$('btnGenerate'); btn.disabled=true; // previous result stays on screen until this run completes a new one
   if(opts.fullRun){ /* progress + cancel signal already set up by pipeline */ }
   else { runToken++; newCancelSignal(); if(analysisState==="done"&&analysisVersion===filesVersion){ resetProgress(false); } else { resetProgress(true); } }
@@ -2023,11 +2820,69 @@ async function doGenerate(opts){
       log('Generate: sync analysis done — building video…');
     }
     var qEl=document.querySelector('input[name=quality]:checked');
-    var q=qEl?qEl.value:'full', height=(q==='full')?0:parseInt(q,10); // EXPORT quality selection — kept in the snapshot for History; NOT used by the proxy encode
+    var q=qEl?qEl.value:'full', height=(q==='full')?0:parseInt(q,10); // EXPORT quality selection — kept in the snapshot for History; for Full+no-trim it also selects the direct-export generate path below
     var eff=effOffset(), tStart=trimStartSec, tEnd=trimEnd(), tDur=Math.max(0,tEnd-tStart);
     if(tDur<0.5) throw new Error('Clip too short — widen the trim.');
+    var noTrimDirect=(tStart<=0.001)&&(danceDur>0?(tEnd>=danceDur-0.01):(trimEndSec==null));
+    var isDirect=(q==='full'&&noTrimDirect);
+    if(isDirect) log('generate path: direct export (Full, no trim)');
+    else log('generate path: proxy');
     var sig=settingsSignature('proxy480',tStart,tEnd,eff,blendVal);
-    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal,proxySig:sig};
+    var exportSig=settingsSignature(q,tStart,tEnd,eff,blendVal);
+    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal,proxySig:sig,isDirect:isDirect,exportSig:exportSig};
+    if(isDirect){
+      // DIRECT EXPORT AS GENERATE: no 480p proxy at all. The two-stage
+      // export (audio render + stream-copy mux) IS the generation step;
+      // its file becomes the result and satisfies the export cache for
+      // these exact settings, so Share/Download/Open deliver instantly.
+      // Any later edit changes the signature (same invalidation as the
+      // export cache today: liveExport is cleared by invalidateExport on
+      // edit), so the next Generate re-evaluates this branch fresh — if
+      // the edit set a trim or a scaled quality it falls back to proxy.
+      var dHitOut=cacheGet(exportSig);
+      var dHitExp=dHitOut?null:exportCacheGet(exportSig);
+      var dHitBlob=(dHitOut&&dHitOut.blob)||(dHitExp&&dHitExp.blob)||null;
+      if(dHitBlob){
+        generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
+        diagResult.settings=snap;
+        diagExport.size=dHitBlob.size; diagExport.durationSec=0; diagExport.quality='full'; diagExport.backend=(dHitOut||dHitExp).opfsName?'OPFS':(diagExport.backend||'MEMFS'); diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate — cache hit, no re-render';
+        log('Direct export skipped — cache hit for identical settings (no re-render). Direct export blob '+fmtBytesMB(dHitBlob.size)+' — the export cache for these settings is already satisfied.');
+        // Ensure both caches hold the payload so History restore and
+        // Share/Download/Open both hit without rendering.
+        var dHitOpfs=(dHitOut||dHitExp).opfsName||null;
+        if(!dHitOut&&dHitBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dHitBlob, opfsName:null}); }catch(e){} }
+        if(!dHitExp){ try{ exportCachePut(exportSig,{blob:dHitBlob, opfsName:dHitOpfs, q:q}); }catch(e){} }
+        showResult(dHitBlob,{isDirect:true});
+        addHistory(exportSig,snap,dHitBlob.size, dHitBlob.size<=MAX_CACHE_BYTES);
+        log('Direct export loaded from cache — identical settings, no re-render. ('+fmtSize(dHitBlob.size)+')');
+        try{ journalMarkCompleted(true); }catch(e){}
+        return;
+      }
+      releaseAnalysisScratch('before encode');
+      diagStage='export-stage-1'; diagResult.settings=snap; diagLastEncodeMilestone=-1;
+      log('Direct export render starts: two-stage export as the generation step | audio pipeline identical to export (detected offset incl. negative-offset room-audio gap fill, blend, audio exactly the video duration) | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | export signature='+exportSig);
+      log('Generating direct export… Full · offset '+eff.toFixed(3)+'s · trim '+tStart.toFixed(2)+'–'+tEnd.toFixed(2)+'s'+(blendVal>0?(' · room audio '+Math.round(blendVal*100)+'%'):''));
+      markStepActive(4);
+      if(diagStorage.opfsAvailable&&!opfsStaged.dance){ try{ await opfsStageInput(danceFile,'dance'); }catch(e){} }
+      if(diagStorage.opfsAvailable&&!opfsStaged.song){ try{ await opfsStageInput(songFile,'song'); }catch(e){} }
+      setBarPct(66); // event: direct export encode starts (stage progress then maps 66%->97%)
+      var dRes=await renderDirectExportForGenerate(exportSig,tStart,tEnd,tDur,eff);
+      var dBlob=dRes.blob;
+      var dSecs=((Date.now()-t0)/1000).toFixed(1);
+      generatedOnce=true; diagStage='result'; directStageLabel=''; setBarPct(100); markStepDone(4);
+      // Satisfy the export cache BEFORE showResult so its cached-export
+      // check arms liveExport and Share/Download/Open deliver instantly
+      // with no Processing-bar render step.
+      try{ exportCachePut(exportSig,{blob:dBlob, opfsName:dRes.opfsName, q:q}); }catch(e){ logError('direct-export-cache',e); }
+      var dFits=(dBlob.size<=MAX_CACHE_BYTES);
+      if(dFits){ try{ cachePut(exportSig,{blob:dBlob, opfsName:null}); }catch(e){} }
+      else { log('History: direct result '+fmtBytesMB(dBlob.size)+' does not fit the History byte cap ('+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — storing the History entry without the payload; restore requires re-generate.'); }
+      showResult(dBlob,{isDirect:true});
+      addHistory(exportSig,snap,dBlob.size,dFits);
+      log('Done — direct export ready: '+tDur.toFixed(2)+'s output, '+fmtSize(dBlob.size)+', generated in '+dSecs+'s · stage 1: size='+(dRes.s1Size!=null?fmtBytesMB(dRes.s1Size):'n/a')+' duration='+Number(dRes.s1DurSec).toFixed(1)+'s · stage 2: duration='+Number(dRes.s2DurSec).toFixed(1)+'s · audio clipped to video duration (no audio beyond video). This IS the full-quality export — Share, Download and Open deliver it immediately, no further render.');
+      try{ journalMarkCompleted(true); }catch(e){}
+      return;
+    }
     var hit=cacheGet(sig);
     if(hit){
       generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
@@ -2036,6 +2891,7 @@ async function doGenerate(opts){
       showResult(hit.blob);
       addHistory(sig,snap,hit.blob.size);
       log('Proxy loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
+      try{ journalMarkCompleted(true); }catch(e){}
       return;
     }
     // Memory hygiene (5): before encode starts, release analysis scratch
@@ -2071,6 +2927,36 @@ async function doGenerate(opts){
       await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
+    // WEBCODECS PROXY ENGINE: try the hardware pipeline first (demux →
+    // VideoDecoder → canvas scale → VideoEncoder → JS video mux + ffmpeg
+    // stream-copy mux with the processed audio from the existing filter
+    // graph). It leaves the finished proxy at dance-synced.mp4, exactly
+    // where the ffmpeg path leaves it. ANY failure or unsupported
+    // configuration logs its reason and falls through to the ffmpeg
+    // proxy encode below, unchanged.
+    var wcOutcome=null, wcFailReason=null, outRes=null;
+    var wcToken=runToken;
+    try{
+      wcOutcome=await tryWebCodecsProxy({ff:ff, dFile:dFile, sFile:sFile, danceIn:danceIn, songIn:songIn, dExt:dExt, sExt:sExt, tStart:tStart, tEnd:tEnd, tDur:tDur, eff:eff, isCancelled:function(){ return runToken!==wcToken; }});
+    }catch(wcErr){
+      if(isCancelErr(wcErr)) throw wcErr;
+      wcFailReason=(wcErr&&wcErr.wcReason)||(wcErr&&wcErr.message)||String(wcErr);
+    }
+    if(wcOutcome){
+      diagProxy.engine='webcodecs (hardware)'; diagProxy.webcodecs=wcOutcome;
+      diagProxy.lowres='n/a — webcodecs hardware decode (no ffmpeg decode, no -lowres)';
+      log('proxy engine: webcodecs (hardware)');
+      log('Proxy (webcodecs) encode ends — freeing inputs from converter FS before reading output…');
+      await freeConverterInputs(ff,dExt,sExt);
+      outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
+      if(proxyMounted&&proxyMounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); proxyMounted=null; }
+      var wcT=wcOutcome.timings;
+      log('Proxy (webcodecs) stage timings: demux='+(wcT.demuxMs/1000).toFixed(2)+'s | decode+encode='+(wcT.decodeEncodeMs/1000).toFixed(1)+'s | audio='+(wcT.audioMs/1000).toFixed(1)+'s | mux='+(wcT.muxMs/1000).toFixed(1)+'s | output size='+fmtBytesMB(outRes.blob.size)+' | '+wcOutcome.frames+' frames · '+wcOutcome.outW+'x'+wcOutcome.outH+' @ '+wcOutcome.fps+' fps · '+wcOutcome.srcCodec+' → '+wcOutcome.encCodec);
+    } else {
+      diagProxy.engine='ffmpeg wasm (fallback: '+wcFailReason+')';
+      log('proxy engine: ffmpeg wasm (fallback: '+wcFailReason+')');
+    }
+    if(!wcOutcome){
     // PROXY SPEED: the proxy encode is decode-bound — the single-threaded
     // wasm core software-decodes every frame of a 4K H.264 stream just to
     // downscale it (155 s for 97 s of 3840x2160). For sources 1440p or
@@ -2124,10 +3010,11 @@ async function doGenerate(opts){
     await freeConverterInputs(ff,dExt,sExt);
     var outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
     if(proxyMounted&&proxyMounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); proxyMounted=null; }
+    }
     var blob=outRes.blob;
     diagStorage.lastOutput=outRes.backend; diagProxy.size=blob.size; diagProxy.durationSec=Number(((Date.now()-renderT0)/1000).toFixed(2)); diagProxy.backend=outRes.backend;
     log('storage: inputs='+diagStorage.lastInputs+' output='+outRes.backend+(outRes.backend==='OPFS'?'':' | storage: fallback=MEMFS'));
-    log('Proxy render: size='+fmtBytesMB(blob.size)+' | duration='+((Date.now()-renderT0)/1000).toFixed(1)+'s | max height 480p · fast encode | lowres: '+diagProxy.lowres);
+    log('Proxy render: size='+fmtBytesMB(blob.size)+' | duration='+((Date.now()-renderT0)/1000).toFixed(1)+'s | max height 480p · fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'ffmpeg wasm'));
     log('Encode output: blob '+fmtBytesMB(blob.size)+' type='+(blob.type||'video/mp4'));
     var secs=((Date.now()-t0)/1000).toFixed(1);
     generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
@@ -2136,11 +3023,13 @@ async function doGenerate(opts){
     showResult(blob);
     addHistory(sig,snap,blob.size);
     log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Share, Download or Open.');
+    try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
-    else { console.error(err); logError('generate',err); log('❌ Generate failed: '+(err.message||err)); showError('❌ Generate failed: '+(err.message||err)); }
+    else { console.error(err); logError('generate',err); log('❌ Generate failed: '+(err.message||err)); showError('❌ Generate failed: '+(err.message||err)); try{ journalMarkHandledError(); }catch(e){} }
   }finally{
-    if(proxyMounted&&proxyMounted.ok&&ffmpeg){ try{ await unmountInputsWorkerFS(ffmpeg); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }catch(e){} proxyMounted=null; }
+    if(typeof proxyMounted!=='undefined'&&proxyMounted&&proxyMounted.ok&&ffmpeg){ try{ await unmountInputsWorkerFS(ffmpeg); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }catch(e){} proxyMounted=null; }
+    directStageLabel='';
     stopRunClock();
     setCancelVisible(false);
     btn.disabled=!(danceFile&&songFile);
@@ -2187,7 +3076,7 @@ async function runAutoPipeline(){
     await doGenerate({fullRun:true});
   }catch(autoErr){
     if(isCancelErr(autoErr)){ /* cancelled — already logged */ }
-    else { console.error(autoErr); log('❌ Auto-generate: '+(autoErr.message||autoErr)); showError('❌ Auto-generate: '+(autoErr.message||autoErr)); }
+    else { console.error(autoErr); log('❌ Auto-generate: '+(autoErr.message||autoErr)); showError('❌ Auto-generate: '+(autoErr.message||autoErr)); try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     pipelineRunning=false;
     if(!isGenerating){ stopRunClock(); setCancelVisible(false); }
@@ -2202,10 +3091,10 @@ try{
 }catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
 try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
-try{
-  window.addEventListener('error',function(ev){ try{ var er=ev.error||new Error(ev.message||'window error'); logError('window-error',er); }catch(_){} });
-  window.addEventListener('unhandledrejection',function(ev){ try{ var r=ev.reason; logError('unhandledrejection',(r instanceof Error)?r:new Error(String(r))); }catch(_){} });
-}catch(e){}
+// Global 'error' / 'unhandledrejection' handlers are registered once,
+// early, in the session-journal block above — they write synchronously
+// to the persisted journal so the error survives a dying tab. (No second
+// registration here, which would double-log every global error.)
 })();
 </script>
 </body>
