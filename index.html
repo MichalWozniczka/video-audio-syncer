@@ -724,8 +724,26 @@ async function copyDiagnostics(){
   return copied;
 }
 function setStatus(t,err){ if(t) log(t); }
-function showError(msg){ var el=$('errLine'); if(!el) return; el.textContent=msg; el.classList.add('show'); try{ log('UI error shown: '+msg); }catch(e){} }
-function clearError(){ var el=$('errLine'); if(!el) return; el.textContent=''; el.classList.remove('show'); }
+// A single failure must surface ONCE: an analysis failure is reported by
+// the analysis handler first and then again by the pipeline/generate
+// catch that also sees the rejection (~57 ms later, same message). The
+// first showError records the message; identical repeats while it is
+// still on screen are dropped, and the catch sites check
+// errorAlreadySurfaced() before adding their own duplicate log line.
+// clearError() (called by resetProgress at every run start and by Start
+// over) resets the record, so the same failure in a LATER run shows again.
+var surfacedErrorMsg=null;
+function errorAlreadySurfaced(msg){ return surfacedErrorMsg===msg; }
+function showError(msg){ var el=$('errLine'); if(!el) return; if(surfacedErrorMsg===msg&&el.classList.contains('show')) return; surfacedErrorMsg=msg; el.textContent=msg; el.classList.add('show'); try{ log('UI error shown: '+msg); }catch(e){} if(String(msg).indexOf('❌')===0){ try{ endProgressOnFailure(); }catch(e){} } }
+// Terminal failure (every ❌ error): the run is over, so the main
+// progress bar must leave its in-progress state — a bar parked at
+// "50% · Generating" beside the error reads as still-running forever.
+// Hide the bar + steps row and stop the run clock. A bar already at
+// 100% · Done (e.g. a later export failure, result on screen) is NOT
+// in-progress and is left alone. resetProgress re-shows both on the
+// next run.
+function endProgressOnFailure(){ if(barPct>=100) return; var w=$('progWrap'); if(w) w.style.display='none'; var sr=$('stepsRow'); if(sr) sr.classList.remove('show'); stopRunClock(); try{ log('Progress bar cleared — the run ended in a terminal failure, so it no longer shows an in-progress state.'); }catch(e){} }
+function clearError(){ surfacedErrorMsg=null; var el=$('errLine'); if(!el) return; el.textContent=''; el.classList.remove('show'); }
 var stepState={1:false,2:false,3:false,4:false};
 var barPct=0, barCeiling=5, progPhase='', progressEverShown=false;
 // Progress milestone ladder — percentage ALLOCATION (not bar width; the
@@ -2956,31 +2974,74 @@ function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), 
 var historyCounter=0; // sequential Video N numbering — survives New/resets
 var VERSIONS_KEEP=5; // stored version videos kept in OPFS — older entries degrade to settings-only
 var HISTORY_INDEX_KEY='dance-sync.history-index.v1';
+var HISTORY_INDEX_BACKUP_KEY='dance-sync.history-index.v1.bak';
+// The index is written to TWO localStorage keys (primary + backup) and
+// every failure is logged to diagnostics — a silent write failure here
+// once cost a whole session's History with no trace in the dump. If the
+// full write throws (quota / storage pressure), retry once with the
+// payload references stripped (entries survive as settings-only) rather
+// than losing the list entirely.
 function persistHistoryIndex(){
+  var json=null;
   try{
     var data={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
       return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:!!h.available, settingsOnly:!h.versionFile, versionFile:h.versionFile||null, payloadSize:(h.payloadSize!=null?h.payloadSize:null), blobType:h.blobType||null};
     })};
-    localStorage.setItem(HISTORY_INDEX_KEY, JSON.stringify(data));
-  }catch(e){}
+    json=JSON.stringify(data);
+  }catch(e){ try{ log('History: FAILED to serialize the History index ('+(e.message||e)+') — index not saved.'); }catch(_){} return; }
+  try{
+    localStorage.setItem(HISTORY_INDEX_KEY, json);
+    try{ localStorage.setItem(HISTORY_INDEX_BACKUP_KEY, json); }catch(_){}
+    // Read-back verify: a setItem that reported success but did not stick
+    // (storage eviction / partitioning) must not fail silently either.
+    var back=null; try{ back=localStorage.getItem(HISTORY_INDEX_KEY); }catch(_){}
+    if(back!==json){ try{ log('History: WARNING — index write did not read back intact (wrote '+json.length+' chars, read '+(back==null?'nothing':back.length+' chars')+').'); }catch(_){} }
+  }catch(e){
+    try{ log('History: FAILED to save index ('+(e.message||e)+') — retrying with payload references stripped.'); }catch(_){}
+    try{
+      var slim={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
+        return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:false, settingsOnly:true, versionFile:null, payloadSize:null, blobType:h.blobType||null};
+      })};
+      var slimJson=JSON.stringify(slim);
+      localStorage.setItem(HISTORY_INDEX_KEY, slimJson);
+      try{ localStorage.setItem(HISTORY_INDEX_BACKUP_KEY, slimJson); }catch(_){}
+      try{ log('History: slim index saved ('+historyEntries.length+' entries, settings-only) after the full save failed.'); }catch(_){}
+    }catch(e2){ try{ log('History: FAILED to save even the slim index ('+(e2.message||e2)+') — History will not survive a reload.'); }catch(_){} }
+  }
 }
 function restoreHistoryIndex(){
+  // Every outcome is logged — a boot that finds no readable index must
+  // say so (and why), never just show an empty list in silence. Each
+  // entry is rebuilt inside its own try/catch: one malformed entry is
+  // skipped with a log line and can NOT take down the whole list.
+  var raw=null, rawErr='primary key absent';
+  try{ raw=localStorage.getItem(HISTORY_INDEX_KEY); }catch(e){ rawErr='primary read threw: '+(e.message||e); }
+  var parsed=null;
+  if(raw){ try{ parsed=JSON.parse(raw); if(!parsed||!Array.isArray(parsed.entries)){ parsed=null; rawErr='primary index has an unexpected shape'; } }catch(e){ rawErr='primary index unparseable: '+(e.message||e); } }
+  var fromBackup=false;
+  if(!parsed){
+    var bakRaw=null;
+    try{ bakRaw=localStorage.getItem(HISTORY_INDEX_BACKUP_KEY); }catch(e){}
+    if(bakRaw){ try{ var bp=JSON.parse(bakRaw); if(bp&&Array.isArray(bp.entries)){ parsed=bp; fromBackup=true; } }catch(e){} }
+  }
+  if(!parsed){
+    try{ log('History: no readable saved index ('+rawErr+') — starting with an empty History.'); }catch(_){}
+    return;
+  }
   try{
-    var raw=localStorage.getItem(HISTORY_INDEX_KEY);
-    if(!raw) return;
-    var parsed=JSON.parse(raw);
-    if(!parsed||!Array.isArray(parsed.entries)) return;
-    var restored=[];
+    var restored=[], skipped=0;
     parsed.entries.forEach(function(pe){
-      if(!pe||typeof pe.num!=='number'||!pe.snap) return;
-      var hasPayload=!!pe.versionFile;
-      restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(pe.payloadSize||0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, versionFile:pe.versionFile||null, payloadSize:(pe.payloadSize!=null?pe.payloadSize:null), blobType:pe.blobType||null, settingsOnly:!hasPayload});
+      try{
+        if(!pe||typeof pe.num!=='number'||!pe.snap||typeof pe.snap!=='object'){ skipped++; try{ log('History: skipped a malformed saved entry during rebuild (num='+(pe?pe.num:'?')+').'); }catch(_){} return; }
+        var hasPayload=!!pe.versionFile;
+        restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(pe.payloadSize||0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, versionFile:pe.versionFile||null, payloadSize:(pe.payloadSize!=null?pe.payloadSize:null), blobType:pe.blobType||null, settingsOnly:!hasPayload});
+      }catch(ee){ skipped++; try{ log('History: skipped a saved entry that failed to rebuild ('+(ee.message||ee)+').'); }catch(_){} }
     });
     historyEntries.length=0;
     restored.forEach(function(h){ historyEntries.push(h); });
     var maxNum=0; restored.forEach(function(h){ if(h.num>maxNum) maxNum=h.num; });
     historyCounter=Math.max((typeof parsed.counter==='number'?parsed.counter:0), maxNum);
-    log('History: restored '+restored.length+' entries from saved index');
+    log('History: restored '+restored.length+' entries from saved index'+(fromBackup?' (backup copy — the primary index was unreadable)':'')+(skipped?(' · '+skipped+' malformed entr'+(skipped===1?'y':'ies')+' skipped'):''));
     renderHistory();
   }catch(e){ try{ log('History: failed to restore saved index: '+(e.message||e)); }catch(_){} }
 }
@@ -3086,13 +3147,20 @@ function loadVersionPayload(h){
       var handle=await dir.getFileHandle(h.versionFile.split('/').pop());
       var rawFile=await handle.getFile();
       if(!rawFile||!rawFile.size) throw new Error('the stored version file is empty');
-      var restoredType=h.blobType||'video/mp4';
-      var file=null;
-      try{ file=new File([rawFile], rawFile.name||('v'+h.num+'.mp4'), {type:restoredType}); }catch(fe){ file=new Blob([rawFile], {type:restoredType}); }
-      log('Version '+h.num+' restored from storage: OPFS '+h.versionFile+' — restored blob type='+restoredType+' size='+file.size+' bytes (raw stored file type='+(rawFile.type||'(empty)')+' size='+rawFile.size+' bytes) loaded into the Preview.');
+      // Embed the stored File EXACTLY as-is — the identical construction
+      // the generation-time embed uses for an OPFS-backed render output
+      // (readRenderOutput hands showResult the raw handle.getFile()
+      // File, type '' and all). An earlier restore path re-wrapped the
+      // stored File in a NEW File/Blob with an overridden type; QA proved
+      // the re-wrapped embed still errored (code 4) on the HEVC version
+      // while the generation-time embed of the same bytes played, so the
+      // wrap itself was the last page-side difference. No re-wrap, no
+      // re-mux, no type override: the bytes and the File construction
+      // reaching the <video> element are now identical to generation.
+      log('Version '+h.num+' restored from storage: OPFS '+h.versionFile+' — embedding the stored File directly ('+rawFile.size+' bytes, stored type='+(rawFile.type||'(empty)')+', recorded generation type='+(h.blobType||'(none)')+'), identical in construction to a generation-time OPFS embed (no re-wrap, no re-mux, no type override).');
       generatedOnce=true;
-      try{ cachePut(h.sig,{blob:file, opfsName:null}); }catch(e){}
-      showResult(file,{isDirect:!!(h.snap&&h.snap.isDirect)});
+      try{ cachePut(h.sig,{blob:rawFile, opfsName:null}); }catch(e){}
+      showResult(rawFile,{isDirect:!!(h.snap&&h.snap.isDirect)});
       if(h.snap&&h.snap.isDirect){ log('History: restored version is a direct export — Share/Download/Open deliver this stored file.'); }
     }catch(e){
       logError('version-restore',e);
@@ -3136,7 +3204,7 @@ function restoreHistory(h){
   else { appliedSnapshot=null; }
   updateApplyEditsState();
   var e=cacheGet(h.sig);
-  if(e){ var isDir=!!(s.isDirect); var rawBlob=e.blob; var effType=h.blobType||rawBlob.type||'video/mp4'; var useBlob=rawBlob; if(rawBlob.type!==effType){ try{ useBlob=new Blob([rawBlob],{type:effType}); }catch(be){ useBlob=rawBlob; } } log('History: restored blob type='+effType+' size='+useBlob.size+' bytes (cached blob type='+(rawBlob.type||'(empty)')+' size='+rawBlob.size+' bytes).'); showResult(useBlob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(useBlob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
+  if(e){ var isDir=!!(s.isDirect); var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(useBlob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
   else if(h.versionFile){ loadVersionPayload(h); }
   else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
 }
@@ -3466,7 +3534,7 @@ async function doGenerate(opts){
     try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
-    else { console.error(err); logError('generate',err); var genMsg=(err.message||err); var genShown=(genMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Generate failed: '+genMsg); log(genShown); showError(genShown); try{ journalMarkHandledError(); }catch(e){} }
+    else { console.error(err); logError('generate',err); var genMsg=(err.message||err); var genShown=(genMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Generate failed: '+genMsg); if(!errorAlreadySurfaced(genShown)){ log(genShown); showError(genShown); } try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     if(typeof proxyMounted!=='undefined'&&proxyMounted&&proxyMounted.ok&&ffmpeg){ try{ await unmountInputsWorkerFS(ffmpeg); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }catch(e){} proxyMounted=null; }
     directStageLabel='';
@@ -3519,7 +3587,7 @@ async function runAutoPipeline(){
     await doGenerate({fullRun:true});
   }catch(autoErr){
     if(isCancelErr(autoErr)){ /* cancelled — already logged */ }
-    else { console.error(autoErr); var autoMsg=(autoErr.message||autoErr); var autoShown=(autoMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Auto-generate: '+autoMsg); log(autoShown); showError(autoShown); try{ journalMarkHandledError(); }catch(e){} }
+    else { console.error(autoErr); var autoMsg=(autoErr.message||autoErr); var autoShown=(autoMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Auto-generate: '+autoMsg); if(!errorAlreadySurfaced(autoShown)){ log(autoShown); showError(autoShown); } try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     pipelineRunning=false;
     if(!isGenerating){ stopRunClock(); setCancelVisible(false); }
@@ -3546,6 +3614,11 @@ try{
   log('ENV PROBE (load): iframe=' + diagEnvAtLoad.inIframe + ' | origin=' + diagEnvAtLoad.locationOrigin + ' | crossOriginIsolated=' + diagEnvAtLoad.crossOriginIsolated + ' | SharedArrayBuffer=' + diagEnvAtLoad.sharedArrayBufferType + ' | DecompressionStream=' + diagEnvAtLoad.decompressionStreamType + ' | share=' + diagEnvAtLoad.sharePresent + ' | canShare=' + diagEnvAtLoad.canSharePresent + ' test: ' + diagEnvAtLoad.canShareTest + ' | downloadAttr=' + diagEnvAtLoad.downloadAttrSupport + ' | VideoDecoder=' + diagEnvAtLoad.videoDecoderType + ' | touchPoints=' + diagEnvAtLoad.maxTouchPoints);
   log('Page ready — Video/Audio Syncer diagnostics active. Tap Details → Copy diagnostics after any failure and paste the whole dump back.');
 }catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
+// Safety net: re-persist the History index as the page goes away, so
+// any entry mutation that did not pass through renderHistory (cache
+// eviction marking entries unavailable, a failed payload load marking an
+// entry settings-only) is still reflected in the saved index.
+try{ window.addEventListener('pagehide', function(){ try{ persistHistoryIndex(); }catch(e){} }); }catch(e){}
 try{ restoreHistoryIndex(); }catch(e){ try{ logError('history-restore-startup',e); }catch(_){} }
 try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
