@@ -239,6 +239,7 @@ var dancePCM=null, songPCM=null;
 var danceDur=0, songDur=0;
 var restoredDur=0, restoredSongDur=0; // source durations carried by a History entry's metadata — used to display the editor (trim/offset readouts, offset input) after a post-reload restore, when no source files are loaded and danceDur/songDur are still 0
 var restoreNeedsSources=false; // true after a post-reload History restore (no source files): timeline dragging + Re-sync disabled, Apply edits disabled, and the editor shows the re-upload note until the sources are uploaded again
+var pendingRestoreCtx=null; // offset context of a History version restored with NO source files loaded: {eff, detected (nullable), sig}. handleFile zeroes detectedOffset/audioPos on re-upload, so without this stash the restored version's true additional offset (eff − detected) is destroyed before detection re-runs — and if the effective offset were ever re-interpreted AS the additional offset, applying an edit would double-apply the detected offset (eff + detected). runAnalysis consumes this on its next successful detection for the same file pair and re-establishes audioPos from (new detected + true additional) — never from the raw effective value.
 var detectedOffset=0;
 var trimStartSec=0, trimEndSec=null; // null = full duration
 var baseTrimStart=0, baseTrimEnd=null; // trim of the restored/last-generated version; readouts compose against it when it differs from full range
@@ -1390,6 +1391,32 @@ function runAnalysis(){
       }
       log('Confidence gate: verified confidence '+confidence.toFixed(4)+' meets the 0.10 floor — analysis accepted.');
       analysisState="done"; analysisVersion=ver;
+      // Restored-offset normalization (Question 3): if this detection is
+      // the re-upload that follows a no-source History restore, and the
+      // uploaded pair is the restored version's own file pair (its
+      // signature embeds both file keys), re-establish the position from
+      // the TRUE additional offset — (stashed effective − stashed
+      // detected) — over the NEW detected offset. The stashed effective
+      // value itself is never treated as an additional offset, so the
+      // detected offset cannot be double-applied (the −12.492 failure
+      // shape). When the entry's metadata carried no detected value,
+      // the true additional offset over THIS detection is (effective −
+      // new detected), which lands the position exactly on the restored
+      // effective offset. Either way the Additional offset input ends
+      // up holding the true additional offset once layoutTimeline syncs
+      // it below. A stash for a DIFFERENT file pair is dropped: those
+      // files start fresh at the detected offset, additional 0.
+      if(pendingRestoreCtx){
+        var prc=pendingRestoreCtx; pendingRestoreCtx=null;
+        var pairPrefix=fileKey(danceFile)+'|'+fileKey(songFile)+'|';
+        if(prc.sig&&prc.sig.indexOf(pairPrefix)===0){
+          var trueDelta=(prc.detected!=null)?(prc.eff-prc.detected):(prc.eff-detectedOffset);
+          audioPos=-(detectedOffset+trueDelta);
+          log('Restored offset context normalized after re-upload: re-detected offset '+detectedOffset.toFixed(3)+'s · restored version effective offset '+prc.eff.toFixed(3)+'s'+(prc.detected!=null?(' · its recorded detected offset '+prc.detected.toFixed(3)+'s'):' · its metadata carried no detected offset, derived against this detection')+' → additional offset '+(trueDelta>=0?'+':'')+trueDelta.toFixed(3)+'s, effective offset '+effOffset().toFixed(3)+'s. The detected offset is applied exactly once.');
+        } else {
+          log('Restored offset context dropped: the re-uploaded files are not the restored version\'s file pair — starting fresh at the detected offset (additional offset 0.000s).');
+        }
+      }
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
       // The Preview block (header, subheading, player, Share/Download/Open)
       // is revealed ONLY by showResult, once a generation is fully complete
@@ -2830,7 +2857,7 @@ function cachePut(sig,entry){
     if(oe&&oe.opfsName){ opfsDelete(oe.opfsName); oe.opfsName=null; }
     // An entry whose video also lives in the OPFS versions store stays
     // restorable even when its in-memory cache payload is evicted.
-    historyEntries.forEach(function(h){ if(h.sig===old&&!h.versionFile) h.available=false; });
+    historyEntries.forEach(function(h){ if(h.sig===old&&!payloadPathOf(h)) h.available=false; });
     evictedAny=true;
     log('Cache eviction — evicted oldest output ('+(oe?fmtSize(oe.blob.size):'?')+') | reason: '+(outOrder.length>=MAX_OUTPUTS?'count cap '+MAX_OUTPUTS:'byte cap '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB')+' | cache now holds '+outCache.size+' entries, '+fmtBytesMB(cacheTotalBytes())+' total: '+outOrder.map(function(k){ var e=outCache.get(k); return e?fmtSize(e.blob.size):'?'; }).join(', '));
   }
@@ -3011,6 +3038,38 @@ var historyCounter=0; // sequential Video N numbering — survives New/resets
 var VERSIONS_KEEP=5; // stored version videos kept in OPFS — older entries degrade to settings-only
 var HISTORY_INDEX_KEY='dance-sync.history-index.v1';
 var HISTORY_INDEX_BACKUP_KEY='dance-sync.history-index.v1.bak';
+// FIRST-CLASS PAYLOAD REFERENCE: every payload-backed History entry —
+// whether it OWNS its stored file or SHARES another version's file via
+// the identical-settings dedupe — carries the reference the same way:
+// h.payload = {path, size, type} (mirrored into the legacy
+// versionFile / payloadSize / blobType fields the rest of the code was
+// written against). The dedupe path used to be a second-class citizen:
+// its shared reference lived only in the legacy field, was counted as a
+// separate payload by entry-count eviction (so an older dedupe entry
+// could be stripped of its reference while its shared file survived,
+// kept alive by a newer sharer), and was masked in-session by the
+// output cache — so the entry LOOKED payload-backed until a reload (or
+// a restore that keyed on the reference) exposed the loss. All payload
+// reads/writes now go through these helpers, eviction counts DISTINCT
+// payload files (see evictOldVersionPayloads), and the persisted index
+// stores the payload object explicitly.
+function payloadPathOf(h){ return (h&&(h.payload&&h.payload.path))||(h&&h.versionFile)||null; }
+function payloadRefOf(h){
+  if(!h) return null;
+  if(h.payload&&h.payload.path) return h.payload;
+  if(h.versionFile) return {path:h.versionFile, size:(h.payloadSize!=null?h.payloadSize:null), type:h.blobType||null};
+  return null;
+}
+function setPayloadRef(h, path, size, type){
+  if(!h) return;
+  if(path){
+    h.payload={path:path, size:(size!=null?size:null), type:type||null};
+    h.versionFile=path; h.payloadSize=(size!=null?size:null); if(type) h.blobType=type;
+    h.settingsOnly=false; h.available=true;
+  } else {
+    h.payload=null; h.versionFile=null; h.payloadSize=null; h.settingsOnly=true;
+  }
+}
 // The index is written to TWO localStorage keys (primary + backup) and
 // every failure is logged to diagnostics — a silent write failure here
 // once cost a whole session's History with no trace in the dump. If the
@@ -3021,7 +3080,8 @@ function persistHistoryIndex(){
   var json=null;
   try{
     var data={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
-      return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:!!h.available, settingsOnly:!h.versionFile, versionFile:h.versionFile||null, payloadSize:(h.payloadSize!=null?h.payloadSize:null), blobType:h.blobType||null};
+      var ref=payloadRefOf(h);
+      return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:!!h.available, settingsOnly:!ref, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:h.blobType||null};
     })};
     json=JSON.stringify(data);
   }catch(e){ try{ log('History: FAILED to serialize the History index ('+(e.message||e)+') — index not saved.'); }catch(_){} return; }
@@ -3036,7 +3096,7 @@ function persistHistoryIndex(){
     try{ log('History: FAILED to save index ('+(e.message||e)+') — retrying with payload references stripped.'); }catch(_){}
     try{
       var slim={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
-        return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:false, settingsOnly:true, versionFile:null, payloadSize:null, blobType:h.blobType||null};
+        return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:false, settingsOnly:true, payload:null, versionFile:null, payloadSize:null, blobType:h.blobType||null};
       })};
       var slimJson=JSON.stringify(slim);
       localStorage.setItem(HISTORY_INDEX_KEY, slimJson);
@@ -3069,8 +3129,16 @@ function restoreHistoryIndex(){
     parsed.entries.forEach(function(pe){
       try{
         if(!pe||typeof pe.num!=='number'||!pe.snap||typeof pe.snap!=='object'){ skipped++; try{ log('History: skipped a malformed saved entry during rebuild (num='+(pe?pe.num:'?')+').'); }catch(_){} return; }
-        var hasPayload=!!pe.versionFile;
-        restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(pe.payloadSize||0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, versionFile:pe.versionFile||null, payloadSize:(pe.payloadSize!=null?pe.payloadSize:null), blobType:pe.blobType||null, settingsOnly:!hasPayload});
+        // Payload reference: prefer the explicit payload object; fall
+        // back to the legacy flat fields so indexes saved by earlier
+        // builds still rebuild their payloads — own AND dedupe-shared
+        // references alike (a shared reference is just a path pointing
+        // at another version's file; it rebuilds identically).
+        var ref=null;
+        if(pe.payload&&pe.payload.path) ref={path:pe.payload.path, size:(pe.payload.size!=null?pe.payload.size:null), type:pe.payload.type||pe.blobType||null};
+        else if(pe.versionFile) ref={path:pe.versionFile, size:(pe.payloadSize!=null?pe.payloadSize:null), type:pe.blobType||null};
+        var hasPayload=!!ref;
+        restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(ref&&ref.size!=null?ref.size:0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:pe.blobType||(ref?ref.type:null)||null, settingsOnly:!hasPayload});
       }catch(ee){ skipped++; try{ log('History: skipped a saved entry that failed to rebuild ('+(ee.message||ee)+').'); }catch(_){} }
     });
     historyEntries.length=0;
@@ -3078,12 +3146,14 @@ function restoreHistoryIndex(){
     var maxNum=0; restored.forEach(function(h){ if(h.num>maxNum) maxNum=h.num; });
     historyCounter=Math.max((typeof parsed.counter==='number'?parsed.counter:0), maxNum);
     log('History: restored '+restored.length+' entries from saved index'+(fromBackup?' (backup copy — the primary index was unreadable)':'')+(skipped?(' · '+skipped+' malformed entr'+(skipped===1?'y':'ies')+' skipped'):''));
+    var payloadList=restored.filter(function(h){ return !!payloadPathOf(h); }).map(function(h){ return 'v'+h.num+'→'+payloadPathOf(h); });
+    log('History: payload-backed entries after rebuild: '+(payloadList.length?payloadList.join(', '):'none')+' — every one of these (own or dedupe-shared reference) restores through the stored-File path.');
     renderHistory();
   }catch(e){ try{ log('History: failed to restore saved index: '+(e.message||e)); }catch(_){} }
 }
 function addHistory(sig,snap,size,available,blob){
   historyCounter++;
-  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, versionFile:null, payloadSize:null, blobType:blob?(blob.type||'video/mp4'):null, settingsOnly:!blob};
+  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, payload:null, versionFile:null, payloadSize:null, blobType:blob?(blob.type||'video/mp4'):null, settingsOnly:!blob};
   historyEntries.unshift(entry);
   if(available===false&&!blob) log('History: entry stored without its video payload (size '+fmtBytesMB(size)+' exceeds the History cache caps — max '+MAX_OUTPUTS+' outputs / '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — restore requires re-generate.');
   // A completed apply/generation becomes the applied-settings snapshot:
@@ -3102,22 +3172,35 @@ function addHistory(sig,snap,size,available,blob){
 // ---------- version video storage (OPFS 'versions' namespace) ----------
 // Each completed generation's output bytes are written to
 // OPFS versions/v<N>.mp4 and the History entry records the payload
-// reference + size (entry.versionFile / entry.payloadSize). Only the
-// newest VERSIONS_KEEP payloads are kept; evicting one deletes its file
-// and marks the entry settings-only. If OPFS is unavailable the version
-// stays settings-only (the previous behavior) and the reason is logged.
+// reference as a first-class payload object (entry.payload =
+// {path, size, type}, mirrored to entry.versionFile / entry.payloadSize;
+// an identical-settings generation SHARES an earlier version's file by
+// copying its payload reference — see the dedupe branch below). Only
+// the newest VERSIONS_KEEP distinct payload files are kept; evicting a
+// file deletes it and marks every entry referencing it settings-only.
+// If OPFS is unavailable the version stays settings-only (the previous
+// behavior) and the reason is logged.
 function storeVersionPayload(entry, blob){
   (async function(){
     try{
       if(!blob||!blob.size){ log('Version '+entry.num+': no video bytes to store — version kept settings-only.'); if(!outCache.has(entry.sig)){ entry.available=false; renderHistory(); } return; }
       // Identical settings already stored by an earlier version — share
-      // its payload instead of writing a duplicate copy.
+      // its payload instead of writing a duplicate copy. The shared
+      // reference is assigned as a FIRST-CLASS payload (payload object +
+      // legacy mirrors, via setPayloadRef) — exactly like an owned
+      // payload — then persisted explicitly and put through the same
+      // retention accounting as an owned payload, so a dedupe entry is
+      // indistinguishable from an owned one for restore routing, for
+      // the saved index, and for eviction.
       for(var i=0;i<historyEntries.length;i++){
         var o=historyEntries[i];
-        if(o!==entry&&o.sig===entry.sig&&o.versionFile){
-          entry.versionFile=o.versionFile; entry.payloadSize=o.payloadSize||blob.size; entry.blobType=o.blobType||entry.blobType||(blob.type||'video/mp4'); entry.available=true; entry.settingsOnly=false;
-          log('Version '+entry.num+': identical settings already stored as '+o.versionFile+' — reusing that stored video ('+fmtBytesMB(entry.payloadSize)+').');
+        var oRef=payloadRefOf(o);
+        if(o!==entry&&o.sig===entry.sig&&oRef){
+          setPayloadRef(entry, oRef.path, (oRef.size!=null?oRef.size:blob.size), oRef.type||entry.blobType||(blob.type||'video/mp4'));
+          log('Version '+entry.num+': identical settings already stored as '+oRef.path+' — reusing that stored video ('+fmtBytesMB(entry.payloadSize)+'). The shared payload reference is recorded on this entry as a first-class payload (path + size + type) and persisted with the History index.');
           renderHistory();
+          persistHistoryIndex();
+          await evictOldVersionPayloads();
           return;
         }
       }
@@ -3139,13 +3222,10 @@ function storeVersionPayload(entry, blob){
         }
         await writable.close();
       }catch(we){ try{ await writable.abort(); }catch(_){} throw we; }
-      entry.versionFile='versions/'+name;
-      entry.payloadSize=blob.size;
-      entry.blobType=blob.type||entry.blobType||'video/mp4';
-      entry.available=true;
-      entry.settingsOnly=false;
+      setPayloadRef(entry, 'versions/'+name, blob.size, blob.type||entry.blobType||'video/mp4');
       log('Version '+entry.num+' stored: '+blob.size+' bytes → OPFS versions/'+name+' | blob type='+(entry.blobType||'video/mp4'));
       renderHistory();
+      persistHistoryIndex();
       await evictOldVersionPayloads();
       try{ await refreshStorageEstimate(); }catch(e){}
     }catch(e){
@@ -3157,18 +3237,39 @@ function storeVersionPayload(entry, blob){
 }
 async function evictOldVersionPayloads(){
   if(!opfsRoot) return;
-  var withPayload=historyEntries.filter(function(h){ return !!h.versionFile; });
-  if(withPayload.length<=VERSIONS_KEEP) return;
-  var evict=withPayload.slice(VERSIONS_KEEP); // historyEntries is newest-first
-  for(var i=0;i<evict.length;i++){
-    var h=evict[i], fname=h.versionFile;
-    h.versionFile=null; h.payloadSize=null; h.settingsOnly=true;
-    if(!outCache.has(h.sig)) h.available=false;
-    log('Version '+h.num+' payload evicted — keeping only the newest '+VERSIONS_KEEP+' stored version videos; this entry is now settings-only (restore requires re-generate).');
-    var stillUsed=historyEntries.some(function(x){ return x.versionFile===fname; });
-    if(!stillUsed&&fname){
-      try{ var dir=await opfsRoot.getDirectoryHandle('versions'); await dir.removeEntry(fname.split('/').pop()); log('Version storage: deleted OPFS '+fname+'.'); }catch(e){}
+  // Retention counts DISTINCT payload FILES, not entries. Several
+  // History entries can share one stored file (identical-settings
+  // dedupe); the old entry-count eviction stripped the payload
+  // reference from older dedupe entries while their shared file
+  // survived — kept alive by a newer sharer — and the in-memory output
+  // cache masked the loss (the entry still showed as payload-backed)
+  // until a reload exposed it as settings-only. A file's recency is
+  // the recency of its NEWEST referencing entry (historyEntries is
+  // newest-first, so the first sighting of each path wins); an entry
+  // loses its reference only when its FILE is evicted, and every entry
+  // referencing an evicted file is stripped together.
+  var seen={}, paths=[];
+  historyEntries.forEach(function(h){ var p=payloadPathOf(h); if(p&&!seen[p]){ seen[p]=true; paths.push(p); } });
+  if(paths.length<=VERSIONS_KEEP) return;
+  var evictPaths={};
+  paths.slice(VERSIONS_KEEP).forEach(function(p){ evictPaths[p]=true; });
+  for(var i=0;i<historyEntries.length;i++){
+    var h=historyEntries[i], hp=payloadPathOf(h);
+    if(hp&&evictPaths[hp]){
+      setPayloadRef(h, null);
+      // A stripped entry may still be restorable in-session from the
+      // output cache — but only for proxy versions; a direct-export
+      // entry's cached blob is never used as a restore embed, so it is
+      // marked unavailable (restore requires re-generate) right away
+      // instead of letting the cache mask the loss.
+      if(!outCache.has(h.sig)||(h.snap&&h.snap.isDirect)) h.available=false;
+      log('Version '+h.num+' payload evicted ('+hp+') — keeping only the newest '+VERSIONS_KEEP+' stored version videos; this entry is now settings-only (restore requires re-generate).');
     }
+  }
+  for(var ep in evictPaths){
+    if(!Object.prototype.hasOwnProperty.call(evictPaths, ep)) continue;
+    // By construction no surviving entry references an evicted path.
+    try{ var dir=await opfsRoot.getDirectoryHandle('versions'); await dir.removeEntry(ep.split('/').pop()); log('Version storage: deleted OPFS '+ep+'.'); }catch(e){}
   }
   renderHistory();
 }
@@ -3177,10 +3278,12 @@ async function evictOldVersionPayloads(){
 function loadVersionPayload(h){
   (async function(){
     try{
+      var vPath=payloadPathOf(h);
+      if(!vPath) throw new Error('this entry carries no payload reference');
       var ok=await detectStorageBackend();
       if(!ok||!opfsRoot) throw new Error('OPFS unavailable: '+diagStorage.note);
       var dir=await opfsRoot.getDirectoryHandle('versions');
-      var handle=await dir.getFileHandle(h.versionFile.split('/').pop());
+      var handle=await dir.getFileHandle(vPath.split('/').pop());
       var rawFile=await handle.getFile();
       if(!rawFile||!rawFile.size) throw new Error('the stored version file is empty');
       // Embed the stored File EXACTLY as-is — the identical construction
@@ -3193,14 +3296,14 @@ function loadVersionPayload(h){
       // wrap itself was the last page-side difference. No re-wrap, no
       // re-mux, no type override: the bytes and the File construction
       // reaching the <video> element are now identical to generation.
-      log('Version '+h.num+' restored from storage: OPFS '+h.versionFile+' — embedding the stored File directly ('+rawFile.size+' bytes, stored type='+(rawFile.type||'(empty)')+', recorded generation type='+(h.blobType||'(none)')+'), identical in construction to a generation-time OPFS embed (no re-wrap, no re-mux, no type override).');
+      log('Version '+h.num+' restored from storage: OPFS '+vPath+' — embedding the stored File directly ('+rawFile.size+' bytes, stored type='+(rawFile.type||'(empty)')+', recorded generation type='+(h.blobType||'(none)')+'), identical in construction to a generation-time OPFS embed (no re-wrap, no re-mux, no type override).');
       generatedOnce=true;
       try{ cachePut(h.sig,{blob:rawFile, opfsName:null}); }catch(e){}
       showResult(rawFile,{isDirect:!!(h.snap&&h.snap.isDirect)});
       if(h.snap&&h.snap.isDirect){ log('History: restored version is a direct export — Share/Download/Open deliver this stored file.'); }
     }catch(e){
       logError('version-restore',e);
-      h.versionFile=null; h.payloadSize=null; h.settingsOnly=true; h.available=false; renderHistory();
+      setPayloadRef(h, null); h.available=false; renderHistory();
       log('Version '+h.num+': the stored video could not be loaded ('+(e.message||e)+') — settings restored; restore requires re-generate — tap Apply edits to rebuild it.');
     }
   })();
@@ -3236,6 +3339,18 @@ function restoreHistory(h){
   // their trim end as the duration.
   var sourcesAbsent=!(danceFile&&songFile);
   if(typeof s.detected==='number'&&isFinite(s.detected)) detectedOffset=s.detected;
+  // Offset-context preservation for the re-upload flow (Question 3):
+  // with no sources loaded, stash this version's effective offset, its
+  // own detected offset (null when the entry's metadata predates it),
+  // and its signature. Re-uploading files zeroes detectedOffset and
+  // audioPos (handleFile); when detection re-runs for the same file
+  // pair, runAnalysis consumes this stash and re-establishes the
+  // position as (new detected + TRUE additional offset) — the restored
+  // effective value is never re-interpreted as the additional offset,
+  // so the detected offset can never be double-applied. A restore WITH
+  // sources loaded needs no stash: the editor state is already live
+  // and consistent.
+  pendingRestoreCtx=sourcesAbsent?{eff:s.eff, detected:(typeof s.detected==='number'&&isFinite(s.detected))?s.detected:null, sig:h.sig||''}:null;
   restoredDur=(typeof s.srcDur==='number'&&isFinite(s.srcDur)&&s.srcDur>0)?s.srcDur:(s.tEnd||0);
   restoredSongDur=(typeof s.songDur==='number'&&isFinite(s.songDur)&&s.songDur>0)?s.songDur:0;
   trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
@@ -3257,28 +3372,38 @@ function restoreHistory(h){
   // snapshot (Apply edits starts disabled; any edit branches a new
   // version on apply). A settings-only entry must NOT become the
   // snapshot — Apply edits stays enabled so it can be re-generated.
-  if(outCache.has(h.sig)||h.versionFile){ appliedSnapshot={eff:effOffset(), tStart:trimStartSec, tEnd:trimEnd(), blend:blendVal, q:s.q}; }
+  if(outCache.has(h.sig)||payloadPathOf(h)){ appliedSnapshot={eff:effOffset(), tStart:trimStartSec, tEnd:trimEnd(), blend:blendVal, q:s.q}; }
   else { appliedSnapshot=null; }
   updateApplyEditsState();
-  // DEFECT FIX (in-session HEVC restore): a version WITH a stored OPFS
-  // payload is ALWAYS restored through the stored-File path
+  // DEFECT FIX (payload restore routing): a version WITH a payload
+  // reference — its OWN stored file or a dedupe-SHARED reference to
+  // another version's file; both are first-class payloads (see
+  // setPayloadRef) — is ALWAYS restored through the stored-File path
   // (loadVersionPayload embeds the OPFS File with the exact same
-  // construction as generation and as a post-reload restore) — never
-  // through the in-memory cached blob, even when the cache still holds
-  // it. In-session, the cache-hit shortcut below used to hand the player
-  // the cached blob for direct-export (HEVC) versions and the player
-  // rejected it (code 4 MEDIA_ELEMENT_ERROR), while the identical
-  // stored file — restored after a reload via loadVersionPayload —
-  // played fine. The cached blob is still used for Share/Download
-  // delivery (showResult / the export caches), just never as the
-  // restore embed when a stored File exists.
-  if(h.versionFile){
-    log('History: restoring Version '+h.num+' via its stored OPFS File ('+h.versionFile+') — the stored-File path is used for every payload restore, in-session and post-reload alike; the in-memory cached blob is not handed to the player.');
+  // construction as generation and as a post-reload restore), in-session
+  // and post-reload alike. The in-memory cached blob is NEVER handed to
+  // the player for a payload-backed entry: dedupe-created entries used
+  // to fall into the cached-blob branch below because their shared
+  // reference was not recognized as a payload, and the player rejected
+  // the cached direct-export (HEVC) blob (code 4 MEDIA_ELEMENT_ERROR)
+  // while the identical stored file played fine. The cached-blob branch
+  // remains ONLY for entries with no payload reference at all (e.g. the
+  // OPFS-unavailable fallback's in-session proxy) — and never for a
+  // direct-export entry, whose cached blob is exactly the shape that
+  // failed; a direct entry without a payload reference restores as
+  // settings-only rather than risking the unplayable embed.
+  var hPayloadPath=payloadPathOf(h);
+  if(hPayloadPath){
+    log('History: restoring Version '+h.num+' via its stored OPFS File ('+hPayloadPath+') — the stored-File path is used for every payload restore, in-session and post-reload alike; the in-memory cached blob is not handed to the player.');
     loadVersionPayload(h);
+  }
+  else if(s.isDirect){
+    h.available=false; renderHistory();
+    log('History: Version '+h.num+' is a direct export with no stored payload reference — settings restored; restore requires re-generate — tap Apply edits to rebuild it. (The in-memory cached blob is never used as a direct-export restore embed.)');
   }
   else {
     var e=cacheGet(h.sig);
-    if(e){ var isDir=!!(s.isDirect); var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:isDir}); generatedOnce=true; if(isDir){ log('History: direct export result restored instantly from cache ('+fmtSize(useBlob.size)+') — this is the full-quality file; Share/Download/Open deliver it immediately.'); } else { log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); } var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else if(isDir){ log('History: direct result restored from its History payload — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
+    if(e){ var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:false}); generatedOnce=true; log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
     else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
   }
 }
@@ -3328,7 +3453,7 @@ function resetAll(){
   dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
   trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0; appliedSnapshot=null;
-  restoredDur=0; restoredSongDur=0; try{ setRestoreNeedsSources(false); }catch(e){}
+  restoredDur=0; restoredSongDur=0; pendingRestoreCtx=null; try{ setRestoreNeedsSources(false); }catch(e){}
   analysisState='idle'; analysisPromise=null; analysisVersion=-1;
   autoGenForVersion=-1; generatedOnce=false; firstGenDone=false; pipelineRestartPending=false;
   pcmCache={}; pcmPromiseCache={}; stripCache={};
