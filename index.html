@@ -217,6 +217,7 @@ var audioPos=0; // video-timeline position (sec) of the song block's left edge; 
 var blendVal=0;
 var ffmpeg=null, ffmpegLoaded=false, ffmpegProgressCb=null;
 var danceURL=null;
+var danceVideoW=0, danceVideoH=0; // source pixel size, captured from metadata probes (drives the proxy -lowres decision)
 
 // ================= DIAGNOSTICS =================
 // One copyable plain-text dump (see buildDiagnosticsText). The Details log
@@ -232,9 +233,9 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false};
-var diagProxy={size:null, durationSec:null, backend:null};
-var diagExport={size:null, durationSec:null, quality:null, backend:null};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:''};
+var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a'};
+var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
 function effOffset(){ return -audioPos; }
 function fmtT(s){ s=Math.max(0,s||0); var m=Math.floor(s/60), sec=Math.floor(s%60); return m+":"+(sec<10?"0":"")+sec; }
@@ -398,9 +399,10 @@ function buildDiagnosticsText(){
     storageLines=[
       'Storage backend detection: OPFS available='+String(diagStorage.opfsAvailable)+' | note: '+diagStorage.note+' | typeof navigator.storage.getDirectory='+storageGetDirectoryType(),
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
+      'mount (last render): '+diagStorage.mountNote,
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'),
-      'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode',
-      'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')
+      'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres,
+      'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
     ].join('\n');
   }catch(e){}
   var parts=[];
@@ -548,7 +550,7 @@ function handleFile(f,which){
   diagStage='file-select';
   filesVersion++; analysisState="idle"; analysisPromise=null; try{ autoGenForVersion=-1; }catch(e){}
   try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
-  if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
+  if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; danceVideoW=0; danceVideoH=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
   detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null;
   var rb=$('btnResync'); if(rb) rb.disabled=true;
   $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show');
@@ -559,7 +561,7 @@ function handleFile(f,which){
   var isVideo=/video/.test(f.type)||/\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name);
   var el=document.createElement(isVideo?'video':'audio'); el.preload='metadata'; el.src=url;
   el.onloadedmetadata=function(){
-    if(which==='dance'){ danceDur=el.duration; }
+    if(which==='dance'){ danceDur=el.duration; if(el.videoWidth){ danceVideoW=el.videoWidth; danceVideoH=el.videoHeight; } }
     else songDur=el.duration;
     try{ var dd2=(which==='dance')?diagFiles.video:diagFiles.audio; dd2.durationSec=el.duration; log('File metadata ['+dd2.role+']: duration='+(isFinite(el.duration)?Number(el.duration).toFixed(3):String(el.duration))+'s'); }catch(e){}
     URL.revokeObjectURL(url); checkReady();
@@ -671,7 +673,7 @@ async function ensureFFmpeg(onProgress){
   setBarPct(2); // event: converter load starts
   log('Converter load starts: FFmpegWASM present='+!!window.FFmpegWASM+' | FFmpegUtil present='+!!window.FFmpegUtil);
   ffmpeg=new FFmpegWASM.FFmpeg();
-  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
+  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
   ffmpeg.on('progress', function(p){ if(ffmpegProgressCb&&p&&isFinite(p.progress)) ffmpegProgressCb(Math.max(0,Math.min(1,p.progress))); });
   var base=new URL('assets/ffmpeg/', document.baseURI).href;
   diagConverter.base=base; diagConverter.coreURL=base+'ffmpeg-core.js'; diagConverter.workerURL=base+'814.ffmpeg.js'; diagConverter.wasmGzURL=base+'ffmpeg-core.wasm.gz'; diagConverter.wasmURL=base+'ffmpeg-core.wasm'; diagConverter.version='ffmpeg.wasm wrapper assets/ffmpeg/ffmpeg.js + core assets/ffmpeg/ffmpeg-core.js (ffmpeg-core.wasm.gz '+ '9.8 MB compressed, same-origin) — exact core -version line appears as "ffmpeg>" lines in this log once the worker runs';
@@ -1047,7 +1049,7 @@ function layoutTimeline(){
   syncOffsetInput();
   requestAnimationFrame(drawWaveform);
 }
-vid.addEventListener('loadedmetadata',function(){ if(vid.duration&&isFinite(vid.duration)){ danceDur=vid.duration; $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); } });
+vid.addEventListener('loadedmetadata',function(){ if(vid.duration&&isFinite(vid.duration)){ danceDur=vid.duration; if(vid.videoWidth){ danceVideoW=vid.videoWidth; danceVideoH=vid.videoHeight; } $('timeline').classList.add('show'); layoutTimeline(); buildFilmstrip(); } });
 function drawWaveform(){
   var c=$('wave'), block=$('audioBlock'); if(!c||!block) return;
   var w=block.clientWidth, h=block.clientHeight; if(w<4||h<4) return;
@@ -1255,6 +1257,13 @@ $('blend').addEventListener('change',invalidateDownload);
 // immediately after streaming. When OPFS is unavailable the previous
 // memory-hygiene MEMFS behavior is kept exactly (inputs freed before
 // output read-out, FS output deleted right after read, refs nulled).
+// INPUTS: every render (proxy + export) first tries to mount the two
+// uploaded Files directly into the converter via WORKERFS (see
+// mountInputsWorkerFS below) so ffmpeg reads their bytes on demand from
+// the File handles — zero input residency in the converter FS, and it
+// works over plain HTTP (no secure context needed, unlike OPFS). The
+// writeFile-into-MEMFS path above is the exact fallback when mounting is
+// unavailable, throws, or returns false.
 function hashStr(str){ var h=5381; for(var i=0;i<str.length;i++){ h=((h<<5)+h+str.charCodeAt(i))|0; } return (h>>>0).toString(36); }
 var opfsRoot=null, opfsStaged={dance:null, song:null};
 function storageGetDirectoryType(){ try{ return typeof (navigator.storage&&navigator.storage.getDirectory); }catch(e){ return 'threw '+(e.message||e); } }
@@ -1350,6 +1359,47 @@ async function tryMountOPFS(ff){
     return !!r;
   }catch(e){ diagStorage.mountSupported=false; log('storage: ffmpeg mount("OPFS") threw '+(e.name||'Error')+': '+(e.message||e)+' — renders run on MEMFS with OPFS stream-out of outputs'); return false; }
 }
+// ---------- WORKERFS input mounting ----------
+// mountInputsWorkerFS(ff, dFile, sFile): mounts each File at its own
+// mount point (/mnt/dance, /mnt/song) with the wrapper's mount API and
+// the WORKERFS filesystem type, so ffmpeg's input paths become
+// /mnt/dance/<file.name> and /mnt/song/<file.name> and the core reads the
+// bytes on demand — no writeFile copy ever lands in MEMFS. This is the
+// fix for the export crash: previously the MEMFS simultaneously held
+// both inputs (~396 MB) AND the growing ~290 MB output during the
+// encode. Returns {ok:true, danceIn, songIn} or {ok:false, reason}; a
+// failed verdict is cached for the session (diagStorage.workerfsVerdict)
+// so later renders go straight to the writeFile fallback — the caller
+// still logs the per-render mount line either way. Callers must
+// unmountInputsWorkerFS(ff) after the render.
+var WORKERFS_DANCE_DIR='/mnt/dance', WORKERFS_SONG_DIR='/mnt/song';
+async function mountInputsWorkerFS(ff, dFile, sFile){
+  if(diagStorage.workerfsVerdict===false) return {ok:false, reason:'WORKERFS mount already reported unsupported this session ('+diagStorage.workerfsReason+')'};
+  if(!ff||typeof ff.mount!=='function'){ diagStorage.workerfsVerdict=false; diagStorage.workerfsReason='the converter wrapper exposes no mount()'; return {ok:false, reason:diagStorage.workerfsReason}; }
+  if(!dFile||!sFile) return {ok:false, reason:'a source File is missing'};
+  var mountedDance=false;
+  try{
+    try{ await ff.createDir('/mnt'); }catch(e){}
+    try{ await ff.createDir(WORKERFS_DANCE_DIR); }catch(e){}
+    try{ await ff.createDir(WORKERFS_SONG_DIR); }catch(e){}
+    var r1=await ff.mount('WORKERFS',{files:[dFile]},WORKERFS_DANCE_DIR);
+    if(r1===false) throw new Error('mount("WORKERFS") returned false for the video input — the bundled core does not expose the WORKERFS filesystem');
+    mountedDance=true;
+    var r2=await ff.mount('WORKERFS',{files:[sFile]},WORKERFS_SONG_DIR);
+    if(r2===false) throw new Error('mount("WORKERFS") returned false for the audio input — the bundled core does not expose the WORKERFS filesystem');
+    diagStorage.workerfsVerdict=true;
+    return {ok:true, danceIn:WORKERFS_DANCE_DIR+'/'+dFile.name, songIn:WORKERFS_SONG_DIR+'/'+sFile.name};
+  }catch(e){
+    if(mountedDance){ try{ await ff.unmount(WORKERFS_DANCE_DIR); }catch(_){} }
+    diagStorage.workerfsVerdict=false; diagStorage.workerfsReason=(e&&e.message)||String(e);
+    return {ok:false, reason:diagStorage.workerfsReason};
+  }
+}
+async function unmountInputsWorkerFS(ff){
+  if(!ff) return;
+  try{ await ff.unmount(WORKERFS_DANCE_DIR); }catch(e){}
+  try{ await ff.unmount(WORKERFS_SONG_DIR); }catch(e){}
+}
 // Shared encode-argument builder for BOTH the proxy and the export render.
 // The audio pipeline is identical in both: detected sync offset (including
 // negative offsets with adelay + room-audio gap fill), trims, room-audio
@@ -1359,15 +1409,17 @@ async function tryMountOPFS(ff){
 // copy, otherwise scale + veryfast/crf20 as before).
 function buildRenderArgs(o){
   var encHeight=o.encHeight, tStart=o.tStart, tDur=o.tDur, eff=o.eff;
+  var danceIn=o.danceIn||('dance.'+o.dExt), songIn=o.songIn||('song.'+o.sExt);
   var songStart=eff+tStart, delayMs=songStart<0?Math.round(-songStart*1000):0;
   var args=['-y'];
   if(tStart>0) args.push('-ss',tStart.toFixed(3));
   if(tDur>0) args.push('-t',tDur.toFixed(3));
-  args.push('-i','dance.'+o.dExt);
+  if(o.lowres&&o.proxy) args.push('-lowres','2'); // proxy-only 4K decode accelerator (quarter-resolution decode); NEVER on export/full-quality paths
+  args.push('-i',danceIn);
   if(songStart>0) args.push('-ss',songStart.toFixed(3));
-  args.push('-i','song.'+o.sExt);
+  args.push('-i',songIn);
   var fc=[];
-  if(encHeight) fc.push('[0:v]scale=-2:min('+encHeight+'\\,ih)[v]');
+  if(encHeight&&!o.audioOnly) fc.push('[0:v]scale=-2:min('+encHeight+'\\,ih)[v]');
   var gapSec=songStart<0?-songStart:0;
   if(gapSec>0){
     log('Encode: negative offset — clean audio begins '+gapSec.toFixed(3)+'s into the clip; leading gap filled with the video\'s original audio at full level'+(blendVal>0?(' · room blend '+Math.round(blendVal*100)+'% applies after the gap'):'')+'.');
@@ -1397,8 +1449,14 @@ function buildRenderArgs(o){
     }
   }
   args.push('-filter_complex', fc.join(';'));
-  args.push('-map', encHeight?'[v]':'0:v:0', '-map', (blendVal>0||gapSec>0)?'[a]':'[clean]');
-  if(encHeight){ if(o.proxy) args.push('-c:v','libx264','-preset','ultrafast','-crf','23','-pix_fmt','yuv420p'); else args.push('-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p'); } else args.push('-c:v','copy');
+  if(o.audioOnly){
+    // Export stage 1: render ONLY the processed audio track (same filter
+    // graph, no video leg at all) to a small AAC file for the copy mux.
+    args.push('-map', (blendVal>0||gapSec>0)?'[a]':'[clean]');
+  } else {
+    args.push('-map', encHeight?'[v]':'0:v:0', '-map', (blendVal>0||gapSec>0)?'[a]':'[clean]');
+    if(encHeight){ if(o.proxy) args.push('-c:v','libx264','-preset','ultrafast','-crf','23','-pix_fmt','yuv420p'); else args.push('-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p'); } else args.push('-c:v','copy');
+  }
   args.push('-c:a','aac','-b:a','192k');
   if(tDur>0) args.push('-t',tDur.toFixed(3));
   args.push(o.outName);
@@ -1410,6 +1468,7 @@ async function freeConverterInputs(ff, dExt, sExt){
     {name:'dance.'+dExt, size:danceFile?danceFile.size:null, label:'input video'},
     {name:'song.'+sExt, size:songFile?songFile.size:null, label:'input audio'},
     {name:'out.wav', size:null, label:'temp WAV'},
+    {name:'stage1-audio.m4a', size:null, label:'temp stage-1 audio'},
     {name:'in.'+dExt, size:null, label:'temp decode input'},
     {name:'in.'+sExt, size:null, label:'temp decode input'},
     {name:'strip.'+dExt, size:null, label:'temp filmstrip input'},
@@ -1460,7 +1519,8 @@ function showExportProgress(v){
   if(v){ w.style.display='flex'; exportBarPct=0; var b=$('exportProgBar'); if(b) b.style.width='0%'; exportLastMilestone=-1; exportT0=Date.now(); if(exportClockTimer) clearInterval(exportClockTimer); exportClockTimer=setInterval(renderExportProgText,1000); renderExportProgText(); }
   else { w.style.display='none'; if(exportClockTimer){ clearInterval(exportClockTimer); exportClockTimer=null; } }
 }
-function progressForExport(ratio){ if(ratio==null) return; setExportBarPct(15+Math.max(0,Math.min(1,ratio))*80); var m=Math.floor(ratio*10)*10; if(m>exportLastMilestone){ exportLastMilestone=m; log('Export progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } }
+var exportProgLo=15, exportProgHi=95; // ffmpeg-progress window for the CURRENT export exec — the two-stage export narrows it per stage (stage 1 audio 15→50, stage 2 copy mux 50→95); single-graph renders use the full 15→95
+function progressForExport(ratio){ if(ratio==null) return; setExportBarPct(exportProgLo+Math.max(0,Math.min(1,ratio))*(exportProgHi-exportProgLo)); var m=Math.floor(ratio*10)*10; if(m>exportLastMilestone){ exportLastMilestone=m; log('Export progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } }
 // ---------- export cache + live export ----------
 var exportCache=new Map(), exportOrder=[];
 var liveExport=null; // {sig, file, blob, url, canShare, size, opfsName, q}
@@ -1523,19 +1583,72 @@ async function renderExport(sig){
   var ff=await cancellableExport(ensureFFmpeg(function(ratio){ progressForExport(ratio); }));
   await tryMountOPFS(ff);
   var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
-  diagStorage.lastInputs=inputsBackendLabel();
   var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
   var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
-  log('Export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-  await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for export');
-  await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for export');
-  setExportBarPct(15); // event: export encode starts
-  var args=buildRenderArgs({encHeight:height, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false});
-  log('Export exec: ffmpeg args='+args.join(' '));
-  await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Exporting video from '+danceFile.name); }));
+  // TWO-STAGE EXPORT: Full quality with NO trim set is the common case
+  // and never needs the video re-encoded or fully decoded — stage 1
+  // renders ONLY the processed audio track (the full audio filter graph)
+  // to a small AAC file, stage 2 stream-copies the video from the
+  // (mounted) input and muxes it with that audio. With WORKERFS inputs
+  // the converter FS then only ever holds the small stage-1 file plus
+  // the growing output — never both inputs AND the output together.
+  var noTrim=(tStart<=0.001)&&(danceDur>0?(tEnd>=danceDur-0.01):(trimEndSec==null));
+  var twoStage=(q==='full')&&noTrim;
+  diagExport.stages=twoStage?'two-stage (stage 1 audio render + stage 2 stream-copy mux)':'single-graph encode';
+  if(twoStage) log('Export: Full quality + no trim — two-stage export: stage 1 renders the processed audio only, stage 2 stream-copies the video (no video re-encode).');
+  else if(q==='full') log('Export: Full quality but a trim is set — single-graph encode (the two-stage copy mux needs the whole video); on WORKERFS-mounted inputs residency stays output-only.');
+  var mounted=null;
+  try{
+    mounted=await mountInputsWorkerFS(ff, dFile, sFile);
+    var danceIn, songIn;
+    if(mounted.ok){
+      danceIn=mounted.danceIn; songIn=mounted.songIn;
+      diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
+      log('mount: inputs=WORKERFS (/mnt)');
+      log('Export: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+    } else {
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+mounted.reason;
+      log('mount: inputs=MEMFS (writeFile fallback) — '+mounted.reason);
+      log('Export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for export');
+      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for export');
+      danceIn='dance.'+dExt; songIn='song.'+sExt;
+    }
+    setExportBarPct(15); // event: export encode starts
+    if(twoStage){
+      exportProgLo=15; exportProgHi=50;
+      var s1Args=buildRenderArgs({encHeight:0, audioOnly:true, outName:'stage1-audio.m4a', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
+      log('Export stage 1 (audio): rendering the processed audio track only → stage1-audio.m4a | ffmpeg args='+s1Args.join(' '));
+      var s1T0=Date.now();
+      await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(s1Args),600000,'Export stage 1 (audio) from '+songFile.name); }));
+      var s1DurSec=(Date.now()-s1T0)/1000;
+      var s1Size=null;
+      try{ var s1Data=await ff.readFile('stage1-audio.m4a'); if(s1Data) s1Size=s1Data.length||s1Data.byteLength||0; s1Data=null; }catch(e){}
+      if(s1Size==null||s1Size===0) throw new Error('Export stage 1 (audio) produced no audio file.');
+      log('Export stage 1 (audio): size='+fmtBytesMB(s1Size)+' | duration='+s1DurSec.toFixed(1)+'s');
+      setExportBarPct(50);
+      exportProgLo=50; exportProgHi=95;
+      var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'dance-synced.mp4'];
+      log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | ffmpeg args='+s2Args.join(' '));
+      var s2T0=Date.now();
+      await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Export stage 2 (copy mux) from '+danceFile.name); }));
+      log('Export stage 2 (copy mux): duration='+((Date.now()-s2T0)/1000).toFixed(1)+'s (pure stream copy — no decode, no encode)');
+      try{ await ff.deleteFile('stage1-audio.m4a'); log('memory: deleted FS stage-1 audio stage1-audio.m4a ('+fmtBytesMB(s1Size)+') after the mux'); }catch(e){}
+    } else {
+      exportProgLo=15; exportProgHi=95;
+      var args=buildRenderArgs({encHeight:height, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
+      log('Export exec: ffmpeg args='+args.join(' '));
+      await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Exporting video from '+danceFile.name); }));
+    }
+  }catch(renderErr){
+    if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted after the failed export render'); }
+    try{ await ff.deleteFile('stage1-audio.m4a'); }catch(e){}
+    throw renderErr;
+  }
   setExportBarPct(96); // event: export encode ends, read-out/stream-out begins
   log('Export encode ends — freeing inputs from converter FS before reading output…');
   await freeConverterInputs(ff,dExt,sExt);
+  if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }
   var outRes=await readRenderOutput(ff,'dance-synced.mp4','export-'+hashStr(sig)+'.mp4');
   setExportBarPct(100);
   var durSec=(Date.now()-renderT0)/1000;
@@ -1832,7 +1945,7 @@ function resetAll(){
     if(cancelReject) cancelReject(new Error('Cancelled'));
   }
   danceFile=null; songFile=null;
-  dancePCM=null; songPCM=null; danceDur=0; songDur=0;
+  dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
   trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0;
   analysisState='idle'; analysisPromise=null; analysisVersion=-1;
@@ -1936,27 +2049,85 @@ async function doGenerate(opts){
     await detectStorageBackend();
     if(diagStorage.opfsAvailable&&!opfsStaged.dance){ try{ await opfsStageInput(danceFile,'dance'); }catch(e){} }
     if(diagStorage.opfsAvailable&&!opfsStaged.song){ try{ await opfsStageInput(songFile,'song'); }catch(e){} }
+    var proxyMounted=null;
     var renderT0=Date.now();
     var ff=await cancellable(ensureFFmpeg(function(ratio){ if(ratio!=null){ progressForGenerate(ratio); var m=Math.floor(ratio*10)*10; if(m>diagLastEncodeMilestone){ diagLastEncodeMilestone=m; log('Proxy encode progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } } }));
     await tryMountOPFS(ff);
     var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
-    diagStorage.lastInputs=inputsBackendLabel();
     var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
     var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
-    log('Generate: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-    await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter');
-    await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
-    var args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true});
+    proxyMounted=await mountInputsWorkerFS(ff, dFile, sFile);
+    var danceIn, songIn;
+    if(proxyMounted.ok){
+      danceIn=proxyMounted.danceIn; songIn=proxyMounted.songIn;
+      diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
+      log('mount: inputs=WORKERFS (/mnt)');
+      log('Generate: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+    } else {
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+proxyMounted.reason;
+      log('mount: inputs=MEMFS (writeFile fallback) — '+proxyMounted.reason);
+      log('Generate: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter');
+      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
+      danceIn='dance.'+dExt; songIn='song.'+sExt;
+    }
+    // PROXY SPEED: the proxy encode is decode-bound — the single-threaded
+    // wasm core software-decodes every frame of a 4K H.264 stream just to
+    // downscale it (155 s for 97 s of 3840x2160). For sources 1440p or
+    // taller, add the decoder option -lowres 2 to the video input (decode
+    // at quarter resolution, then the existing scale filter caps height
+    // at 480 as before; preset stays ultrafast). If the lowres exec
+    // errors or produces no valid output, retry once without it. The
+    // full-quality export paths NEVER use lowres (buildRenderArgs gates
+    // the flag on proxy renders).
+    var srcH=danceVideoH||(vid?vid.videoHeight:0)||0;
+    var wantLowres=srcH>=1440;
+    if(wantLowres){
+      diagProxy.lowres='attempted (-lowres 2, source height '+srcH+'p)';
+      log('Proxy: source height '+srcH+'p ≥ 1440p — decoding the video input with -lowres 2 (quarter-resolution decode) before the 480p scale.');
+    } else {
+      diagProxy.lowres='not used (source height '+(srcH?srcH+'p':'unknown')+')';
+      log('Proxy: -lowres not used (source height '+(srcH?srcH+'p':'unknown')+' — below the 1440p threshold).');
+    }
+    var args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:wantLowres});
     setBarPct(66); // event: proxy encode starts (ffmpeg progress then interpolates 66% -> 97%)
     log('Proxy encode exec: ffmpeg args='+args.join(' '));
-    await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating proxy video from '+danceFile.name); }));
+    var proxyExecErr=null, proxyExecRC=null;
+    try{ proxyExecRC=await cancellable(withFFmpegLock(async function(){ return await withTimeout(ff.exec(args),600000,'Generating proxy video from '+danceFile.name); })); }
+    catch(execE){ proxyExecErr=execE; }
+    if(wantLowres&&!isCancelErr(proxyExecErr)){
+      var lowresFailed=false, lowresWhy='';
+      if(proxyExecErr){
+        if(/timed out/i.test(proxyExecErr.message||'')) throw proxyExecErr; // a timeout is not a lowres failure — do not double the wait
+        lowresFailed=true; lowresWhy='exec error: '+(proxyExecErr.message||proxyExecErr);
+      } else if(proxyExecRC!=null&&proxyExecRC!==0){ lowresFailed=true; lowresWhy='ffmpeg exit code '+proxyExecRC; }
+      else {
+        var outThere=false;
+        try{ var ld=await ff.listDir('/'); for(var li=0; li<ld.length; li++){ if(ld[li]&&ld[li].name==='dance-synced.mp4'){ outThere=true; break; } } }catch(le){ outThere=true; }
+        if(!outThere){ lowresFailed=true; lowresWhy='exec reported success but dance-synced.mp4 is missing from the converter FS'; }
+      }
+      if(lowresFailed){
+        log('Proxy: -lowres 2 attempt failed ('+lowresWhy+') — retrying once without -lowres.');
+        diagProxy.lowres='failed ('+lowresWhy+') — retried without -lowres';
+        try{ await ff.deleteFile('dance-synced.mp4'); }catch(e){}
+        proxyExecErr=null;
+        args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:false});
+        log('Proxy encode exec (retry without -lowres): ffmpeg args='+args.join(' '));
+        await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating proxy video from '+danceFile.name); }));
+      } else {
+        diagProxy.lowres='passed to decoder (-lowres 2, source height '+srcH+'p)';
+        log('Proxy: -lowres 2 exec completed — no retry needed. (If the decoder does not support lowres it logs a "maximum value for lowres" clamp line above and decodes at full resolution instead.)');
+      }
+    }
+    if(proxyExecErr) throw proxyExecErr;
     log('Proxy encode ends: ffmpeg exec resolved — freeing inputs from converter FS before reading output…');
     await freeConverterInputs(ff,dExt,sExt);
     var outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
+    if(proxyMounted&&proxyMounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); proxyMounted=null; }
     var blob=outRes.blob;
     diagStorage.lastOutput=outRes.backend; diagProxy.size=blob.size; diagProxy.durationSec=Number(((Date.now()-renderT0)/1000).toFixed(2)); diagProxy.backend=outRes.backend;
     log('storage: inputs='+diagStorage.lastInputs+' output='+outRes.backend+(outRes.backend==='OPFS'?'':' | storage: fallback=MEMFS'));
-    log('Proxy render: size='+fmtBytesMB(blob.size)+' | duration='+((Date.now()-renderT0)/1000).toFixed(1)+'s | max height 480p · fast encode');
+    log('Proxy render: size='+fmtBytesMB(blob.size)+' | duration='+((Date.now()-renderT0)/1000).toFixed(1)+'s | max height 480p · fast encode | lowres: '+diagProxy.lowres);
     log('Encode output: blob '+fmtBytesMB(blob.size)+' type='+(blob.type||'video/mp4'));
     var secs=((Date.now()-t0)/1000).toFixed(1);
     generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
@@ -1969,6 +2140,7 @@ async function doGenerate(opts){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
     else { console.error(err); logError('generate',err); log('❌ Generate failed: '+(err.message||err)); showError('❌ Generate failed: '+(err.message||err)); }
   }finally{
+    if(proxyMounted&&proxyMounted.ok&&ffmpeg){ try{ await unmountInputsWorkerFS(ffmpeg); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }catch(e){} proxyMounted=null; }
     stopRunClock();
     setCancelVisible(false);
     btn.disabled=!(danceFile&&songFile);
