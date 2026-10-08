@@ -123,8 +123,8 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 .saveBtn svg{width:16px;height:16px;flex:none}
 .startover{background:var(--accent);color:#fff}
 .startover:disabled{background:var(--card2);color:var(--muted);border:1px solid var(--line);cursor:not-allowed}
-#topResetWrap{margin-top:10px;display:none}
-#topResetWrap.show{display:block}
+.editHeader{display:none;font-size:19px;font-weight:800;letter-spacing:-.01em;margin:18px 0 2px}
+.editHeader.show{display:block}
 #newWrap{margin-top:14px;display:none}
 #newWrap.show{display:block}
 .dlstatus{margin-top:12px;font-size:13px;background:#14231c;border:1px solid #24543e;border-radius:10px;padding:9px 12px;color:#e6f7ee}
@@ -151,8 +151,6 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
       <input type="file" id="fileSong" accept="video/*,audio/*,.mp4,.mov,.webm,.m4v,.mkv,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" hidden>
     </div>
   </div>
-  <div id="topResetWrap"><button type="button" class="startover" id="btnStartOverTop" disabled>Start over</button></div>
-
   <section class="playerSec" id="playerSec">
     <video class="main sourceHidden" id="vid" playsinline preload="metadata"></video>
     <div class="result" id="resultBox">
@@ -161,6 +159,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
     </div>
     <div id="resultArea"></div>
     <div id="downloadWrap"></div>
+    <h2 id="editVideoHeader" class="editHeader">Edit video</h2>
     <div class="progress procWrap" id="exportProgWrap"><span class="procLabel">Exporting</span><div class="barTrack"><i id="exportProgBar"></i><span id="exportProgText"></span></div><button type="button" class="secondary" id="btnExportCancel">Cancel</button></div>
 
     <div class="timeline" id="timeline">
@@ -207,13 +206,13 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 
   <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
   <div id="generateRow">
-    <button class="primary" id="btnGenerate">Generate</button>
+    <button class="primary" id="btnGenerate" style="display:none">Generate</button>
     <button type="button" class="secondary" id="btnCancel" style="display:none">Cancel</button>
   </div>
-  <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
   <div class="errline" id="errLine"></div>
   <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
   <div id="historyWrap"><h4>History</h4><div id="historyList"></div></div>
+  <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
 </div>
 
 <script>
@@ -774,6 +773,8 @@ function releaseAnalysisScratch(where){
 }
 var filmstripBuiltFor=null, filmstripBuilding=false, filmstripPending=false, stripCache={};
 var pcmCache={}, pcmPromiseCache={}, ffmpegChain=Promise.resolve(), generatedOnce=false;
+var firstGenDone=false; // true only after the FIRST generation completes successfully this session (reset by Start over). Gates Generate / Cancel / Start over visibility until then.
+var pipelineRestartPending=false; // a file change cancelled an in-flight run; restart the pipeline once the old run unwinds
 // ---------- cancel ----------
 // Every run captures runToken; Cancel bumps it, rejects the run's cancel
 // signal (so in-flight awaits abort promptly), and terminates the ffmpeg
@@ -782,7 +783,7 @@ var runToken=0, cancelReject=null, cancelPromise=null;
 function newCancelSignal(){ cancelPromise=new Promise(function(_,rej){ cancelReject=rej; }); cancelPromise.catch(function(){}); }
 function cancellable(p){ return cancelPromise?Promise.race([p,cancelPromise]):p; }
 function isCancelErr(e){ return e&&e.message==='Cancelled'; }
-function setCancelVisible(v){ var b=$('btnCancel'); if(b) b.style.display=v?'':'none'; }
+function setCancelVisible(v){ var b=$('btnCancel'); if(b) b.style.display=(v&&firstGenDone)?'':'none'; }
 function fileKey(f){ return f?(f.name+'|'+f.size+'|'+(f.lastModified||0)):'nofile'; }
 function withTimeout(promise,ms,label){
   var timer=null;
@@ -821,13 +822,53 @@ function setupDrop(dropId,inputId,which){
   drop.addEventListener('drop',function(e){ var f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) handleFile(f,which); });
   input.addEventListener('change',function(){ if(input.files[0]) handleFile(input.files[0],which); });
 }
+function schedulePendingRestartPoll(){
+  var n=0;
+  var iv=setInterval(function(){
+    n++;
+    if(!pipelineRestartPending){ clearInterval(iv); return; }
+    if(n>240){ clearInterval(iv); pipelineRestartPending=false; return; }
+    if(!danceFile||!songFile) return;
+    var busy=false;
+    try{ busy=!!(pipelineRunning||isGenerating||isExporting||analysisState==="running"); }catch(e){}
+    if(busy) return;
+    pipelineRestartPending=false;
+    clearInterval(iv);
+    if(analysisState!=="idle"){ analysisState="idle"; analysisPromise=null; }
+    try{ autoGenForVersion=-1; }catch(e){}
+    runAutoPipeline();
+  },100);
+}
 function handleFile(f,which){
   diagStage='file-select';
+  // Upload buttons ALWAYS restart: changing either input — on first boot
+  // (including mid-generation) or on any later try — cancels any in-flight
+  // run with the same abort machinery as Cancel / Start over (bump the
+  // run token, terminate the converter worker, reject both cancel
+  // signals), and the pipeline restarts with the new file once both
+  // inputs are present (checkReady below, plus the pending-restart poll
+  // for when the old run is still unwinding). During the first
+  // generation this is the user's way to abandon a stuck run, since
+  // Cancel and Start over are hidden until the first generation completes.
+  var hadInFlight=false;
+  try{ hadInFlight=!!(pipelineRunning||isGenerating||isExporting||analysisState==="running"); }catch(e){}
+  if(hadInFlight){
+    log('File changed — cancelling the in-flight run; generation will restart with the new file once both inputs are present.');
+    runToken++;
+    try{ exportToken++; }catch(e){}
+    ffmpegChain=Promise.resolve();
+    if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; ffmpegProgressCb=null; }
+    if(cancelReject) cancelReject(new Error('Cancelled'));
+    try{ if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled')); }catch(e){}
+    pcmPromiseCache={};
+    pipelineRestartPending=true;
+    try{ if(window.__autoAfterAnalysis){ var _acb=window.__autoAfterAnalysis; window.__autoAfterAnalysis=null; _acb(); } }catch(e){}
+  }
   filesVersion++; analysisState="idle"; analysisPromise=null; try{ autoGenForVersion=-1; }catch(e){}
   try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
   if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; danceVideoW=0; danceVideoH=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
   detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null;
-  try{ var _tl0=$('timeline'); if(_tl0) _tl0.classList.remove('show'); var _ss0=$('settingsSec'); if(_ss0) _ss0.classList.remove('show'); }catch(e){}
+  try{ var _tl0=$('timeline'); if(_tl0) _tl0.classList.remove('show'); var _ss0=$('settingsSec'); if(_ss0) _ss0.classList.remove('show'); var _eh0=$('editVideoHeader'); if(_eh0) _eh0.classList.remove('show'); }catch(e){}
   var rb=$('btnResync'); if(rb) rb.disabled=true;
   $('resultBox').classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show');
   $(which==='dance'?'metaDance':'metaSong').textContent=f.name+' · '+fmtSize(f.size);
@@ -848,14 +889,17 @@ function handleFile(f,which){
     danceURL=URL.createObjectURL(f);
     $('vid').src=danceURL;
     $('playerSec').classList.add('show');
-    var _gr=$('generateRow'); if(_gr) _gr.classList.add('show');
+    // Generate stays hidden until the first generation completes.
+    var _gr=$('generateRow'); if(_gr) _gr.classList.toggle('show',firstGenDone);
     // Editor stays hidden until a generation completes (showEditor).
     $('settingsSec').classList.remove('show');
     $('timeline').classList.remove('show');
+    $('editVideoHeader').classList.remove('show');
   }
   try{ detectStorageBackend().then(function(ok){ if(ok) opfsStageInput(f, which); }); }catch(e){}
   updateNewBtn();
   checkReady();
+  if(hadInFlight&&danceFile&&songFile) schedulePendingRestartPoll();
 }
 function checkReady(){
   var gen=$('btnGenerate'); if(gen) gen.disabled=!(danceFile&&songFile);
@@ -2631,7 +2675,9 @@ function saveResult(){
 }
 function showEditor(){
   // Editor (timeline / offset / trim / blend / Export quality / Re-sync)
-  // appears only once a generation has completed successfully.
+  // appears only once a generation has completed successfully, under
+  // its "Edit video" section header.
+  var eh=$('editVideoHeader'); if(eh) eh.classList.add('show');
   var tl=$('timeline'); if(tl) tl.classList.add('show');
   var ss=$('settingsSec'); if(ss) ss.classList.add('show');
   try{ layoutTimeline(); }catch(e){}
@@ -2640,6 +2686,10 @@ function showEditor(){
 function showResult(blob, opts){
   opts=opts||{};
   lastResultIsDirect=!!opts.isDirect;
+  // A result on screen means a generation has completed successfully:
+  // this unlocks Generate (for re-generating after edits), Cancel
+  // during subsequent runs, and the single bottom Start over button.
+  firstGenDone=true;
   diagStage='result';
   // A new proxy on screen means any previous live export belongs to older
   // settings — drop it (the cached-export check below re-arms it instantly
@@ -2729,7 +2779,7 @@ function restoreHistory(h){
   var s=h.snap;
   // After a New reset the editor/result sections are hidden; restoring a
   // History entry must bring them back so its video can be watched/saved.
-  $('playerSec').classList.add('show'); var _gr2=$('generateRow'); if(_gr2) _gr2.classList.add('show');
+  $('playerSec').classList.add('show'); var _gr2=$('generateRow'); if(_gr2) _gr2.classList.toggle('show',firstGenDone);
   var qEl=document.querySelector('input[name=quality][value="'+s.q+'"]'); if(qEl) qEl.checked=true;
   blendVal=s.blend; var bl=$('blend'); bl.value=Math.round(s.blend*100); $('blendVal').textContent=Math.round(s.blend*100)+'%';
   trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
@@ -2752,7 +2802,7 @@ function restoreHistory(h){
 // PRESERVED: after a reset, a History entry still restores its settings
 // and its video. (The output cache's own LRU cap may still evict the
 // oldest outputs as new ones are generated, as before.)
-// Single source of truth for BOTH Start over buttons (top + bottom):
+// Single source of truth for the one Start over button (bottom of page):
 // the page is "active" whenever any session state exists — an uploaded
 // file OR at least one History entry. Restoring a History entry after a
 // reset is session state too, so the buttons must come back; today they
@@ -2760,11 +2810,15 @@ function restoreHistory(h){
 function sessionActive(){ return !!(danceFile||songFile||historyEntries.length>0); }
 function updateNewBtn(){
   var active=sessionActive();
-  var visible=!!(progressEverShown&&active);
+  // The single bottom Start over and the Generate button stay hidden
+  // until the first generation has completed successfully; after that
+  // Start over stays visible whenever session state exists, and Cancel
+  // (gated separately in setCancelVisible) appears during later runs.
+  var visible=!!(firstGenDone&&progressEverShown&&active);
   var w=$('newWrap'); if(w){ w.style.display=''; w.classList.toggle('show',visible); }
-  var tw=$('topResetWrap'); if(tw){ tw.style.display=''; tw.classList.toggle('show',progressEverShown); }
-  var top=$('btnStartOverTop'); if(top) top.disabled=!active;
   var bn=$('btnNew'); if(bn) bn.disabled=!active;
+  var gb=$('btnGenerate'); if(gb) gb.style.display=firstGenDone?'':'none';
+  var gr=$('generateRow'); if(gr&&firstGenDone) gr.classList.add('show');
 }
 function resetAll(){
   // Start over cancels any in-flight work first (generation, export, or
@@ -2785,7 +2839,7 @@ function resetAll(){
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
   trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0;
   analysisState='idle'; analysisPromise=null; analysisVersion=-1;
-  autoGenForVersion=-1; generatedOnce=false;
+  autoGenForVersion=-1; generatedOnce=false; firstGenDone=false; pipelineRestartPending=false;
   pcmCache={}; pcmPromiseCache={}; stripCache={};
   filmstripBuiltFor=null; filmstripPending=false; filmstripBuilding=false;
   // History + output cache intentionally preserved — see note above.
@@ -2814,7 +2868,7 @@ function resetAll(){
   var area=$('resultArea'); area.innerHTML=''; area.classList.remove('show');
   $('filmstrip').innerHTML='';
   $('timeline').classList.remove('show');
-  $('playerSec').classList.remove('show'); $('settingsSec').classList.remove('show'); var _gr3=$('generateRow'); if(_gr3) _gr3.classList.remove('show');
+  $('playerSec').classList.remove('show'); $('settingsSec').classList.remove('show'); $('editVideoHeader').classList.remove('show'); var _gr3=$('generateRow'); if(_gr3) _gr3.classList.remove('show');
   $('btnGenerate').disabled=true;
   clearError(); stopRunClock(); setCancelVisible(false);
   stepState={1:false,2:false,3:false,4:false};
@@ -2830,7 +2884,6 @@ function resetAll(){
   updateNewBtn();
 }
 $('btnNew').addEventListener('click', resetAll);
-$('btnStartOverTop').addEventListener('click', resetAll);
 
 // ---------- generate (the one action button) ----------
 function fmtElapsed(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
@@ -3090,7 +3143,8 @@ $('btnCancel').addEventListener('click', function(){
 });
 async function runAutoPipeline(){
   if(!danceFile||!songFile) return;
-  if(pipelineRunning||isGenerating) return;
+  if(pipelineRunning||isGenerating||isExporting){ pipelineRestartPending=true; return; }
+  pipelineRestartPending=false;
   if(autoGenForVersion===filesVersion) return;
   var ver=filesVersion;
   pipelineRunning=true;
@@ -3120,6 +3174,14 @@ async function runAutoPipeline(){
     pipelineRunning=false;
     if(!isGenerating){ stopRunClock(); setCancelVisible(false); }
     flushFilmstrip();
+    // A file change during this run queued a restart: start the pipeline
+    // again with the new files now that this run has unwound.
+    if(pipelineRestartPending&&danceFile&&songFile&&!isGenerating&&!isExporting){
+      pipelineRestartPending=false;
+      if(analysisState!=="idle"){ analysisState="idle"; analysisPromise=null; }
+      autoGenForVersion=-1;
+      setTimeout(function(){ runAutoPipeline(); },30);
+    }
   }
 }
 // ---------- diagnostics wiring (startup probes + Copy button + global errors) ----------
