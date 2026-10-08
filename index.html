@@ -1251,18 +1251,22 @@ function evaluateCandidate(dancePCM, songPCM, coarseSec){
     if(!r) continue;
     wins.push({start:start, offset:r.offset, score:r.score, rms:r.rms});
   }
-  if(!wins.length) return {coarseSec:coarseSec, wins:wins, topHalf:[], verifiedScore:0, medianOffset:coarseSec, bestScore:0, spread:Infinity, overlapSec:overlapSec};
+  if(!wins.length) return {coarseSec:coarseSec, wins:wins, topHalf:[], verifiedScore:0, medianOffset:coarseSec, bestScore:0, spread:Infinity, overlapSec:overlapSec, medianOverlapSec:overlapSec};
   var byScore=wins.slice().sort(function(a,b){return b.score-a.score});
   var takeN=Math.max(1, Math.ceil(wins.length/2));
   var topHalf=byScore.slice(0, takeN);
   var offs=topHalf.map(function(w){return w.offset});
+  var medOff=medianOf(offs);
+  var medOvStart=Math.max(0,-medOff), medOvEnd=Math.min(danceSecTotal, songSecTotal-medOff);
+  var medianOverlapSec=Math.max(0, medOvEnd-medOvStart);
   return {
     coarseSec:coarseSec, wins:wins, topHalf:topHalf,
     verifiedScore:medianOf(topHalf.map(function(w){return w.score})),
-    medianOffset:medianOf(offs),
+    medianOffset:medOff,
     bestScore:byScore[0].score,
     spread:Math.max.apply(null,offs)-Math.min.apply(null,offs),
-    overlapSec:overlapSec
+    overlapSec:overlapSec,
+    medianOverlapSec:medianOverlapSec
   };
 }
 function fineAlign(dancePCM, songPCM, coarseSec){
@@ -1342,14 +1346,14 @@ function runAnalysis(){
       var coarse=coarseAlign(dSpec,sSpec);
       _scratchCoarse=coarse;
       setBarPct(47,'Analyzing'); // event: coarse match ends
-      // CANDIDATE VERIFICATION: the raw coarse argmax is NOT trusted — with
-      // looping tracks a repetition mirage can outscore the true alignment
-      // (IMG_0038: mirage +8.499s beat the true -6.266s on raw score, while
-      // its windows scored 0.005-0.10 and scattered; the true family's
-      // windows scored 0.11-0.41 and agreed within 5ms). Every coarse
-      // candidate gets the multi-window fine vote; the winner is the best
-      // VERIFIED score (median of top-half window scores; tie-break:
-      // smaller offset spread), never the raw argmax.
+      // CANDIDATE VERIFICATION: every coarse candidate gets the
+      // multi-window fine vote (verified score, spread, median offset).
+      // The winner is ranked by raw score normalized by overlap —
+      // rawPerSecond = rawScore / overlapSeconds, where overlapSeconds
+      // is the timeline overlap at the candidate's median offset.
+      // Measured across ground-truth pairs, the true candidate always
+      // has the highest rawPerSecond, while ranking by verified score
+      // alone picks loop mirages on quiet / near-tie pairs.
       log('Coarse candidates (raw cross-correlation — unverified):');
       coarse.candidates.forEach(function(c,i){ log('  candidate '+(i+1)+': '+c.sec.toFixed(3)+'s · raw score '+c.score.toFixed(1)); });
       log('Candidate verification — multi-window fine vote per candidate (6s windows, ~4s step, ±0.4s sample-level)…');
@@ -1358,14 +1362,17 @@ function runAnalysis(){
       for(var ci=0; ci<coarse.candidates.length; ci++){
         var ev2=evaluateCandidate(dancePCM,songPCM,coarse.candidates[ci].sec);
         ev2.rawScore=coarse.candidates[ci].score;
+        var ovForRaw=(typeof ev2.medianOverlapSec==='number'&&ev2.medianOverlapSec>0)?ev2.medianOverlapSec:ev2.overlapSec;
+        ev2.overlapSeconds=ovForRaw;
+        ev2.rawPerSecond=(ovForRaw>0)?(ev2.rawScore/ovForRaw):0;
         evals.push(ev2);
         await tick();
       }
-      evals.sort(function(a,b){ if(Math.abs(b.verifiedScore-a.verifiedScore)>1e-9) return b.verifiedScore-a.verifiedScore; return a.spread-b.spread; });
+      evals.sort(function(a,b){ if(Math.abs(b.rawPerSecond-a.rawPerSecond)>1e-9) return b.rawPerSecond-a.rawPerSecond; if(Math.abs(b.verifiedScore-a.verifiedScore)>1e-9) return b.verifiedScore-a.verifiedScore; return a.spread-b.spread; });
       _scratchEvals=evals;
       setBarPct(49,'Analyzing'); // event: candidate verification done
       log('Verified candidates (verified = median of top-half window scores):');
-      evals.forEach(function(e3,i){ log('  '+(i+1)+'. coarse '+e3.coarseSec.toFixed(3)+'s · verified '+e3.verifiedScore.toFixed(4)+' · best window '+e3.bestScore.toFixed(4)+' · median offset '+e3.medianOffset.toFixed(3)+'s · spread '+(isFinite(e3.spread)?e3.spread.toFixed(3)+'s':'n/a')+' · windows '+e3.wins.length+' · raw score '+e3.rawScore.toFixed(1)); });
+      evals.forEach(function(e3,i){ log('  '+(i+1)+'. coarse '+e3.coarseSec.toFixed(3)+'s · verified '+e3.verifiedScore.toFixed(4)+' · best window '+e3.bestScore.toFixed(4)+' · median offset '+e3.medianOffset.toFixed(3)+'s · spread '+(isFinite(e3.spread)?e3.spread.toFixed(3)+'s':'n/a')+' · windows '+e3.wins.length+' · raw score '+e3.rawScore.toFixed(1)+' · raw/s '+(typeof e3.rawPerSecond==='number'?e3.rawPerSecond.toFixed(1):'n/a')); });
       var winner=evals[0];
       log('Winner: coarse candidate '+winner.coarseSec.toFixed(3)+'s · verified '+winner.verifiedScore.toFixed(4)+' — per-window table:');
       winner.wins.forEach(function(w){ log('  win @ '+w.start.toFixed(1)+'s: offset '+w.offset.toFixed(3)+'s · score '+w.score.toFixed(4)+' · RMS '+w.rms.toFixed(4)); });
@@ -1385,11 +1392,19 @@ function runAnalysis(){
       }
       detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(50,'Generating'); markStepDone(3); markStepActive(4); // event: fine offset ends
       log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
-      if(!(confidence>=0.10)){
-        log('Confidence gate: verified confidence '+confidence.toFixed(4)+' is below the 0.10 floor — analysis FAILED; no result will be presented and no History version will be stored.');
+      var winnerRawPerSecond=(typeof winner.rawPerSecond==='number'&&isFinite(winner.rawPerSecond))?winner.rawPerSecond:0;
+      var bestOtherRawPerSecond=0;
+      for(var ei2=0; ei2<evals.length; ei2++){ if(evals[ei2]!==winner){ var _orps=(typeof evals[ei2].rawPerSecond==='number'&&isFinite(evals[ei2].rawPerSecond))?evals[ei2].rawPerSecond:0; if(_orps>bestOtherRawPerSecond) bestOtherRawPerSecond=_orps; } }
+      var rawRatio=(bestOtherRawPerSecond>0)?(winnerRawPerSecond/bestOtherRawPerSecond):(winnerRawPerSecond>0?Infinity:0);
+      var gateVerified=winner.verifiedScore;
+      var gateSpread=winner.spread;
+      var standardPath=gateVerified>=0.10;
+      var quietPath=gateVerified>=0.03&&isFinite(gateSpread)&&gateSpread<=0.05&&rawRatio>=1.3;
+      if(!standardPath&&!quietPath){
+        log('Confidence gate: FAILED — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — neither standard (verified ≥ 0.10) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met — analysis FAILED; no result will be presented and no History version will be stored.');
         throw new Error('Sync analysis failed');
       }
-      log('Confidence gate: verified confidence '+confidence.toFixed(4)+' meets the 0.10 floor — analysis accepted.');
+      log('Confidence gate: accepted via '+(standardPath?'standard':'quiet-consistency')+' path — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — analysis accepted.');
       analysisState="done"; analysisVersion=ver;
       // Restored-offset normalization (Question 3): if this detection is
       // the re-upload that follows a no-source History restore, and the
