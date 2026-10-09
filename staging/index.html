@@ -1884,13 +1884,164 @@ async function refreshOpfsAreas(reason){
     log('storage: OPFS area itemization failed ('+reason+'): '+(e.message||e));
   }
 }
-// Fully close out a writable stream after a failure: abort it and AWAIT
-// the stream's closed promise, so the stream is completely finished —
-// no lock, no cached handle state — before anything else touches
-// storage. Retrying while the failed stream is still closing is what
-// produced InvalidStateError ("state cached in an interface object ...
-// changed since it was read from disk") plus a ~12 s stall against the
-// stale lock on the previous build.
+// ---------- OPFS writer worker (sync access handles) ----------
+// A dedicated worker owns ALL OPFS delivery/staging writes. The
+// previous FileSystemWritableFileStream path failed repeatedly in
+// the full-size rig ("AbortError: Failed to write data to data
+// pipe" on an early slice, and the recovery retry died with
+// InvalidStateError after a ~12 s stall because the failed stream's
+// file state/lock never cleanly released). Sync access handles
+// (only available in a dedicated worker) wrote 224 MB in ~0.5 s
+// with zero errors in an isolated experiment in the same browser.
+// Protocol: begin(filename) -> write(buffer)* (one in flight,
+// awaited ack) -> finish() {flush, close, verify size via getFile()}
+// or abort-delete(filename) {close handle awaited, removeEntry}.
+// On any worker-side error the handle is closed and the cached
+// root is dropped, so the next begin re-acquires a fresh root and
+// failures surface promptly — no stall against a stale lock.
+function opfsWriterWorkerMain(){
+  var root=null, fileHandle=null, syncHandle=null, currentName=null, offset=0;
+  function ensureRoot(){
+    if(root) return Promise.resolve(root);
+    return navigator.storage.getDirectory().then(function(r){ root=r; return r; });
+  }
+  self.onmessage=function(e){
+    var msg=e.data||{}, id=msg.id;
+    function ok(extra){ var m={id:id, ok:true, type:msg.type+'-ok'}; if(extra){ for(var k in extra) m[k]=extra[k]; } self.postMessage(m); }
+    function fail(err){
+      var en=(err&&err.name)||'Error', em=(err&&err.message)||String(err), es=(err&&err.stack)||'';
+      self.postMessage({id:id, ok:false, type:msg.type+'-error', error:{name:en, message:em, stack:es}, filename:currentName, offset:offset});
+    }
+    (async function(){
+      try{
+        if(msg.type==='begin'){
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0;
+          await ensureRoot();
+          fileHandle=await root.getFileHandle(msg.filename,{create:true});
+          syncHandle=await fileHandle.createSyncAccessHandle();
+          try{ syncHandle.truncate(0); }catch(_){}
+          offset=0; currentName=msg.filename;
+          ok({filename:currentName});
+        } else if(msg.type==='write'){
+          if(!syncHandle) throw new Error('OPFS writer worker: no sync access handle open for write');
+          var view=new Uint8Array(msg.buffer);
+          var writtenTotal=0;
+          while(writtenTotal<view.byteLength){
+            var part=view.subarray(writtenTotal);
+            // Pass a zero-offset view (copy only after a short write)
+            // so the write source is unambiguous in every engine.
+            var toWrite=(part.byteOffset===0&&part.byteLength===part.buffer.byteLength)?part:part.slice();
+            var n=syncHandle.write(toWrite,{at:offset+writtenTotal});
+            if(n==null||isNaN(n)) throw new Error('OPFS writer worker: sync handle write returned an invalid result');
+            if(n===0) throw new Error('OPFS writer worker: sync handle write returned 0 bytes');
+            writtenTotal+=n;
+          }
+          offset+=writtenTotal;
+          ok({offset:offset, written:writtenTotal});
+        } else if(msg.type==='finish'){
+          if(!syncHandle) throw new Error('OPFS writer worker: no sync access handle open for finish');
+          try{ syncHandle.flush(); }catch(_){}
+          var expected=offset;
+          try{ syncHandle.close(); }catch(_){}
+          syncHandle=null;
+          var finalSize=expected, fname=currentName;
+          if(fileHandle){ try{ var f=await fileHandle.getFile(); finalSize=f.size; }catch(_){} }
+          fileHandle=null; currentName=null; offset=0;
+          ok({size:finalSize, expected:expected, filename:fname});
+        } else if(msg.type==='abort-delete'){
+          var target=msg.filename||currentName;
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0;
+          var deleted=false, delErr=null;
+          if(target){
+            try{ await ensureRoot(); }catch(_){}
+            if(root){ try{ await root.removeEntry(target); deleted=true; }catch(de){ delErr=de; } }
+          }
+          if(msg.resetRoot) root=null;
+          ok({filename:target, deleted:deleted, deleteError:delErr?String(delErr.message||delErr):null});
+        } else if(msg.type==='abort'){
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0;
+          if(msg.resetRoot) root=null;
+          ok({});
+        } else if(msg.type==='reset'){
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0; root=null;
+          ok({});
+        } else if(msg.type==='ping'){
+          ok({pong:true});
+        } else {
+          throw new Error('OPFS writer worker: unknown message type '+msg.type);
+        }
+      }catch(err){
+        try{ if(syncHandle) syncHandle.close(); }catch(_){}
+        syncHandle=null; fileHandle=null; currentName=null; offset=0; root=null;
+        fail(err);
+      }
+    })();
+  };
+}
+var opfsWriterWorker=null, opfsWriterNextId=1, opfsWriterPending={};
+function opfsWriterEnsureWorker(){
+  if(opfsWriterWorker) return opfsWriterWorker;
+  var src='('+opfsWriterWorkerMain.toString()+')()';
+  var blob=new Blob([src],{type:'text/javascript'});
+  var url=URL.createObjectURL(blob);
+  var w=new Worker(url);
+  w.onmessage=function(e){
+    var m=e.data||{}, id=m.id;
+    var p=opfsWriterPending[id]; if(!p) return; delete opfsWriterPending[id];
+    if(m.ok){ p.resolve(m); }
+    else {
+      var err=new Error((m.error&&m.error.message)||'OPFS writer worker error');
+      err.name=(m.error&&m.error.name)||'Error';
+      if(m.error&&m.error.stack) err.stack=m.error.stack;
+      p.reject(err);
+    }
+  };
+  w.onerror=function(ev){
+    var err=new Error((ev&&ev.message)||'OPFS writer worker failed');
+    err.name='Error';
+    var pending=opfsWriterPending; opfsWriterPending={}; opfsWriterWorker=null;
+    Object.keys(pending).forEach(function(k){ try{ pending[k].reject(err); }catch(_){} });
+    try{ log('storage: OPFS writer worker error: '+(err.message||err)); }catch(_){}
+  };
+  opfsWriterWorker=w;
+  return w;
+}
+function opfsWriterSend(type, payload, transfer){
+  return new Promise(function(resolve, reject){
+    var w;
+    try{ w=opfsWriterEnsureWorker(); }catch(e){ reject(e); return; }
+    var id=opfsWriterNextId++;
+    opfsWriterPending[id]={resolve:resolve, reject:reject};
+    var msg={id:id, type:type};
+    if(payload){ for(var k in payload) msg[k]=payload[k]; }
+    try{
+      if(transfer&&transfer.length) w.postMessage(msg, transfer);
+      else w.postMessage(msg);
+    }catch(e){ delete opfsWriterPending[id]; reject(e); }
+  });
+}
+function opfsWriterExtractBuffer(u8){
+  if(!u8) return new ArrayBuffer(0);
+  if(u8.byteOffset===0&&u8.byteLength===u8.buffer.byteLength) return u8.buffer;
+  var copy=new Uint8Array(u8.byteLength); copy.set(u8); return copy.buffer;
+}
+async function opfsWriterBegin(filename){ return opfsWriterSend('begin',{filename:filename}); }
+async function opfsWriterFinish(){ return opfsWriterSend('finish',{}); }
+async function opfsWriterAbortDelete(filename, resetRoot){
+  try{ return await opfsWriterSend('abort-delete',{filename:filename, resetRoot:!!resetRoot}); }
+  catch(e){
+    try{ if(opfsRoot) await opfsRoot.removeEntry(filename); }catch(_){}
+    try{ if(opfsWriterWorker) opfsWriterWorker.terminate(); }catch(_){}
+    opfsWriterWorker=null; opfsWriterPending={};
+    return {deleted:false};
+  }
+}
+// Legacy helper retained for compatibility; the delivery and staging
+// write paths no longer use writable streams at all.
 async function opfsCloseWritableFully(writable){
   if(!writable) return;
   try{ await writable.abort(); }catch(_){}
@@ -1898,29 +2049,49 @@ async function opfsCloseWritableFully(writable){
 }
 async function opfsWriteChunkedOnce(name, data){
   if(!opfsRoot) throw new Error('OPFS root unavailable');
-  var handle=await opfsRoot.getFileHandle(name,{create:true});
-  var writable=await handle.createWritable();
   var CH=4*1024*1024;
+  var t0=Date.now();
   try{
+    await opfsWriterBegin(name);
     if(data instanceof Blob){
       for(var boff=0; boff<data.size; boff+=CH){
-        var chunk=await data.slice(boff, Math.min(data.size, boff+CH)).arrayBuffer();
-        await writable.write(chunk);
+        var chunkBuf=await data.slice(boff, Math.min(data.size, boff+CH)).arrayBuffer();
+        if(!chunkBuf.byteLength) continue;
+        await opfsWriterSend('write',{buffer:chunkBuf},[chunkBuf]);
       }
-    } else if(data && data.length!=null){
-      for(var off=0; off<data.length; off+=CH){ await writable.write(data.subarray(off, Math.min(data.length, off+CH))); }
-    } else { await writable.write(data); }
-    await writable.close();
-  }catch(e){ await opfsCloseWritableFully(writable); throw e; }
-  return await handle.getFile();
+    } else if(data && data.length!=null && typeof data.subarray==='function'){
+      for(var off=0; off<data.length; off+=CH){
+        var part=data.subarray(off, Math.min(data.length, off+CH));
+        var buf=opfsWriterExtractBuffer(part);
+        await opfsWriterSend('write',{buffer:buf},[buf]);
+      }
+    } else if(data instanceof ArrayBuffer){
+      if(data.byteLength) await opfsWriterSend('write',{buffer:data},[data]);
+    } else if(data && data.buffer){
+      var singleBuf=opfsWriterExtractBuffer(data);
+      await opfsWriterSend('write',{buffer:singleBuf},[singleBuf]);
+    } else {
+      throw new Error('OPFS writer worker: unsupported data type for sync-access-handle write');
+    }
+    var fin=await opfsWriterFinish();
+    log('storage: OPFS write of '+name+' via sync-access-handle writes completed ('+fmtBytesMB(fin.size)+' in '+(Date.now()-t0)+' ms) — writer worker flush + close, final size verified from getFile()');
+    var handle=await opfsRoot.getFileHandle(name);
+    var file=await handle.getFile();
+    if(fin.size!=null&&file.size!==fin.size) log('storage: OPFS write size verification mismatch for '+name+': worker reported '+fmtBytesMB(fin.size)+', main getFile() reports '+fmtBytesMB(file.size));
+    return file;
+  }catch(e){
+    try{ await opfsWriterAbortDelete(name, true); }catch(_){}
+    throw e;
+  }
 }
 async function opfsWriteChunked(name, data){
   // One attempt, then — for connection-class failures only — ONE
   // recovery: re-acquire the OPFS root and retry once. Ordering on
-  // failure is strict: opfsWriteChunkedOnce has already aborted the
-  // failed writable and awaited its full close; here the partial file
-  // is DELETED before the retry touches storage, so the retry never
-  // writes against a stale handle, cached state, or a locked path.
+  // failure is strict: opfsWriteChunkedOnce has already closed the
+  // failed sync access handle (awaited inside the writer worker)
+  // and deleted the partial file via removeEntry; here the partial
+  // file deletion is re-asserted before the retry touches storage,
+  // so the retry never writes against a stale handle or locked path.
   // Callers keep their own graceful fallback if it still fails.
   try{ return await opfsWriteChunkedOnce(name, data); }
   catch(e){
@@ -2666,31 +2837,34 @@ async function freeConverterInputs(ff, dExt, sExt){
 // ~24 s and died, OPFS then refused every later operation with
 // "Connection is lost", and Safari's player rejected the fallback blob
 // (video error code 4), leaving a dead placeholder while the app said
-// Done. Delivery is now sliced end to end:
+// Done. Delivery is now sliced end to end via sync-access-handle
+// writes in a dedicated writer worker (see opfsWriterWorkerMain):
+// the writable-STREAM path failed repeatedly in the full-size rig
+// (AbortError on the data pipe; the recovery retry then died with
+// InvalidStateError after a ~12 s stall on the failed stream's
+// stale lock), while sync handles wrote 224 MB in ~0.5 s cleanly.
 //   1. ffmpeg extracts ONE byte slice (≤16 MB) of the output into a
 //      small slice file — the subfile protocol serves the exact byte
 //      range [start,end) of the converter-FS file as a raw data stream
 //      and a stream copy writes it out untouched (byte-exact);
-//   2. the slice file is read (≤16 MB in JS memory), written to the
-//      OPFS writable stream, and released before the next slice —
-//      STRICTLY SERIALIZED: each slice's write is fully awaited (and
-//      the stream's backpressure awaited via the writer's ready
-//      promise) before the next slice is even extracted, so exactly
-//      one slice is ever in flight and the data pipe cannot be
-//      overrun, regardless of output size or device speed;
+//   2. the slice file is read (≤16 MB in JS memory), its buffer is
+//      transferred to the writer worker, and the worker's ack is
+//      awaited before the next slice is even extracted — STRICTLY
+//      SERIALIZED, exactly one slice in flight. In the worker each
+//      slice is written with handle.write(buffer, {at: offset}),
+//      looping over short writes, then flush() once at the end,
+//      close(), and the final size verified from getFile();
 //   3. the delivered result IS the resulting OPFS File — Preview,
 //      Share, Download and Open all serve from it.
 // Peak extra JS memory during delivery is ~one slice, independent of
 // the output size. The full output never exists as a JS buffer.
-// Recovery from a mid-stream failure is ordered so it can actually
-// succeed: (a) the failed writable is aborted and its full close
-// awaited before anything else happens; (b) the partial output file
-// is deleted; (c) the retry restarts the stream-out into a NEW,
-// distinct filename — never the failed attempt's path, never a cached
-// handle — so it cannot stall against a stale lock or trip over
-// changed cached state (the previous build's same-path retry died
-// after 0 bytes with InvalidStateError); (d) only the successful
-// attempt's file becomes the delivered result.
+// Recovery from a mid-write failure: (a) the sync handle is closed
+// (awaited, inside the worker) before anything else happens; (b) the
+// partial output file is deleted via removeEntry; (c) the ONE retry
+// restarts into a NEW, distinct filename with fresh handles — never
+// the failed attempt's path — so it surfaces promptly with no stall
+// against a stale lock; (d) only the successful attempt's file
+// becomes the delivered result.
 var OPFS_SLICE_BYTES=16*1024*1024;
 var LARGE_OUTPUT_BYTES=100*1024*1024; // above this, a failed OPFS delivery must NOT fall back to a whole-output in-memory blob
 function makeDeliveryError(totalBytes, cause){
@@ -2775,81 +2949,76 @@ function opfsAttemptFileName(baseName, attempt){
 }
 async function streamRenderOutputToOpfs(ff, fsOutName, opfsName){
   // Streams the converter-FS output into an OPFS file slice by slice
-  // and returns {file, totalBytes, opfsName} — opfsName is the file
-  // the SUCCESSFUL attempt wrote, which is the only file that becomes
-  // the delivered result. Slice writes are strictly serialized through
-  // a stream writer: await the writer's ready promise (backpressure),
-  // await the write itself, and only then extract the next slice.
-  // On a mid-stream failure the ordering is: (a) abort the failed
-  // writable and await its FULL close; (b) delete the partial file;
+  // via the writer worker's sync access handles, and returns
+  // {file, totalBytes, opfsName} — opfsName is the file the SUCCESSFUL
+  // attempt wrote, which is the only file that becomes the delivered
+  // result. The main thread extracts one ≤16 MB slice, transfers its
+  // buffer to the worker, and awaits the worker's ack before
+  // extracting the next — exactly one slice in flight. In the worker:
+  // getDirectory, getFileHandle (create), createSyncAccessHandle,
+  // per-slice handle.write(buffer, {at: offset}) looping over short
+  // writes, flush() once at the end, close(), final size from
+  // getFile(). On a write failure: (a) close the sync handle
+  // (awaited in the worker); (b) removeEntry the partial file;
   // (c) on the first failure only, re-acquire the OPFS root and
-  // restart the stream-out from slice 0 into a NEW distinct filename.
-  // (Slicer errors are not retried this way: re-acquiring the storage
-  // root cannot fix the converter, and the caller handles them via
-  // size-based fallback.)
+  // restart from slice 0 into a NEW distinct filename with fresh
+  // handles. Failures surface promptly — no writable-stream lock to
+  // stall against. (Slicer errors are not retried this way:
+  // re-acquiring the storage root cannot fix the converter, and the
+  // caller handles them via size-based fallback.)
   var attempt=0;
   while(true){
     attempt++;
     var attemptName=opfsAttemptFileName(opfsName, attempt);
-    var handle=null, writable=null, writer=null, total=0;
+    var total=0;
+    var deliveryT0=Date.now();
     try{
-      var opened=await opfsWithRecovery('open OPFS output file '+attemptName, async function(){
-        var h=await opfsRoot.getFileHandle(attemptName,{create:true});
-        var w=await h.createWritable();
-        return {handle:h, writable:w};
-      });
-      handle=opened.handle; writable=opened.writable;
-      try{ writer=writable.getWriter(); }catch(gwErr){ writer=null; log('storage: OPFS writable getWriter() unavailable ('+(gwErr.message||gwErr)+') — writing via the stream directly, still one awaited slice at a time'); }
-      log('storage: streaming render output '+fsOutName+' → OPFS file '+attemptName+' (attempt '+attempt+') in slices of at most '+(OPFS_SLICE_BYTES/1048576)+' MB — strictly serialized: extract one slice, await the stream\'s backpressure, await the write to completion, release the slice, repeat; the full output is never held in JS memory');
+      await opfsWriterBegin(attemptName);
+      log('storage: streaming render output '+fsOutName+' → OPFS file '+attemptName+' (attempt '+attempt+') via sync-access-handle writes in slices of at most '+(OPFS_SLICE_BYTES/1048576)+' MB — dedicated writer worker (getDirectory, getFileHandle, createSyncAccessHandle, positional handle.write per slice); strictly serialized: extract one slice, transfer its buffer to the worker, await its ack, release the slice, repeat; the full output is never held in JS memory');
       while(true){
         var start=total;
         var slice=await extractOutputSlice(ff, fsOutName, start, start+OPFS_SLICE_BYTES);
         var n=slice?(slice.length||slice.byteLength||0):0;
         if(n===0){ slice=null; break; }
-        if(writer){
-          await writer.ready; // backpressure: never offer a slice while the pipe is full
-          await writer.write(slice); // fully awaited — exactly one slice in flight
-        } else {
-          await writable.write(slice);
-        }
-        total+=n;
+        var buf=opfsWriterExtractBuffer(slice);
         slice=null;
-        log('storage: OPFS stream-out slice @'+start+' written and awaited ('+fmtBytesMB(total)+' delivered so far)');
+        await opfsWriterSend('write',{buffer:buf},[buf]);
+        total+=n;
+        log('storage: OPFS delivery via sync-access-handle writes — slice @'+start+' written and acked by writer worker ('+fmtBytesMB(total)+' delivered so far)');
         if(n<OPFS_SLICE_BYTES) break; // short slice = EOF
       }
-      if(writer){ await writer.close(); try{ writer.releaseLock(); }catch(_){} writer=null; }
-      else { await writable.close(); }
-      writable=null;
+      var fin=await opfsWriterFinish();
+      var deliveryMs=Date.now()-deliveryT0;
+      if(fin.size!=null&&fin.size!==total) log('storage: OPFS delivery via sync-access-handle writes — size check: wrote '+fmtBytesMB(total)+' but the OPFS file reports '+fmtBytesMB(fin.size)+' (worker getFile() verification)');
+      var handle=await opfsRoot.getFileHandle(attemptName);
       var file=await handle.getFile();
-      if(file.size!==total) log('storage: OPFS stream-out size check — streamed '+fmtBytesMB(total)+' but the OPFS file reports '+fmtBytesMB(file.size));
-      log('storage: OPFS stream-out complete — '+attemptName+' ('+fmtBytesMB(total)+') delivered in '+Math.max(1,Math.ceil(total/OPFS_SLICE_BYTES))+' slice(s); peak extra JS memory ≈ one slice');
+      if(file.size!==total) log('storage: OPFS delivery via sync-access-handle writes — size check: wrote '+fmtBytesMB(total)+' but the main-thread getFile() reports '+fmtBytesMB(file.size));
+      log('storage: OPFS delivery via sync-access-handle writes complete — '+attemptName+' ('+fmtBytesMB(total)+') delivered in '+Math.max(1,Math.ceil(total/OPFS_SLICE_BYTES))+' slice(s); total delivery time '+deliveryMs+' ms; peak extra JS memory ≈ one slice');
       return {file:file, totalBytes:total, opfsName:attemptName};
     }catch(err){
-      // (a) Close out the failed stream COMPLETELY before anything
-      // else touches storage: abort via the writer when held, then
-      // await the stream's closed promise.
-      if(writer){
-        try{ await writer.abort(); }catch(_){}
-        try{ if(writable&&writable.closed) await writable.closed; }catch(_){}
-        try{ writer.releaseLock(); }catch(_){}
-        writer=null; writable=null;
-      } else if(writable){
-        await opfsCloseWritableFully(writable);
-        writable=null;
-      }
-      // (b) Delete the partial output file of THIS attempt and await
-      // the deletion — the retry must not inherit a partial file.
+      // (a)+(b) Close the sync handle (awaited inside the worker)
+      // and removeEntry the partial file of THIS attempt — the retry
+      // must not inherit a partial file or a stale handle.
+      var slicerFailed=!!(err&&err.slicerError);
       try{
-        if(opfsRoot){ await opfsRoot.removeEntry(attemptName); log('storage: OPFS stream-out attempt '+attempt+' — partial file '+attemptName+' deleted'); }
+        await opfsWriterAbortDelete(attemptName, true);
+        log('storage: OPFS stream-out attempt '+attempt+' — sync handle closed and partial file '+attemptName+' deleted');
       }catch(delErr){ log('storage: OPFS stream-out attempt '+attempt+' — deleting the partial file '+attemptName+' failed: '+(delErr.message||delErr)); }
-      if(err&&err.slicerError) throw err;
-      log('storage: OPFS stream-out attempt '+attempt+' failed after '+fmtBytesMB(total)+' delivered: '+(err.name||'Error')+': '+(err.message||err)+(isOpfsConnectionError(err)?' (connection-class error)':''));
+      if(slicerFailed){
+        // The converter failed, not the writer worker: the handle
+        // was still closed and the partial removed above; do not
+        // retry the stream-out — the caller handles slicer errors.
+        try{ if(opfsRoot) await opfsRoot.removeEntry(attemptName); }catch(_){}
+        throw err;
+      }
+      log('storage: OPFS stream-out attempt '+attempt+' failed after '+fmtBytesMB(total)+' delivered via sync-access-handle writes: '+(err.name||'Error')+': '+(err.message||err)+(isOpfsConnectionError(err)?' (connection-class error)':''));
       if(attempt===1){
         // (c) Restart into a NEW distinct filename (the next loop
-        // iteration derives it via opfsAttemptFileName) with a fresh
-        // handle — nothing from this failed attempt is reused, so the
-        // retry cannot stall ~12 s against a stale lock.
-        log('storage: OPFS stream-out — attempting ONE recovery: re-acquire the OPFS root and restart the stream-out once into a NEW filename ('+opfsAttemptFileName(opfsName, 2)+')');
+        // iteration derives it via opfsAttemptFileName) with fresh
+        // handles — nothing from this failed attempt is reused, and
+        // the worker dropped its cached root in abort-delete, so
+        // the retry re-acquires fresh state with no ~12 s stall.
+        log('storage: OPFS stream-out — attempting ONE recovery: re-acquire the OPFS root and restart the stream-out once into a NEW filename ('+opfsAttemptFileName(opfsName, 2)+') via sync-access-handle writes');
         var reacq=await opfsReacquireRoot('stream-out recovery for '+opfsName);
         if(reacq) continue;
         log('storage: OPFS stream-out recovery impossible — the root could not be re-acquired');
