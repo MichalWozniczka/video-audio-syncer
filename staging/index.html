@@ -780,6 +780,26 @@ function showError(msg){ var el=$('errLine'); if(!el) return; if(surfacedErrorMs
 // in-progress and is left alone. resetProgress re-shows both on the
 // next run.
 function endProgressOnFailure(){ if(barPct>=100) return; var w=$('progWrap'); if(w) w.style.display='none'; var sr=$('stepsRow'); if(sr) sr.classList.remove('show'); stopRunClock(); try{ log('Progress bar cleared — the run ended in a terminal failure, so it no longer shows an in-progress state.'); }catch(e){} }
+// Restore completion (E17): a restore is not a run, so when it finishes
+// the main progress UI must return to its normal completed/idle state.
+// A stored-source restore decodes the stored files through the converter,
+// whose load milestones park the label at "5% · Decoding" — and nothing
+// in the restore flow ever moved it on, so that stale percentage + phase
+// word stayed on screen next to a fully usable editor. Clear the label
+// text entirely, zero the bar, drop the phase word, hide the bar + steps
+// row, and stop the creep clock (the exact idle state Start over leaves
+// behind; the next real run's resetProgress re-arms everything). Never
+// touch the bar while a real run owns it.
+function finishRestoreProgress(){
+  try{ if(typeof isGenerating!=='undefined'&&(isGenerating||pipelineRunning)) return; }catch(e){}
+  try{ stopRunClock(); }catch(e){}
+  barPct=0; barCeiling=5; progPhase='';
+  var pb=$('progBar'); if(pb) pb.style.width='0%';
+  var pt=$('progText'); if(pt) pt.textContent='';
+  var w=$('progWrap'); if(w) w.style.display='none';
+  var sr=$('stepsRow'); if(sr) sr.classList.remove('show');
+  try{ log('History: restore complete — progress UI returned to its idle state (no stale percentage or phase word left showing).'); }catch(e){}
+}
 function clearError(){ surfacedErrorMsg=null; var el=$('errLine'); if(!el) return; el.textContent=''; el.classList.remove('show'); }
 var stepState={1:false,2:false,3:false,4:false};
 var barPct=0, barCeiling=5, progPhase='', progressEverShown=false;
@@ -1769,7 +1789,7 @@ function setRestoreNeedsSources(on){
   restoreNeedsSources=!!on;
   var note=$('restoreNote'); if(note) note.classList.toggle('show',restoreNeedsSources);
   var tl=$('timeline'); if(tl) tl.classList.toggle('locked',restoreNeedsSources);
-  var rb=$('btnResync'); if(rb) rb.disabled=restoreNeedsSources?true:rb.disabled;
+  var rb=$('btnResync'); if(rb){ if(restoreNeedsSources) rb.disabled=true; else if(typeof danceFile!=='undefined'&&danceFile&&typeof songFile!=='undefined'&&songFile) rb.disabled=false; } // unlocking must actually re-enable Re-sync (e.g. restoring the loaded pair's entry right after a locked old-pair restore disabled it); callers that clear this state before files/analysis are ready (handleFile, Start over) disable it again right after
   var inp=$('offInput'); if(inp) inp.disabled=restoreNeedsSources;
   var mn=$('offMinus'); if(mn) mn.disabled=restoreNeedsSources;
   var pl=$('offPlus'); if(pl) pl.disabled=restoreNeedsSources;
@@ -3439,11 +3459,25 @@ function storeSourcePairForGeneration(){
           if(fv&&fv.size===identity.video.size&&fa&&fa.size===identity.audio.size) return;
         }catch(e){ /* missing/evicted — fall through and store again */ }
       }
+      if(prev&&!samePair){
+        // Exactly ONE stored pair exists at any time: the previous
+        // pair's stored files are DELETED at this moment — explicitly
+        // removed from OPFS sources/ BEFORE the new pair is written —
+        // not merely overwritten in place or forgotten. Overwriting the
+        // fixed file names alone left the old pair's bytes readable
+        // (an old-pair restore could then load them and unlock), so the
+        // removal is a real removeEntry of both stored files.
+        try{
+          var dirPrev=await opfsRoot.getDirectoryHandle('sources');
+          try{ await dirPrev.removeEntry('video'); }catch(e){}
+          try{ await dirPrev.removeEntry('audio'); }catch(e){}
+        }catch(e){}
+      }
       await opfsWriteToDirFile('sources','video',vFile);
       await opfsWriteToDirFile('sources','audio',aFile);
       storedSourcePair=fullMeta; persistStoredSourcePairMeta();
       if(prev&&!samePair){
-        log('sources replaced: previous stored pair ('+prev.video.name+' · '+fmtSize(prev.video.size)+' + '+prev.audio.name+' · '+fmtSize(prev.audio.size)+') deleted — new source pair stored: '+identity.video.name+' ('+fmtBytesMB(identity.video.size)+') + '+identity.audio.name+' ('+fmtBytesMB(identity.audio.size)+') → OPFS sources/ (one shared copy for every version from this pair). Versions from the previous pair keep their stored videos but now restore in locked view-only mode.');
+        log('sources replaced: previous stored pair ('+prev.video.name+' · '+fmtSize(prev.video.size)+' + '+prev.audio.name+' · '+fmtSize(prev.audio.size)+') deleted — OPFS sources/video and sources/audio removed, then new source pair stored: '+identity.video.name+' ('+fmtBytesMB(identity.video.size)+') + '+identity.audio.name+' ('+fmtBytesMB(identity.audio.size)+') → OPFS sources/ (one shared copy for every version from this pair). Versions from the previous pair keep their stored videos but now restore in locked view-only mode.');
       } else {
         log('sources stored: '+identity.video.name+' ('+fmtBytesMB(identity.video.size)+') + '+identity.audio.name+' ('+fmtBytesMB(identity.audio.size)+') → OPFS sources/ (one shared copy for every version generated from this pair; exempt from the OPFS sweep like versions/).');
       }
@@ -3458,13 +3492,23 @@ function clearStoredSources(reason){
   var had=storedSourcePair;
   storedSourcePair=null; persistStoredSourcePairMeta();
   (async function(){
+    // Clearing means DELETING the stored files, not just forgetting
+    // the reference: both OPFS sources/ entries are removed (attempted
+    // even when no metadata is recorded, so orphaned bytes can never
+    // survive to unlock a later restore), and the log line is written
+    // only after the removals have actually completed.
+    var removed=[];
     try{
       var ok=await detectStorageBackend();
       if(ok&&opfsRoot){
-        try{ var dir=await opfsRoot.getDirectoryHandle('sources'); try{ await dir.removeEntry('video'); }catch(e){} try{ await dir.removeEntry('audio'); }catch(e){} }catch(e){}
+        try{
+          var dir=await opfsRoot.getDirectoryHandle('sources');
+          try{ await dir.removeEntry('video'); removed.push('sources/video'); }catch(e){}
+          try{ await dir.removeEntry('audio'); removed.push('sources/audio'); }catch(e){}
+        }catch(e){}
       }
     }catch(e){}
-    log('sources cleared ('+reason+')'+(had?(': stored pair '+had.video.name+' + '+had.audio.name+' deleted'):'')+' — versions from that pair keep their stored videos but restore in locked view-only mode from now on.');
+    log('sources cleared ('+reason+')'+(had?(': stored pair '+had.video.name+' + '+had.audio.name+' deleted'):'')+(removed.length?(' — removed OPFS '+removed.join(' + ')):'')+' — versions from that pair keep their stored videos but restore in locked view-only mode from now on.');
   })();
 }
 // Restore-time adoption of the stored source pair: load the stored
@@ -3483,6 +3527,14 @@ function tryAdoptStoredSources(h,s){
     try{
       var meta=storedSourcePair;
       if(!meta) throw new Error('no stored source pair metadata');
+      // The unlock decision is based ONLY on this entry's recorded
+      // pair: it must equal the currently stored pair, re-verified
+      // here at adoption time (not just by the caller), and the stored
+      // files read below must match THIS entry's pair exactly. Stored
+      // files belonging to any other pair never unlock a restore.
+      var hPairAdopt=pairRefOf(h);
+      if(!hPairAdopt) throw new Error('this entry records no source pair');
+      if(!pairEquals(hPairAdopt,meta)) throw new Error('this entry\'s source pair is not the currently stored pair');
       var ok=await detectStorageBackend();
       if(!ok||!opfsRoot) throw new Error('OPFS unavailable: '+diagStorage.note);
       var dir=await opfsRoot.getDirectoryHandle('sources');
@@ -3490,10 +3542,12 @@ function tryAdoptStoredSources(h,s){
       var aRaw=await (await dir.getFileHandle('audio')).getFile();
       if(!vRaw||vRaw.size!==meta.video.size) throw new Error('stored video source missing or size mismatch');
       if(!aRaw||aRaw.size!==meta.audio.size) throw new Error('stored audio source missing or size mismatch');
+      if(vRaw.size!==hPairAdopt.video.size||aRaw.size!==hPairAdopt.audio.size) throw new Error('stored sources do not match this entry\'s recorded pair');
       vFile=new File([vRaw], meta.video.name, {type:meta.video.type||'', lastModified:meta.video.lastModified||0});
       aFile=new File([aRaw], meta.audio.name, {type:meta.audio.type||'', lastModified:meta.audio.lastModified||0});
     }catch(e){
       log('History: restore fell back to locked — the stored sources for Version '+h.num+' could not be read ('+(e.message||e)+'); the version restores in view-only mode with the re-upload note, exactly as before.');
+      try{ finishRestoreProgress(); }catch(_){}
       return;
     }
     // If the user picked files (or reset) while the stored sources
@@ -3542,8 +3596,13 @@ function tryAdoptStoredSources(h,s){
       analysisState='done'; analysisVersion=ver;
       log('History: stored sources decoded for Version '+h.num+' — editing and Apply edits now work across sessions with no re-upload (analysis state restored from the entry\'s stored settings; no re-analysis).');
       layoutTimeline(); buildFilmstrip();
+      // Restore complete: the decode above drove the converter-load /
+      // decoding progress milestones — return the main progress UI to
+      // its idle state instead of leaving "5% · Decoding" parked.
+      try{ finishRestoreProgress(); }catch(e){}
     }catch(decodeErr){
       log('History: stored sources for Version '+h.num+' loaded, but decoding their audio failed ('+(decodeErr.message||decodeErr)+') — the files stay loaded and the editor unlocked; Apply edits will run analysis as a fallback.');
+      if(ver===filesVersion&&danceFile===vFile){ try{ finishRestoreProgress(); }catch(e){} }
     }
   })();
 }
@@ -3585,6 +3644,10 @@ function loadVersionPayload(h){
       // the next visit. A later real run re-arms the journal via
       // journalBeginRun exactly as usual.
       try{ journalMarkCompleted(true); }catch(e){}
+      // Any restore completing returns the progress UI to its idle
+      // state (E17) — a payload restore must not leave a stale label
+      // behind either, whatever an earlier decode left on the bar.
+      try{ finishRestoreProgress(); }catch(e){}
     }catch(e){
       logError('version-restore',e);
       setPayloadRef(h, null); h.available=false; renderHistory();
@@ -3663,7 +3726,21 @@ function restoreHistory(h){
   // exactly why the editor used to show blank readouts and a 0.000
   // offset. Entries saved before this metadata existed fall back to
   // their trim end as the duration.
-  var sourcesAbsent=!(danceFile&&songFile);
+  // Unlock decision (pair-scoped): the editor is editable for this
+  // entry ONLY when the source files actually loaded are THIS entry's
+  // recorded pair. That is decided by pair identity (name + size per
+  // slot), never by the mere presence of files: after a different
+  // pair's generation, the files in memory (and the single stored
+  // pair) belong to THAT pair, so restoring an old-pair entry here
+  // must take the locked path — re-upload note shown, editor locked —
+  // exactly as an entry without sources does. When no files are
+  // loaded, the stored-source adoption below may still unlock the
+  // entry, but only if its recorded pair equals the stored pair.
+  var entryPairForRestore=pairRefOf(h);
+  var loadedPairForRestore=(danceFile&&songFile)?{video:{name:danceFile.name,size:danceFile.size},audio:{name:songFile.name,size:songFile.size}}:null;
+  var loadedMatchesEntry=!!(entryPairForRestore&&loadedPairForRestore&&pairEquals(entryPairForRestore,loadedPairForRestore));
+  var noFilesLoaded=!(danceFile||songFile);
+  var sourcesAbsent=!loadedMatchesEntry;
   if(typeof s.detected==='number'&&isFinite(s.detected)) detectedOffset=s.detected;
   // Full-settings preservation for the re-upload flow (Question 3):
   // with no sources loaded, stash this version's effective offset, its
@@ -3697,7 +3774,7 @@ function restoreHistory(h){
   syncOffsetInput();
   updatePreviewSub();
   log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
-  if(sourcesAbsent) log('History: restored after reload with no source files loaded — editor displays the restored values (additional offset '+(manualDelta()>=0?'+':'')+manualDelta().toFixed(3)+'s, trim '+trimStartSec.toFixed(2)+'–'+trimEnd().toFixed(2)+'s, effective offset '+effOffset().toFixed(3)+'s, duration '+editorDur().toFixed(2)+'s from the entry metadata); timeline dragging, Re-sync and Apply edits are disabled until the source files are re-uploaded.');
+  if(sourcesAbsent) log(noFilesLoaded?('History: restored after reload with no source files loaded — editor displays the restored values (additional offset '+(manualDelta()>=0?'+':'')+manualDelta().toFixed(3)+'s, trim '+trimStartSec.toFixed(2)+'–'+trimEnd().toFixed(2)+'s, effective offset '+effOffset().toFixed(3)+'s, duration '+editorDur().toFixed(2)+'s from the entry metadata); timeline dragging, Re-sync and Apply edits are disabled until the source files are re-uploaded.'):('History: restored Version '+h.num+' while a DIFFERENT source pair is loaded — this entry\'s recorded pair does not match the loaded files (nor the currently stored pair), so the restore takes the locked path exactly as an entry without sources: the stored video plays, the re-upload note is shown, and timeline dragging, Re-sync and Apply edits are disabled until this version\'s own source files are re-uploaded.'));
   // A version WITH a playable payload becomes the applied-settings
   // snapshot (Apply edits starts disabled; any edit branches a new
   // version on apply). A settings-only entry must NOT become the
@@ -3733,7 +3810,7 @@ function restoreHistory(h){
   }
   else {
     var e=cacheGet(h.sig);
-    if(e){ var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:false}); generatedOnce=true; try{ journalMarkCompleted(true); }catch(e){} log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
+    if(e){ var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:false}); generatedOnce=true; try{ journalMarkCompleted(true); }catch(e){} try{ finishRestoreProgress(); }catch(e){} log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
     else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
   }
   // Stored-source restore: with no sources loaded, if this entry's
@@ -3746,9 +3823,25 @@ function restoreHistory(h){
   // pair references existed), entries from an older/replaced pair,
   // and restores after Start over cleared the sources never enter
   // this path and keep the locked behavior unchanged.
-  if(sourcesAbsent){
+  if(noFilesLoaded){
     var hPair=pairRefOf(h);
     if(hPair&&storedSourcePair&&pairEquals(hPair,storedSourcePair)) tryAdoptStoredSources(h,s);
+    else {
+      // Locked restore with no stored-source adoption: the restore is
+      // complete once the payload above has been delivered — return
+      // the progress UI to its idle state (E17) here too. (Payload
+      // delivery is async; loadVersionPayload clears it again when it
+      // lands, and the settings-only branches complete synchronously,
+      // so this covers every locked-restore shape.)
+      try{ finishRestoreProgress(); }catch(e){}
+    }
+  } else if(sourcesAbsent){
+    // Locked in-session restore (different pair loaded): the stored
+    // pair belongs to that other pair and must never unlock this
+    // entry, and the loaded files must not be clobbered — the restore
+    // completes locked; the payload path above clears the progress UI
+    // when it lands (cached-blob restores clear it inline below).
+    if(!hPayloadPath){ try{ finishRestoreProgress(); }catch(e){} }
   }
 }
 
