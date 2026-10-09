@@ -81,10 +81,12 @@ video.main.sourceHidden{display:none!important}
 .offlabel{font-size:12.5px;color:var(--muted);white-space:nowrap;flex:none}
 .offBtn{width:30px;height:30px;flex:none;padding:0;border-radius:50%;background:var(--card2);color:var(--text);border:1px solid var(--line);font-size:11px;display:flex;align-items:center;justify-content:center;cursor:pointer}
 .offInput{flex:0 1 100px;min-width:9.5ch;width:100px;padding:7px 2px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-family:ui-monospace,Menlo,monospace;font-size:16px;text-align:center}
-.offsetRow .secondary{padding:6px 10px;font-size:12.5px;margin-left:auto;flex:none;white-space:nowrap}
-.offsetRow .secondary:disabled{opacity:.45;cursor:not-allowed}
+.resyncRow{display:flex;justify-content:center;margin-top:8px}
+.resyncRow .secondary{padding:6px 10px;font-size:12.5px;flex:none;white-space:nowrap}
+.resyncRow .secondary:disabled{opacity:.45;cursor:not-allowed}
 .offBtn:disabled{opacity:.45;cursor:not-allowed}
 .offInput:disabled{opacity:.55;cursor:not-allowed}
+@media(max-width:380px){.offsetRow{margin-left:-28px;margin-right:-28px;gap:4px}.offInput{min-width:8ch}}
 .timeline.locked .handle,.timeline.locked #audioBlock{pointer-events:none;opacity:.55}
 #restoreNote{display:none;font-size:12.5px;color:var(--muted);margin:10px 2px 0}
 #restoreNote.show{display:block}
@@ -195,6 +197,8 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
         <button type="button" class="offBtn" id="offMinus" aria-label="Offset minus 0.02 seconds">◀</button>
         <input type="text" class="offInput" id="offInput" value="0.000" inputmode="decimal" autocomplete="off" aria-label="Offset from detected sync, in seconds">
         <button type="button" class="offBtn" id="offPlus" aria-label="Offset plus 0.02 seconds">▶</button>
+      </div>
+      <div class="resyncRow">
         <button type="button" class="secondary" id="btnResync" disabled>Re-sync</button>
       </div>
     </div>
@@ -510,19 +514,43 @@ function journalRecordGlobalError(kind,errLike){
     try{ localStorage.setItem(JOURNAL_KEY, JSON.stringify({version:1,startedAt:journalSessionStartedAt,sessionStartedAt:journalSessionStartedAt,completed:false,stage:journalNormalizeStage(diagStage),lastError:journalTruncate(String(errLike&&errLike.message||errLike),1200),entries:diagEntries.slice(-200)})); }catch(_){}
   }
 }
+function journalSessionDidWork(rec){
+  // A recovered journal only counts as a session worth surfacing if it
+  // actually started work: its recorded stage advanced beyond "boot", or
+  // it had input files recorded. A boot-only journal (page opened, no
+  // files picked, no run started, tab closed) is not a crash.
+  if(!rec||typeof rec!=='object') return false;
+  var stage=String(rec.stage||rec.rawStage||'boot');
+  if(stage&&stage!=='boot') return true;
+  try{
+    var inp=rec.inputs||{};
+    var sizes=rec.inputSizes||{};
+    var kinds=['video','audio'];
+    for(var i=0;i<kinds.length;i++){
+      var one=inp[kinds[i]];
+      if(one&&((one.name&&one.name!=='(none)')||one.size!=null)) return true;
+      if(sizes[kinds[i]]!=null) return true;
+    }
+  }catch(e){}
+  return false;
+}
 // Read any previous session's journal NOW — before the first log() call of
 // this session can overwrite the stored journal with the new session's
 // state. A previous journal with completed=false is a crashed session: its
 // copy is kept in memory (journalRecovered) for the diagnostics dump until
 // the user dismisses it or a new run completes cleanly and replaces it.
+// Boot-only incomplete sessions (never started work) are discarded
+// silently instead — no notice, no section in the diagnostics dump.
 try{
   var _prevJournal=journalReadStored();
-  if(_prevJournal&&_prevJournal.completed===false){ journalRecovered=_prevJournal; journalPersistRecovered(); }
+  if(_prevJournal&&_prevJournal.completed===false&&journalSessionDidWork(_prevJournal)){ journalRecovered=_prevJournal; journalPersistRecovered(); }
   else {
     // No fresh crash in the main journal, but an earlier recovered record
-    // may still be awaiting dismissal / a clean run — keep showing it.
+    // may still be awaiting dismissal / a clean run — keep showing it
+    // (unless it too never got past boot, in which case drop it for good).
     var _keptRecovered=journalReadRecoveredStored();
-    if(_keptRecovered&&_keptRecovered.completed===false) journalRecovered=_keptRecovered;
+    if(_keptRecovered&&_keptRecovered.completed===false&&journalSessionDidWork(_keptRecovered)) journalRecovered=_keptRecovered;
+    else if(_keptRecovered&&!journalSessionDidWork(_keptRecovered)) journalSafeClearRecovered();
   }
 }catch(e){}
 // Global error handlers: registered early and writing SYNCHRONOUSLY to
