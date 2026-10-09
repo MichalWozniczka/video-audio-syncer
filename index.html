@@ -10,7 +10,7 @@
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1115"/>
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f6f4"/>
 <link rel="icon" href="data:,"/>
-<title>Video/Audio Syncer</title>
+<title>Sync My Dance</title>
 <script src="assets/ffmpeg/ffmpeg.js"></script>
 <script src="assets/ffmpeg/util.js"></script>
 <style>
@@ -22,7 +22,7 @@
   :root{--bg:#f6f6f4;--card:#ffffff;--card2:#f0efe9;--line:#e2ddd2;--text:#181713;--muted:#6b675e;--accent:#e84525;}
 }
 *{box-sizing:border-box}
-button,input,select,textarea,a,label,.pill,.pill span,.drop,.saveBtn,.offBtn,.cand,.histRow{touch-action:manipulation}
+button,input,select,textarea,a,label,.pill,.pill span,.drop,.saveBtn,.offBtn,.cand{touch-action:manipulation}
 html{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%;background:var(--bg)}
 body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.4;touch-action:manipulation;min-height:100vh;min-height:100dvh}
 .wrap{max-width:760px;margin:0 auto;min-height:100vh;min-height:100dvh;padding:calc(16px + env(safe-area-inset-top,0px)) calc(14px + env(safe-area-inset-right,0px)) calc(36px + env(safe-area-inset-bottom,0px)) calc(14px + env(safe-area-inset-left,0px))}
@@ -87,9 +87,6 @@ video.main.sourceHidden{display:none!important}
 .offBtn:disabled{opacity:.45;cursor:not-allowed}
 .offInput:disabled{opacity:.55;cursor:not-allowed}
 @media(max-width:380px){.offsetRow{margin-left:-28px;margin-right:-28px;gap:4px}.offInput{min-width:8ch}}
-.timeline.locked .handle,.timeline.locked #audioBlock{pointer-events:none;opacity:.55}
-#restoreNote{display:none;font-size:12.5px;color:var(--muted);margin:10px 2px 0}
-#restoreNote.show{display:block}
 /* ---- timeline ---- */
 .timeline{margin-top:10px;display:none;user-select:none;-webkit-user-select:none;padding:0 28px;box-sizing:border-box}
 .timeline.show{display:block}
@@ -121,11 +118,6 @@ video.main.sourceHidden{display:none!important}
 .pill input:checked+span{background:var(--accent);border-color:var(--accent);color:#fff}
 input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 .blendval{font-family:ui-monospace,Menlo,monospace;font-size:13px;min-width:38px;text-align:right}
-#historyWrap{margin-top:16px;display:none}
-#historyWrap.show{display:block}
-#historyWrap h4{margin:0 0 8px;font-size:13px;color:var(--muted);font-weight:700}
-.histRow{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 12px;margin-top:6px;color:var(--text);font-size:12.5px;font-weight:400;cursor:pointer;font-family:ui-monospace,Menlo,monospace}
-.histRow .unavail{color:#ff8a75}
 .resultvid{width:100%;border-radius:12px;background:#000;margin-top:10px;max-height:60vh;display:block}
 .saveRow{display:flex;gap:8px;margin-top:10px;flex-wrap:nowrap}
 .saveBtn{flex:1 1 0;min-width:0;display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--ok);color:#06281a;padding:9px 6px;border-radius:999px;font-weight:800;font-size:13.5px;text-decoration:none;cursor:pointer;border:0;font-family:inherit;white-space:nowrap}
@@ -147,7 +139,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 </head>
 <body>
 <div class="wrap">
-  <h1>Video/Audio Syncer</h1>
+  <h1>Sync My Dance</h1>
   <p class="sub">Upload a video with the music playing in the background, plus the clean audio (a music file, video, or screen recording), and get your video back with the music auto-synced on top.</p>
   <div class="recoveredNotice" id="recoveredNotice" role="alert"><span id="recoveredNoticeText"></span><button type="button" id="btnDismissRecovered">Dismiss</button></div>
   <div class="grid">
@@ -191,7 +183,6 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
           <div id="audioBlock"><canvas id="wave"></canvas></div>
         </div>
       </div>
-      <div id="restoreNote">Re-upload the video and audio files to edit this version.</div>
       <div class="offsetRow">
         <span class="offlabel">Additional offset (s):</span>
         <button type="button" class="offBtn" id="offMinus" aria-label="Offset minus 0.02 seconds">◀</button>
@@ -224,7 +215,6 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
   <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
   <div class="errline" id="errLine"></div>
   <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
-  <div id="historyWrap"><h4>History</h4><div id="historyList"></div></div>
   <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
 </div>
 
@@ -241,12 +231,8 @@ var TARGET_SR=22050, FFT_SIZE=2048, HOP=1024;
 var danceFile=null, songFile=null;
 var dancePCM=null, songPCM=null;
 var danceDur=0, songDur=0;
-var restoredDur=0, restoredSongDur=0; // source durations carried by a History entry's metadata — used to display the editor (trim/offset readouts, offset input) after a post-reload restore, when no source files are loaded and danceDur/songDur are still 0
-var restoreNeedsSources=false; // true after a post-reload History restore (no source files): timeline dragging + Re-sync disabled, Apply edits disabled, and the editor shows the re-upload note until the sources are uploaded again
-var pendingRestoreCtx=null; // FULL settings context of a History version restored with NO source files loaded: {eff, detected (nullable), sig, tStart, tEnd, blend, q}. handleFile zeroes detectedOffset/audioPos AND resets the trim to full range on re-upload, so without this stash the restored version's true additional offset (eff − detected) is destroyed before detection re-runs — and if the effective offset were ever re-interpreted AS the additional offset, applying an edit would double-apply the detected offset (eff + detected) — and the restored trim/blend/export quality are silently dropped the same way. runAnalysis consumes this on its next successful detection for the same file pair: it re-establishes audioPos from (new detected + true additional) — never from the raw effective value — and carries the restored trim start/end, blend, and export quality into the run, so a re-upload of the restored version's own sources makes it editable WITHOUT dropping any of its settings. Only a deliberate user edit after the re-upload changes them.
 var detectedOffset=0;
 var trimStartSec=0, trimEndSec=null; // null = full duration
-var baseTrimStart=0, baseTrimEnd=null; // trim of the restored/last-generated version; readouts compose against it when it differs from full range
 var audioPos=0; // video-timeline position (sec) of the song block's left edge; effOffset = -audioPos
 var blendVal=0;
 var ffmpeg=null, ffmpegLoaded=false, ffmpegProgressCb=null;
@@ -267,7 +253,7 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet'};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
@@ -655,7 +641,6 @@ function buildDiagnosticsText(){
     if(typeof resultCanShare!=='undefined') diagResult.canShare=resultCanShare;
     if(typeof resultFile!=='undefined') diagResult.shareFileBuilt=!!resultFile;
   }catch(e){}
-  var histCount=0; try{ histCount=(typeof historyEntries!=='undefined'&&historyEntries)?historyEntries.length:0; }catch(e){}
   var qNow='unknown'; try{ var qe=document.querySelector('input[name=quality]:checked'); qNow=qe?qe.value:'unknown'; }catch(e){}
   var settingsText='(no generation yet)';
   if(diagResult.settings){ var s=diagResult.settings; settingsText='quality='+s.q+(s.height?(' ('+s.height+'p)'):' (full)')+' | trim='+Number(s.tStart).toFixed(3)+'s to '+Number(s.tEnd).toFixed(3)+'s (duration '+Number(s.tDur).toFixed(3)+'s) | effective offset='+Number(s.eff).toFixed(3)+'s | detected offset='+(typeof detectedOffset!=='undefined'?Number(detectedOffset).toFixed(3)+'s':'?')+' | room audio blend='+Math.round(Number(s.blend)*100)+'%'; }
@@ -683,7 +668,6 @@ function buildDiagnosticsText(){
     'Share File pre-built at generation: '+String(diagResult.shareFileBuilt),
     'resultCanShare (canShare with real output File): '+(diagResult.canShare==null?'unknown':String(diagResult.canShare)),
     'Settings used: '+settingsText,
-    'History count: '+histCount,
     'Analysis state: '+String((typeof analysisState!=='undefined')?analysisState:'?')+' | confidence: '+String((typeof confidence!=='undefined')?confidence:'?')
   ].join('\n');
   var headerLines=[
@@ -700,15 +684,23 @@ function buildDiagnosticsText(){
   ].join('\n');
   var storageLines='(storage diagnostics unavailable)';
   try{
+    var areaLines=['OPFS usage by top-level area (computed from file sizes, at boot and after each render):'];
+    if(diagStorage.areas&&diagStorage.areas.length){
+      diagStorage.areas.forEach(function(a){ areaLines.push('  '+a.name+': '+fmtBytesMB(a.bytes)+' ('+a.files+' file'+(a.files===1?'':'s')+')'); });
+      areaLines.push('  computed total (all top-level areas): '+fmtBytesMB(diagStorage.areasTotal));
+    } else {
+      areaLines.push('  (not itemized yet — '+(diagStorage.areaNote||'OPFS unavailable or not yet scanned')+')');
+    }
     storageLines=[
       'Storage backend detection: OPFS available='+String(diagStorage.opfsAvailable)+' | note: '+diagStorage.note+' | typeof navigator.storage.getDirectory='+storageGetDirectoryType(),
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
       'mount (last render): '+diagStorage.mountNote,
-      'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'),
+      'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a')
+    ].concat(areaLines).concat([
       'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
       'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'n/a')+(diagProxy.webcodecs?(' | webcodecs stages: demux '+(diagProxy.webcodecs.timings.demuxMs/1000).toFixed(2)+'s · decode+encode '+(diagProxy.webcodecs.timings.decodeEncodeMs/1000).toFixed(1)+'s · audio '+(diagProxy.webcodecs.timings.audioMs/1000).toFixed(1)+'s · mux '+(diagProxy.webcodecs.timings.muxMs/1000).toFixed(1)+'s · '+diagProxy.webcodecs.frames+' frames · '+diagProxy.webcodecs.outW+'x'+diagProxy.webcodecs.outH+' @ '+diagProxy.webcodecs.fps+' fps · '+diagProxy.webcodecs.srcCodec+' → '+diagProxy.webcodecs.encCodec):''),
       'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
-    ].join('\n');
+    ].join('\n'));
   }catch(e){}
   var parts=[];
   parts.push('--- HEADER ---'); parts.push(headerLines);
@@ -833,7 +825,7 @@ function releaseAnalysisScratch(where){
 var filmstripBuiltFor=null, filmstripBuilding=false, filmstripPending=false, stripCache={};
 var pcmCache={}, pcmPromiseCache={}, ffmpegChain=Promise.resolve(), generatedOnce=false;
 var firstGenDone=false; // true only after the FIRST generation completes successfully this session (reset by Start over). Gates Generate / Cancel / Start over visibility until then.
-var appliedSnapshot=null; // settings {eff,tStart,tEnd,blend,q} of the last applied/generated (or payload-restored) version — the Apply edits button is disabled while the editor matches it exactly
+var appliedSnapshot=null; // settings {eff,tStart,tEnd,blend,q} of the last applied/generated result — the Apply edits button is disabled while the editor matches it exactly
 var pipelineRestartPending=false; // a file change cancelled an in-flight run; restart the pipeline once the old run unwinds
 // ---------- cancel ----------
 // Every run captures runToken; Cancel bumps it, rejects the run's cancel
@@ -861,16 +853,10 @@ function withFFmpegLock(fn){
 // Edits NEVER touch the generated result: once a result video exists it stays
 // visible until a new Generate/auto-run completes and replaces it.
 function invalidateDownload(){ invalidateExport('settings edit'); if(generatedOnce) log('Edits changed — proxy preview stays on screen until you tap Generate; any cached export is now stale and will re-render on the next Share/Download/Open.'); }
-function editorDur(){ return danceDur>0?danceDur:(restoredDur||0); } // duration the editor displays against: the loaded source's, or the restored History entry's stored duration when no source is loaded
-function editorSongDur(){ return songDur>0?songDur:(restoredSongDur||0); }
+function editorDur(){ return danceDur||0; }
+function editorSongDur(){ return songDur||0; }
 function trimEnd(){ return trimEndSec==null?editorDur():trimEndSec; }
-// Cumulative trim readout: when the version on screen was itself trimmed
-// (restored from History or just generated with a non-full trim), show each
-// endpoint as "{base} + {delta}" / "{base} − {delta}" in plain seconds with
-// two decimals, so re-trimming a cropped video keeps its original timeline
-// visible. No base trim → plain m:ss exactly as before.
-function baseTrimActive(){ var d=editorDur(); return d>0&&(baseTrimStart>0.001||(baseTrimEnd!=null&&baseTrimEnd<d-0.001)); }
-function fmtTrimPoint(cur, base){
+function fmtTrimPoint(cur){
   return Number(cur).toFixed(2);
 }
 
@@ -941,8 +927,7 @@ function handleFile(f,which){
   filesVersion++; analysisState="idle"; analysisPromise=null; try{ autoGenForVersion=-1; }catch(e){}
   try{ var dd=(which==='dance')?diagFiles.video:diagFiles.audio; dd.name=f.name; dd.sizeBytes=f.size; dd.type=f.type||''; dd.durationSec=null; dd.decodeRoute='not decoded yet'; dd.decodeDurationMs=null; dd.sampleCount=null; dd.sampleRate=null; dd.rms=null; dd.peak=null; log('File selected ['+dd.role+']: name='+f.name+' | size='+fmtBytesMB(f.size)+' | MIME='+(f.type||'(empty)')+' | lastModified='+(f.lastModified||0)); }catch(e){ logError('file-select-diag',e); }
   if(which==='dance'){ danceFile=f; dancePCM=null; danceDur=0; danceVideoW=0; danceVideoH=0; trimStartSec=0; trimEndSec=null; filmstripBuiltFor=null; } else { songFile=f; songPCM=null; songDur=0; }
-  detectedOffset=0; audioPos=0; generatedOnce=false; baseTrimStart=0; baseTrimEnd=null; appliedSnapshot=null;
-  restoredDur=0; restoredSongDur=0; try{ setRestoreNeedsSources(false); }catch(e){} // a fresh source upload ends any post-reload display-only restore state; the new files drive the editor from here
+  detectedOffset=0; audioPos=0; generatedOnce=false; appliedSnapshot=null;
   try{ var _tl0=$('timeline'); if(_tl0) _tl0.classList.remove('show'); var _ss0=$('settingsSec'); if(_ss0) _ss0.classList.remove('show'); var _eh0=$('editVideoHeader'); if(_eh0) _eh0.classList.remove('show'); }catch(e){}
   var rb=$('btnResync'); if(rb) rb.disabled=true;
   $('resultBox').classList.remove('show'); var _ps0=$('previewSub'); if(_ps0) _ps0.classList.remove('show'); $('downloadWrap').innerHTML=''; $('resultArea').innerHTML=''; $('resultArea').classList.remove('show'); resultVideoEl=null;
@@ -1429,68 +1414,11 @@ function runAnalysis(){
       var standardPath=gateVerified>=0.10;
       var quietPath=gateVerified>=0.03&&isFinite(gateSpread)&&gateSpread<=0.05&&rawRatio>=1.3;
       if(!standardPath&&!quietPath){
-        log('Confidence gate: FAILED — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — neither standard (verified ≥ 0.10) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met — analysis FAILED; no result will be presented and no History version will be stored.');
+        log('Confidence gate: FAILED — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — neither standard (verified ≥ 0.10) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met — analysis FAILED; no result will be presented.');
         throw new Error('Sync analysis failed');
       }
       log('Confidence gate: accepted via '+(standardPath?'standard':'quiet-consistency')+' path — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — analysis accepted.');
       analysisState="done"; analysisVersion=ver;
-      // Restored-offset normalization (Question 3): if this detection is
-      // the re-upload that follows a no-source History restore, and the
-      // uploaded pair is the restored version's own file pair (its
-      // signature embeds both file keys), re-establish the position from
-      // the TRUE additional offset — (stashed effective − stashed
-      // detected) — over the NEW detected offset. The stashed effective
-      // value itself is never treated as an additional offset, so the
-      // detected offset cannot be double-applied (the −12.492 failure
-      // shape). When the entry's metadata carried no detected value,
-      // the true additional offset over THIS detection is (effective −
-      // new detected), which lands the position exactly on the restored
-      // effective offset. Either way the Additional offset input ends
-      // up holding the true additional offset once layoutTimeline syncs
-      // it below. The SAME match also carries the restored version's
-      // FULL remaining settings into the run — trim start/end, blend,
-      // and export quality — undoing handleFile's full-range trim
-      // reset, so the generation that follows runs with the restored
-      // version's settings intact (a restore promises its settings;
-      // re-uploading the sources to make it editable must not silently
-      // drop part of them). A stash for a DIFFERENT file pair is
-      // dropped: those files start fresh at the detected offset,
-      // additional 0, full-range trim, and the current blend/quality.
-      if(pendingRestoreCtx){
-        var prc=pendingRestoreCtx; pendingRestoreCtx=null;
-        var pairPrefix=fileKey(danceFile)+'|'+fileKey(songFile)+'|';
-        if(prc.sig&&prc.sig.indexOf(pairPrefix)===0){
-          var trueDelta=(prc.detected!=null)?(prc.eff-prc.detected):(prc.eff-detectedOffset);
-          audioPos=-(detectedOffset+trueDelta);
-          log('Restored offset context normalized after re-upload: re-detected offset '+detectedOffset.toFixed(3)+'s · restored version effective offset '+prc.eff.toFixed(3)+'s'+(prc.detected!=null?(' · its recorded detected offset '+prc.detected.toFixed(3)+'s'):' · its metadata carried no detected offset, derived against this detection')+' → additional offset '+(trueDelta>=0?'+':'')+trueDelta.toFixed(3)+'s, effective offset '+effOffset().toFixed(3)+'s. The detected offset is applied exactly once.');
-          // FULL-SETTINGS CARRY: the offset is only one of the restored
-          // version's settings. handleFile reset the trim to full
-          // range when the sources were re-uploaded; restore the
-          // version's trim (composed against the same base restore
-          // used), its blend, and its export quality, so the run that
-          // follows uses the restored settings in full. These are
-          // applied here — after detection, before any generation
-          // reads them — and from here on only a deliberate user edit
-          // changes them.
-          if(typeof prc.tStart==='number'&&isFinite(prc.tStart)&&typeof prc.tEnd==='number'&&isFinite(prc.tEnd)){
-            trimStartSec=(danceDur>0)?clamp(prc.tStart,0,Math.max(0,danceDur-0.5)):prc.tStart;
-            trimEndSec=(danceDur>0&&prc.tEnd>=danceDur-0.01)?null:prc.tEnd;
-            baseTrimStart=prc.tStart; baseTrimEnd=prc.tEnd;
-          }
-          if(typeof prc.blend==='number'&&isFinite(prc.blend)){
-            blendVal=prc.blend;
-            var blEl=$('blend'); if(blEl) blEl.value=Math.round(prc.blend*100);
-            var blVal=$('blendVal'); if(blVal) blVal.textContent=Math.round(prc.blend*100)+'%';
-          }
-          if(prc.q){
-            var qCarry=document.querySelector('input[name=quality][value="'+prc.q+'"]'); if(qCarry) qCarry.checked=true;
-            try{ updatePreviewSub(); }catch(e){}
-          }
-          log('Restored settings carried into the re-uploaded run: trim '+trimStartSec.toFixed(2)+'–'+trimEnd().toFixed(2)+'s · blend '+Math.round(blendVal*100)+'% · export quality '+(prc.q==='full'?'Full':(prc.q?prc.q+'p':'(unchanged)'))+' · additional offset '+(trueDelta>=0?'+':'')+trueDelta.toFixed(3)+'s — the restored version\'s FULL settings (trim, blend, export quality, additional offset, with the detected offset re-derived from this analysis and applied exactly once) carry into the next generation; only a deliberate edit from here changes them.');
-        } else {
-          log('Restored offset context dropped: the re-uploaded files are not the restored version\'s file pair — starting fresh at the detected offset (additional offset 0.000s), full-range trim, and the current blend/export quality; none of the restored version\'s settings carry over.');
-        }
-      }
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
       // The Preview block (header, subheading, player, Share/Download/Open)
       // is revealed ONLY by showResult, once a generation is fully complete
@@ -1518,7 +1446,7 @@ function pct(t){ var d=editorDur(); return d>0?(t/d*100):0; }
 function layoutTimeline(){
   var dur=editorDur();
   if(!dur){
-    // No duration from anywhere yet (no source loaded, nothing restored):
+    // No duration yet (no source loaded):
     // positioning is impossible, but never leave stale readouts behind.
     return;
   }
@@ -1532,7 +1460,7 @@ function layoutTimeline(){
   var sDur=editorSongDur();
   if(sDur>0){ block.style.display='block'; block.style.left=pct(audioPos)+'%'; block.style.width=(sDur/dur*100)+'%'; }
   else block.style.display='none';
-  $('trimRead').textContent=fmtTrimPoint(ts, baseTrimStart)+' – '+fmtTrimPoint(te, baseTrimEnd==null?danceDur:baseTrimEnd);
+  $('trimRead').textContent=fmtTrimPoint(ts)+' – '+fmtTrimPoint(te);
   $('offRead').textContent='Audio '+effOffset().toFixed(3)+'s';
   syncOffsetInput();
   try{ updateApplyEditsState(); }catch(e){}
@@ -1664,7 +1592,6 @@ function laneTime(clientX,lane){
 }
 function dragHandle(el,isLeft){
   el.addEventListener('pointerdown',function(e){
-    if(restoreNeedsSources) return; // timeline is display-only until the source files are re-uploaded
     e.preventDefault(); e.stopPropagation();
     try{ el.setPointerCapture(e.pointerId); }catch(err){}
     var lane=$('videoLane');
@@ -1683,7 +1610,6 @@ dragHandle($('hL'),true); dragHandle($('hR'),false);
 (function(){
   var block=$('audioBlock');
   block.addEventListener('pointerdown',function(e){
-    if(restoreNeedsSources) return; // timeline is display-only until the source files are re-uploaded
     e.preventDefault(); e.stopPropagation();
     try{ block.setPointerCapture(e.pointerId); }catch(err){}
     var lane=$('audioLane'), startX=e.clientX, startPos=audioPos, width=lane.getBoundingClientRect().width||1;
@@ -1737,13 +1663,12 @@ $('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.valu
 
 // ---------- Apply edits enablement + Preview subheading ----------
 // Apply edits is DISABLED whenever the editor's current settings exactly
-// match appliedSnapshot (the last applied/generated settings, or a
-// payload-restored version's settings). Any change — offset (incl. the
-// additional-offset delta, via effOffset), trim start/end, room-audio
-// blend, export quality — enables it; reverting every change back to the
-// snapshot disables it again. A successful apply updates the snapshot
-// (addHistory) and the button disables; it also stays disabled while a
-// generation run is in flight.
+// match appliedSnapshot (the last applied/generated settings). Any
+// change — offset (incl. the additional-offset delta, via effOffset),
+// trim start/end, room-audio blend, export quality — enables it;
+// reverting every change back to the snapshot disables it again. A
+// successful apply updates the snapshot (markApplied) and the button
+// disables; it also stays disabled while a generation run is in flight.
 function currentEditorSettings(){
   var qe=document.querySelector('input[name=quality]:checked');
   return {eff:effOffset(), tStart:trimStartSec, tEnd:trimEnd(), blend:blendVal, q:qe?qe.value:'full'};
@@ -1756,24 +1681,7 @@ function settingsMatchApplied(){
 function updateApplyEditsState(){
   var b=$('btnGenerate'); if(!b) return;
   var busy=false; try{ busy=!!(isGenerating||pipelineRunning); }catch(e){}
-  b.disabled = busy || restoreNeedsSources || !danceFile || !songFile || settingsMatchApplied();
-}
-// Post-reload History restore state: the restored version plays and its
-// real values are on display, but nothing on the timeline can be edited
-// until the source files exist again. Lock the timeline controls
-// (trim handles, audio-block drag, offset input/steppers, Re-sync),
-// keep Apply edits disabled (updateApplyEditsState), and show the one
-// plain note in the editor. Cleared as soon as a source file is picked
-// (handleFile resets the session) or on Start over.
-function setRestoreNeedsSources(on){
-  restoreNeedsSources=!!on;
-  var note=$('restoreNote'); if(note) note.classList.toggle('show',restoreNeedsSources);
-  var tl=$('timeline'); if(tl) tl.classList.toggle('locked',restoreNeedsSources);
-  var rb=$('btnResync'); if(rb) rb.disabled=restoreNeedsSources?true:rb.disabled;
-  var inp=$('offInput'); if(inp) inp.disabled=restoreNeedsSources;
-  var mn=$('offMinus'); if(mn) mn.disabled=restoreNeedsSources;
-  var pl=$('offPlus'); if(pl) pl.disabled=restoreNeedsSources;
-  try{ updateApplyEditsState(); }catch(e){}
+  b.disabled = busy || !danceFile || !songFile || settingsMatchApplied();
 }
 function updatePreviewSub(){
   var el=$('previewSub'); if(!el) return;
@@ -1806,9 +1714,72 @@ $('blend').addEventListener('change',invalidateDownload);
 function hashStr(str){ var h=5381; for(var i=0;i<str.length;i++){ h=((h<<5)+h+str.charCodeAt(i))|0; } return (h>>>0).toString(36); }
 var opfsRoot=null, opfsStaged={dance:null, song:null};
 function storageGetDirectoryType(){ try{ return typeof (navigator.storage&&navigator.storage.getDirectory); }catch(e){ return 'threw '+(e.message||e); } }
+// ---------- OPFS connection-loss recovery ----------
+// On the device failure this guards against, OPFS starts refusing EVERY
+// operation with UnknownError "Connection is lost" (getFileHandle inside
+// staging, stream-out, even a directory listing) and stays dead for the
+// rest of the session. Recovery: re-acquire the OPFS root directory
+// (navigator.storage.getDirectory()) and retry the failed operation
+// exactly ONCE. Both the failure and the recovery outcome are logged.
+function isOpfsConnectionError(e){
+  if(!e) return false;
+  var s=((e.name||'')+' '+((e.message!=null)?e.message:String(e)));
+  return /connection is lost/i.test(s);
+}
+async function opfsReacquireRoot(context){
+  try{
+    if(typeof navigator==='undefined'||!navigator.storage||typeof navigator.storage.getDirectory!=='function') return false;
+    opfsRoot=await navigator.storage.getDirectory();
+    if(opfsRoot) log('storage: OPFS root re-acquired ('+context+')');
+    return !!opfsRoot;
+  }catch(e){ log('storage: OPFS root re-acquire FAILED ('+context+'): '+(e.name||'Error')+': '+(e.message||e)); return false; }
+}
+async function opfsWithRecovery(label, fn){
+  try{ return await fn(); }
+  catch(e){
+    if(!isOpfsConnectionError(e)) throw e;
+    log('storage: OPFS operation "'+label+'" failed with a connection-class error: '+(e.name||'Error')+': '+(e.message||e)+' — attempting ONE recovery: re-acquire the OPFS root and retry the operation once');
+    var ok=await opfsReacquireRoot(label);
+    if(!ok) throw e;
+    try{
+      var v=await fn();
+      log('storage: OPFS operation "'+label+'" recovered — the retry succeeded after re-acquiring the root');
+      return v;
+    }catch(e2){
+      log('storage: OPFS operation "'+label+'" retry after root re-acquire FAILED: '+(e2.name||'Error')+': '+(e2.message||e2));
+      throw e2;
+    }
+  }
+}
+// ---------- one-time cleanup of the removed versioning feature ----------
+// Earlier builds persisted a History index + source-pair metadata in
+// localStorage and stored version videos / source files in OPFS under
+// 'versions/' and 'sources/'. Versioning no longer exists; on load this
+// build deletes any of that leftover data so existing users reclaim the
+// storage. Runs from storage detection (the localStorage part also runs
+// when OPFS is unavailable).
+var legacyLocalCleanupDone=false, legacyOpfsCleanupDone=false;
+async function cleanupLegacyVersioning(){
+  if(!legacyLocalCleanupDone){
+    legacyLocalCleanupDone=true;
+    var removed=[];
+    try{ if(localStorage.getItem('dance-sync.history-index.v1')!=null){ localStorage.removeItem('dance-sync.history-index.v1'); removed.push('History index'); } }catch(e){}
+    try{ localStorage.removeItem('dance-sync.history-index.v1.bak'); }catch(e){}
+    try{ if(localStorage.getItem('dance-sync.source-pair.v1')!=null){ localStorage.removeItem('dance-sync.source-pair.v1'); removed.push('source-pair metadata'); } }catch(e){}
+    if(removed.length) log('cleanup: versioning removed — deleted leftover localStorage data from previous builds ('+removed.join(', ')+').');
+  }
+  if(opfsRoot&&!legacyOpfsCleanupDone){
+    legacyOpfsCleanupDone=true;
+    var dirs=[];
+    try{ await opfsRoot.removeEntry('versions',{recursive:true}); dirs.push('versions/'); }catch(e){}
+    try{ await opfsRoot.removeEntry('sources',{recursive:true}); dirs.push('sources/'); }catch(e){}
+    if(dirs.length) log('cleanup: versioning removed — deleted leftover OPFS data from previous builds ('+dirs.join(', ')+'); storage reclaimed.');
+  }
+}
 async function detectStorageBackend(){
   if(diagStorage.detected) return diagStorage.opfsAvailable;
   diagStorage.detected=true;
+  cleanupLegacyVersioning();
   try{
     if(typeof navigator==='undefined'||!navigator.storage||typeof navigator.storage.getDirectory!=='function'){
       diagStorage.opfsAvailable=false; diagStorage.note='navigator.storage.getDirectory unavailable (typeof='+storageGetDirectoryType()+')';
@@ -1819,8 +1790,10 @@ async function detectStorageBackend(){
     opfsRoot=await navigator.storage.getDirectory();
     diagStorage.opfsAvailable=true; diagStorage.note='navigator.storage.getDirectory() resolved — OPFS available';
     log('storage: OPFS detected — inputs stage to OPFS files; render outputs stream to OPFS in chunks and are delivered from disk-backed Files');
+    await cleanupLegacyVersioning();
     await refreshStorageEstimate();
     await opfsStartupSweep();
+    await refreshOpfsAreas('boot');
     return true;
   }catch(e){
     diagStorage.opfsAvailable=false; diagStorage.note='getDirectory threw '+(e.name||'Error')+': '+(e.message||e);
@@ -1838,28 +1811,319 @@ async function refreshStorageEstimate(){
       log('storage: OPFS estimate usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'));
     }
   }catch(e){ log('storage: estimate failed: '+(e.message||e)); }
+  // Itemize by top-level area as well — called at boot and after each render.
+  try{ await refreshOpfsAreas('usage refresh'); }catch(e){}
 }
-async function opfsWriteChunked(name, data){
-  if(!opfsRoot) throw new Error('OPFS root unavailable');
-  var handle=await opfsRoot.getFileHandle(name,{create:true});
-  var writable=await handle.createWritable();
-  var CH=4*1024*1024;
+// ---------- OPFS storage itemization (diagnostics) ----------
+// Walk the OPFS root and total file sizes per TOP-LEVEL area: each
+// top-level directory (recursed) gets its own total, and files sitting
+// directly at the root are grouped as "(root files)". This is what makes
+// accumulated data visible — the plain usage estimate is one opaque
+// number that once hid ~34 GB nobody could attribute.
+async function opfsCollectEntries(dirHandle){
+  var out=[];
+  if(!dirHandle) return out;
+  if(typeof dirHandle.values==='function'){
+    for await (var h1 of dirHandle.values()){ if(h1) out.push(h1); }
+    return out;
+  }
+  if(typeof dirHandle.entries==='function'){
+    for await (var pair of dirHandle.entries()){ if(pair&&pair[1]) out.push(pair[1]); }
+    return out;
+  }
+  if(typeof dirHandle.keys==='function'){
+    for await (var nm of dirHandle.keys()){
+      try{ out.push(await dirHandle.getFileHandle(nm)); continue; }catch(e){}
+      try{ out.push(await dirHandle.getDirectoryHandle(nm)); }catch(e){}
+    }
+    return out;
+  }
+  return out;
+}
+async function opfsDirTotal(dirHandle){
+  var total=0, files=0;
+  var entries=await opfsCollectEntries(dirHandle);
+  for(var i=0;i<entries.length;i++){
+    var h=entries[i];
+    if(!h) continue;
+    if(h.kind==='file'){ try{ var f=await h.getFile(); if(f){ total+=f.size||0; files++; } }catch(e){} }
+    else if(h.kind==='directory'){ var sub=await opfsDirTotal(h); total+=sub.bytes; files+=sub.files; }
+  }
+  return {bytes:total, files:files};
+}
+async function opfsComputeAreas(){
+  if(!opfsRoot) return null;
+  return opfsWithRecovery('itemize OPFS storage', async function(){
+    var areas=[];
+    var rootBytes=0, rootFiles=0;
+    var entries=await opfsCollectEntries(opfsRoot);
+    for(var i=0;i<entries.length;i++){
+      var h=entries[i];
+      if(!h) continue;
+      if(h.kind==='directory'){ var t=await opfsDirTotal(h); areas.push({name:h.name+'/', bytes:t.bytes, files:t.files}); }
+      else if(h.kind==='file'){ try{ var f=await h.getFile(); if(f){ rootBytes+=f.size||0; rootFiles++; } }catch(e){} }
+    }
+    areas.push({name:'(root files)', bytes:rootBytes, files:rootFiles});
+    areas.sort(function(a,b){ return b.bytes-a.bytes; });
+    return areas;
+  });
+}
+async function refreshOpfsAreas(reason){
+  if(!opfsRoot||!diagStorage.opfsAvailable) return;
   try{
+    var areas=await opfsComputeAreas();
+    if(!areas) return;
+    var total=0; areas.forEach(function(a){ total+=a.bytes; });
+    diagStorage.areas=areas;
+    diagStorage.areasTotal=total;
+    var line=areas.map(function(a){ return a.name+' '+fmtBytesMB(a.bytes)+' ('+a.files+' file'+(a.files===1?'':'s')+')'; }).join(' · ');
+    diagStorage.areaNote=line;
+    log('storage: OPFS areas ('+reason+'): '+line+' | computed total '+fmtBytesMB(total));
+  }catch(e){
+    diagStorage.areaNote='itemization failed: '+(e.message||e);
+    log('storage: OPFS area itemization failed ('+reason+'): '+(e.message||e));
+  }
+}
+// ---------- OPFS writer worker (sync access handles) ----------
+// A dedicated worker owns ALL OPFS delivery/staging writes. The
+// previous FileSystemWritableFileStream path failed repeatedly in
+// the full-size rig ("AbortError: Failed to write data to data
+// pipe" on an early slice, and the recovery retry died with
+// InvalidStateError after a ~12 s stall because the failed stream's
+// file state/lock never cleanly released). Sync access handles
+// (only available in a dedicated worker) wrote 224 MB in ~0.5 s
+// with zero errors in an isolated experiment in the same browser.
+// Protocol: begin(filename) -> write(buffer)* (one in flight,
+// awaited ack) -> finish() {flush, close, verify size via getFile()}
+// or abort-delete(filename) {close handle awaited, removeEntry}.
+// On any worker-side error the handle is closed and the cached
+// root is dropped, so the next begin re-acquires a fresh root and
+// failures surface promptly — no stall against a stale lock.
+function opfsWriterWorkerMain(){
+  var root=null, fileHandle=null, syncHandle=null, currentName=null, offset=0;
+  function ensureRoot(){
+    if(root) return Promise.resolve(root);
+    return navigator.storage.getDirectory().then(function(r){ root=r; return r; });
+  }
+  self.onmessage=function(e){
+    var msg=e.data||{}, id=msg.id;
+    function ok(extra){ var m={id:id, ok:true, type:msg.type+'-ok'}; if(extra){ for(var k in extra) m[k]=extra[k]; } self.postMessage(m); }
+    function fail(err){
+      var en=(err&&err.name)||'Error', em=(err&&err.message)||String(err), es=(err&&err.stack)||'';
+      self.postMessage({id:id, ok:false, type:msg.type+'-error', error:{name:en, message:em, stack:es}, filename:currentName, offset:offset});
+    }
+    (async function(){
+      try{
+        if(msg.type==='begin'){
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0;
+          await ensureRoot();
+          fileHandle=await root.getFileHandle(msg.filename,{create:true});
+          syncHandle=await fileHandle.createSyncAccessHandle();
+          try{ syncHandle.truncate(0); }catch(_){}
+          offset=0; currentName=msg.filename;
+          ok({filename:currentName});
+        } else if(msg.type==='write'){
+          if(!syncHandle) throw new Error('OPFS writer worker: no sync access handle open for write');
+          var view=new Uint8Array(msg.buffer);
+          var writtenTotal=0;
+          while(writtenTotal<view.byteLength){
+            var part=view.subarray(writtenTotal);
+            // Pass a zero-offset view (copy only after a short write)
+            // so the write source is unambiguous in every engine.
+            var toWrite=(part.byteOffset===0&&part.byteLength===part.buffer.byteLength)?part:part.slice();
+            var n=syncHandle.write(toWrite,{at:offset+writtenTotal});
+            if(n==null||isNaN(n)) throw new Error('OPFS writer worker: sync handle write returned an invalid result');
+            if(n===0) throw new Error('OPFS writer worker: sync handle write returned 0 bytes');
+            writtenTotal+=n;
+          }
+          offset+=writtenTotal;
+          ok({offset:offset, written:writtenTotal});
+        } else if(msg.type==='finish'){
+          if(!syncHandle) throw new Error('OPFS writer worker: no sync access handle open for finish');
+          try{ syncHandle.flush(); }catch(_){}
+          var expected=offset;
+          try{ syncHandle.close(); }catch(_){}
+          syncHandle=null;
+          var finalSize=expected, fname=currentName;
+          if(fileHandle){ try{ var f=await fileHandle.getFile(); finalSize=f.size; }catch(_){} }
+          fileHandle=null; currentName=null; offset=0;
+          ok({size:finalSize, expected:expected, filename:fname});
+        } else if(msg.type==='abort-delete'){
+          var target=msg.filename||currentName;
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0;
+          var deleted=false, delErr=null;
+          if(target){
+            try{ await ensureRoot(); }catch(_){}
+            if(root){ try{ await root.removeEntry(target); deleted=true; }catch(de){ delErr=de; } }
+          }
+          if(msg.resetRoot) root=null;
+          ok({filename:target, deleted:deleted, deleteError:delErr?String(delErr.message||delErr):null});
+        } else if(msg.type==='abort'){
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0;
+          if(msg.resetRoot) root=null;
+          ok({});
+        } else if(msg.type==='reset'){
+          if(syncHandle){ try{ syncHandle.close(); }catch(_){} syncHandle=null; }
+          fileHandle=null; currentName=null; offset=0; root=null;
+          ok({});
+        } else if(msg.type==='ping'){
+          ok({pong:true});
+        } else {
+          throw new Error('OPFS writer worker: unknown message type '+msg.type);
+        }
+      }catch(err){
+        try{ if(syncHandle) syncHandle.close(); }catch(_){}
+        syncHandle=null; fileHandle=null; currentName=null; offset=0; root=null;
+        fail(err);
+      }
+    })();
+  };
+}
+var opfsWriterWorker=null, opfsWriterNextId=1, opfsWriterPending={};
+function opfsWriterEnsureWorker(){
+  if(opfsWriterWorker) return opfsWriterWorker;
+  var src='('+opfsWriterWorkerMain.toString()+')()';
+  var blob=new Blob([src],{type:'text/javascript'});
+  var url=URL.createObjectURL(blob);
+  var w=new Worker(url);
+  w.onmessage=function(e){
+    var m=e.data||{}, id=m.id;
+    var p=opfsWriterPending[id]; if(!p) return; delete opfsWriterPending[id];
+    if(m.ok){ p.resolve(m); }
+    else {
+      var err=new Error((m.error&&m.error.message)||'OPFS writer worker error');
+      err.name=(m.error&&m.error.name)||'Error';
+      if(m.error&&m.error.stack) err.stack=m.error.stack;
+      p.reject(err);
+    }
+  };
+  w.onerror=function(ev){
+    var err=new Error((ev&&ev.message)||'OPFS writer worker failed');
+    err.name='Error';
+    var pending=opfsWriterPending; opfsWriterPending={}; opfsWriterWorker=null;
+    Object.keys(pending).forEach(function(k){ try{ pending[k].reject(err); }catch(_){} });
+    try{ log('storage: OPFS writer worker error: '+(err.message||err)); }catch(_){}
+  };
+  opfsWriterWorker=w;
+  return w;
+}
+function opfsWriterSend(type, payload, transfer){
+  return new Promise(function(resolve, reject){
+    var w;
+    try{ w=opfsWriterEnsureWorker(); }catch(e){ reject(e); return; }
+    var id=opfsWriterNextId++;
+    opfsWriterPending[id]={resolve:resolve, reject:reject};
+    var msg={id:id, type:type};
+    if(payload){ for(var k in payload) msg[k]=payload[k]; }
+    try{
+      if(transfer&&transfer.length) w.postMessage(msg, transfer);
+      else w.postMessage(msg);
+    }catch(e){ delete opfsWriterPending[id]; reject(e); }
+  });
+}
+function opfsWriterExtractBuffer(u8){
+  if(!u8) return new ArrayBuffer(0);
+  if(u8.byteOffset===0&&u8.byteLength===u8.buffer.byteLength) return u8.buffer;
+  var copy=new Uint8Array(u8.byteLength); copy.set(u8); return copy.buffer;
+}
+async function opfsWriterBegin(filename){ return opfsWriterSend('begin',{filename:filename}); }
+async function opfsWriterFinish(){ return opfsWriterSend('finish',{}); }
+async function opfsWriterAbortDelete(filename, resetRoot){
+  try{ return await opfsWriterSend('abort-delete',{filename:filename, resetRoot:!!resetRoot}); }
+  catch(e){
+    try{ if(opfsRoot) await opfsRoot.removeEntry(filename); }catch(_){}
+    try{ if(opfsWriterWorker) opfsWriterWorker.terminate(); }catch(_){}
+    opfsWriterWorker=null; opfsWriterPending={};
+    return {deleted:false};
+  }
+}
+// Legacy helper retained for compatibility; the delivery and staging
+// write paths no longer use writable streams at all.
+async function opfsCloseWritableFully(writable){
+  if(!writable) return;
+  try{ await writable.abort(); }catch(_){}
+  try{ if(writable.closed) await writable.closed; }catch(_){}
+}
+async function opfsWriteChunkedOnce(name, data){
+  if(!opfsRoot) throw new Error('OPFS root unavailable');
+  var CH=4*1024*1024;
+  var t0=Date.now();
+  try{
+    await opfsWriterBegin(name);
     if(data instanceof Blob){
       for(var boff=0; boff<data.size; boff+=CH){
-        var chunk=await data.slice(boff, Math.min(data.size, boff+CH)).arrayBuffer();
-        await writable.write(chunk);
+        var chunkBuf=await data.slice(boff, Math.min(data.size, boff+CH)).arrayBuffer();
+        if(!chunkBuf.byteLength) continue;
+        await opfsWriterSend('write',{buffer:chunkBuf},[chunkBuf]);
       }
-    } else if(data && data.length!=null){
-      for(var off=0; off<data.length; off+=CH){ await writable.write(data.subarray(off, Math.min(data.length, off+CH))); }
-    } else { await writable.write(data); }
-    await writable.close();
-  }catch(e){ try{ await writable.abort(); }catch(_){} throw e; }
-  return await handle.getFile();
+    } else if(data && data.length!=null && typeof data.subarray==='function'){
+      for(var off=0; off<data.length; off+=CH){
+        var part=data.subarray(off, Math.min(data.length, off+CH));
+        var buf=opfsWriterExtractBuffer(part);
+        await opfsWriterSend('write',{buffer:buf},[buf]);
+      }
+    } else if(data instanceof ArrayBuffer){
+      if(data.byteLength) await opfsWriterSend('write',{buffer:data},[data]);
+    } else if(data && data.buffer){
+      var singleBuf=opfsWriterExtractBuffer(data);
+      await opfsWriterSend('write',{buffer:singleBuf},[singleBuf]);
+    } else {
+      throw new Error('OPFS writer worker: unsupported data type for sync-access-handle write');
+    }
+    var fin=await opfsWriterFinish();
+    log('storage: OPFS write of '+name+' via sync-access-handle writes completed ('+fmtBytesMB(fin.size)+' in '+(Date.now()-t0)+' ms) — writer worker flush + close, final size verified from getFile()');
+    var handle=await opfsRoot.getFileHandle(name);
+    var file=await handle.getFile();
+    if(fin.size!=null&&file.size!==fin.size) log('storage: OPFS write size verification mismatch for '+name+': worker reported '+fmtBytesMB(fin.size)+', main getFile() reports '+fmtBytesMB(file.size));
+    return file;
+  }catch(e){
+    try{ await opfsWriterAbortDelete(name, true); }catch(_){}
+    throw e;
+  }
+}
+async function opfsWriteChunked(name, data){
+  // One attempt, then — for connection-class failures only — ONE
+  // recovery: re-acquire the OPFS root and retry once. Ordering on
+  // failure is strict: opfsWriteChunkedOnce has already closed the
+  // failed sync access handle (awaited inside the writer worker)
+  // and deleted the partial file via removeEntry; here the partial
+  // file deletion is re-asserted before the retry touches storage,
+  // so the retry never writes against a stale handle or locked path.
+  // Callers keep their own graceful fallback if it still fails.
+  try{ return await opfsWriteChunkedOnce(name, data); }
+  catch(e){
+    try{ if(opfsRoot) await opfsRoot.removeEntry(name); log('storage: OPFS write of '+name+' failed — partial file deleted before any retry'); }catch(_){}
+    if(!isOpfsConnectionError(e)) throw e;
+    log('storage: OPFS operation "write OPFS file '+name+'" failed with a connection-class error: '+(e.name||'Error')+': '+(e.message||e)+' — attempting ONE recovery: re-acquire the OPFS root and retry the operation once');
+    var ok=await opfsReacquireRoot('write OPFS file '+name);
+    if(!ok) throw e;
+    try{
+      var v=await opfsWriteChunkedOnce(name, data);
+      log('storage: OPFS operation "write OPFS file '+name+'" recovered — the retry succeeded after re-acquiring the root');
+      return v;
+    }catch(e2){
+      log('storage: OPFS operation "write OPFS file '+name+'" retry after root re-acquire FAILED: '+(e2.name||'Error')+': '+(e2.message||e2));
+      try{ if(opfsRoot) await opfsRoot.removeEntry(name); }catch(_){}
+      throw e2;
+    }
+  }
 }
 async function opfsDelete(name){
   if(!opfsRoot||!name) return;
-  try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name); }catch(e){}
+  try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name); }
+  catch(e){
+    if(isOpfsConnectionError(e)){
+      log('storage: OPFS delete of '+name+' failed with a connection-class error: '+(e.message||e)+' — attempting one recovery (re-acquire root + retry once)');
+      var ok=await opfsReacquireRoot('delete '+name);
+      if(ok){
+        try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name+' (delete recovered after root re-acquire)'); }
+        catch(e2){ log('storage: OPFS delete retry for '+name+' FAILED: '+(e2.message||e2)); }
+      }
+    }
+  }
 }
 // ---------- OPFS hygiene (startup sweep + post-render cleanup) ----------
 // Staged files all live at the OPFS root with recognizable names: staged
@@ -1875,25 +2139,25 @@ function opfsIsStagedName(name){
   return /^input-(dance|song)-/.test(name)||/^proxy-.+\.mp4$/i.test(name)||/^export-.+\.mp4$/i.test(name);
 }
 async function opfsListEntries(){
-  var out=[];
-  if(!opfsRoot) return out;
+  if(!opfsRoot) return [];
   try{
-    if(typeof opfsRoot.values==='function'){
-      for await (var handle of opfsRoot.values()){ if(handle) out.push(handle); }
-      return out;
-    }
-    if(typeof opfsRoot.entries==='function'){
-      for await (var pair of opfsRoot.entries()){ if(pair&&pair[1]) out.push(pair[1]); }
-      return out;
-    }
-    if(typeof opfsRoot.keys==='function'){
-      for await (var name of opfsRoot.keys()){
-        try{ out.push(await opfsRoot.getFileHandle(name)); }catch(e){}
+    return await opfsCollectEntries(opfsRoot);
+  }catch(e){
+    if(isOpfsConnectionError(e)){
+      log('storage: OPFS directory listing failed with a connection-class error: '+(e.message||e)+' — attempting one recovery (re-acquire root + retry once)');
+      var ok=await opfsReacquireRoot('directory listing');
+      if(ok){
+        try{
+          var again=await opfsCollectEntries(opfsRoot);
+          log('storage: OPFS directory listing recovered — retry succeeded after re-acquiring the root');
+          return again;
+        }catch(e2){ log('storage: OPFS directory listing retry FAILED: '+(e2.message||e2)); }
       }
-      return out;
+    } else {
+      log('storage: OPFS directory listing failed: '+(e.message||e));
     }
-  }catch(e){ log('storage: OPFS directory listing failed: '+(e.message||e)); }
-  return out;
+    return [];
+  }
 }
 async function opfsSweepStale(keepNames, reason){
   if(!opfsRoot) return {removed:0, bytes:0};
@@ -1903,10 +2167,11 @@ async function opfsSweepStale(keepNames, reason){
   var removed=0, bytes=0;
   for(var i=0;i<entries.length;i++){
     var h=entries[i];
-    // The 'versions' namespace (a directory holding stored History videos)
-    // is EXEMPT from every sweep — version payloads must survive renders,
-    // Start over, and the startup cleanup of previous sessions' files.
-    if(!h||h.name==='versions'||h.kind!=='file'||!opfsIsStagedName(h.name)) continue;
+    // Only staged FILES are swept — directories are never touched here
+    // (the leftover 'versions/' and 'sources/' directories from the
+    // removed versioning feature are deleted once by
+    // cleanupLegacyVersioning before this sweep runs).
+    if(!h||h.kind!=='file'||!opfsIsStagedName(h.name)) continue;
     if(keepNames&&keepNames[h.name]) continue;
     try{ var f=await h.getFile(); if(f) bytes+=f.size||0; }catch(e){}
     try{ await opfsRoot.removeEntry(h.name); removed++; }catch(e){}
@@ -1959,7 +2224,14 @@ async function getInputFileForRender(which){
   var orig=(which==='dance')?danceFile:songFile;
   var st=opfsStaged[which];
   if(diagStorage.opfsAvailable&&opfsRoot&&st&&orig&&st.key===fileKey(orig)){
-    try{ var handle=await opfsRoot.getFileHandle(st.name); var f=await handle.getFile(); if(f&&f.size===orig.size) return f; }catch(e){ log('storage: OPFS staged input read failed ('+(e.message||e)+') — using the in-memory File'); }
+    try{
+      var f=await opfsWithRecovery('read staged OPFS input '+st.name, async function(){
+        var handle=await opfsRoot.getFileHandle(st.name);
+        return await handle.getFile();
+      });
+      if(f&&f.size===orig.size) return f;
+      if(f) log('storage: OPFS staged input '+st.name+' size mismatch ('+f.size+' vs '+orig.size+') — using the in-memory File');
+    }catch(e){ log('storage: OPFS staged input read failed ('+(e.message||e)+') — using the in-memory File'); }
   }
   return orig;
 }
@@ -2514,9 +2786,9 @@ async function tryWebCodecsProxy(ctx){
     var muxRc=null;
     await cancellable(withFFmpegLock(async function(){ muxRc=await withTimeout(ctx.ff.exec(mArgs),600000,'WebCodecs proxy final mux'); }));
     if(muxRc!=null&&muxRc!==0) throw wcFail('the final stream-copy mux failed (ffmpeg exit code '+muxRc+')');
-    var chk=null; try{ chk=await ctx.ff.readFile('dance-synced.mp4'); }catch(e){}
-    if(!chk||!chk.length) throw wcFail('the final stream-copy mux produced no output');
-    chk=null;
+    var chkThere=false;
+    try{ var chkDir=await ctx.ff.listDir('/'); for(var chi=0; chi<chkDir.length; chi++){ if(chkDir[chi]&&chkDir[chi].name==='dance-synced.mp4'){ chkThere=true; break; } } }catch(e){ chkThere=true; }
+    if(!chkThere) throw wcFail('the final stream-copy mux produced no output');
     try{ await ctx.ff.deleteFile('stage1-audio.m4a'); stage1Made=false; }catch(e){}
     try{ await ctx.ff.deleteFile('proxy-video-wc.mp4'); wcVideoMade=false; }catch(e){}
     timings.muxMs=Date.now()-mT0;
@@ -2557,23 +2829,253 @@ async function freeConverterInputs(ff, dExt, sExt){
   log('memory: inputs freed ('+(freedBytes/1048576).toFixed(1)+' MB)');
   return freedBytes;
 }
+// ---------- slice-streamed render-output delivery (converter FS → OPFS) ----------
+// The old read-out materialized the ENTIRE output as one JS Uint8Array
+// (ff.readFile) and only then chunk-wrote it to OPFS — for a ~290 MB
+// output that full in-memory copy (plus the giant fallback blob when
+// OPFS failed) is what killed delivery on iOS: the stream-out stalled
+// ~24 s and died, OPFS then refused every later operation with
+// "Connection is lost", and Safari's player rejected the fallback blob
+// (video error code 4), leaving a dead placeholder while the app said
+// Done. Delivery is now sliced end to end via sync-access-handle
+// writes in a dedicated writer worker (see opfsWriterWorkerMain):
+// the writable-STREAM path failed repeatedly in the full-size rig
+// (AbortError on the data pipe; the recovery retry then died with
+// InvalidStateError after a ~12 s stall on the failed stream's
+// stale lock), while sync handles wrote 224 MB in ~0.5 s cleanly.
+//   1. ffmpeg extracts ONE byte slice (≤16 MB) of the output into a
+//      small slice file — the subfile protocol serves the exact byte
+//      range [start,end) of the converter-FS file as a raw data stream
+//      and a stream copy writes it out untouched (byte-exact);
+//   2. the slice file is read (≤16 MB in JS memory), its buffer is
+//      transferred to the writer worker, and the worker's ack is
+//      awaited before the next slice is even extracted — STRICTLY
+//      SERIALIZED, exactly one slice in flight. In the worker each
+//      slice is written with handle.write(buffer, {at: offset}),
+//      looping over short writes, then flush() once at the end,
+//      close(), and the final size verified from getFile();
+//   3. the delivered result IS the resulting OPFS File — Preview,
+//      Share, Download and Open all serve from it.
+// Peak extra JS memory during delivery is ~one slice, independent of
+// the output size. The full output never exists as a JS buffer.
+// Recovery from a mid-write failure: (a) the sync handle is closed
+// (awaited, inside the worker) before anything else happens; (b) the
+// partial output file is deleted via removeEntry; (c) the ONE retry
+// restarts into a NEW, distinct filename with fresh handles — never
+// the failed attempt's path — so it surfaces promptly with no stall
+// against a stale lock; (d) only the successful attempt's file
+// becomes the delivered result.
+var OPFS_SLICE_BYTES=16*1024*1024;
+var LARGE_OUTPUT_BYTES=100*1024*1024; // above this, a failed OPFS delivery must NOT fall back to a whole-output in-memory blob
+function makeDeliveryError(totalBytes, cause){
+  var e=new Error('OPFS delivery failed for a '+fmtBytesMB(totalBytes)+' output: '+((cause&&cause.message)||cause||'unknown error'));
+  e.deliveryFailure=true;
+  e.totalBytes=totalBytes;
+  e.userMessage='Your video was created, but it could not be saved on this device. Close and reopen your browser, then try again.';
+  return e;
+}
+async function extractOutputSlice(ff, fsOutName, start, end){
+  // Byte-exact slice [start,end) of fsOutName, via the subfile protocol
+  // + raw data stream copy. Returns a Uint8Array of at most (end-start)
+  // bytes (shorter at EOF, empty past EOF). Never holds more than one
+  // slice in JS memory.
+  var sliceName='out-slice.bin';
+  var url='subfile,,start,'+start+',end,'+end+',,:'+fsOutName;
+  var args=['-y','-protocol_whitelist','file,subfile,data,crypto','-f','data','-i',url,'-map','0','-c','copy','-f','data',sliceName];
+  var rc=null, execErr=null;
+  try{
+    await withFFmpegLock(async function(){ rc=await withTimeout(ff.exec(args),120000,'Extracting output slice at byte '+start); });
+  }catch(e){ execErr=e; }
+  var data=null;
+  try{ data=await ff.readFile(sliceName); }catch(e){ data=null; }
+  try{ await ff.deleteFile(sliceName); }catch(e){}
+  if(execErr) throw execErr;
+  if(rc!=null&&rc!==0){
+    // A nonzero exit with an empty/missing slice file at a nonzero
+    // offset is how ffmpeg reports a range starting at/past EOF (the
+    // subfile stream is empty and the data muxer has no stream) —
+    // treat it as a clean EOF, not an error.
+    if(start>0&&(!data||!data.length)) return new Uint8Array(0);
+    var serr=new Error('output slice extraction failed at byte '+start+' (ffmpeg exit code '+rc+')');
+    serr.slicerError=true;
+    throw serr;
+  }
+  if(!data) { var nerr=new Error('output slice extraction produced no data at byte '+start); nerr.slicerError=true; throw nerr; }
+  return data;
+}
+async function measureConverterFileSize(ff, fsOutName){
+  // Exact output size, measured by extracting slices and discarding
+  // them (bounded memory — one slice at a time). Used only on the
+  // delivery-failure path, to decide whether the in-memory fallback is
+  // allowed (≤100 MB) or the run must end as a handled delivery failure.
+  var total=0;
+  while(true){
+    var slice=await extractOutputSlice(ff, fsOutName, total, total+OPFS_SLICE_BYTES);
+    var n=slice?(slice.length||slice.byteLength||0):0;
+    slice=null;
+    if(n===0) break;
+    total+=n;
+    if(n<OPFS_SLICE_BYTES) break;
+  }
+  return total;
+}
+async function estimateConverterFileSize(ff, fsOutName){
+  // Fallback size estimate (duration × bitrate from ffmpeg's own probe
+  // of the output) for when slice extraction itself is unavailable.
+  try{
+    await withFFmpegLock(async function(){ await withTimeout(ff.exec(['-y','-i',fsOutName,'-map','0','-c','copy','-f','null','size-probe.out']),120000,'Probing output size'); });
+  }catch(e){}
+  try{ await ff.deleteFile('size-probe.out'); }catch(e){}
+  for(var i=diagEntries.length-1;i>=Math.max(0,diagEntries.length-80);i--){
+    var m=/Duration:\s*(\d+):(\d+):([\d.]+).*?bitrate:\s*(\d+)\s*kb\/s/.exec(diagEntries[i]);
+    if(m){
+      var dur=(+m[1])*3600+(+m[2])*60+(+m[3]);
+      var bps=(+m[4])*1000;
+      if(dur>0&&bps>0) return Math.round(dur*bps/8);
+    }
+  }
+  return null;
+}
+function opfsAttemptFileName(baseName, attempt){
+  // Attempt 1 keeps the requested name; every recovery attempt gets a
+  // NEW, distinct filename (export-<hash>.mp4 → export-<hash>-r2.mp4)
+  // so a retry never reuses the failed attempt's path or any state
+  // cached against it. The '-rN' name still matches the staged-output
+  // sweep patterns, so a leftover retry file is cleaned up normally.
+  if(attempt<=1) return baseName;
+  var dot=baseName.lastIndexOf('.');
+  if(dot>0) return baseName.slice(0,dot)+'-r'+attempt+baseName.slice(dot);
+  return baseName+'-r'+attempt;
+}
+async function streamRenderOutputToOpfs(ff, fsOutName, opfsName){
+  // Streams the converter-FS output into an OPFS file slice by slice
+  // via the writer worker's sync access handles, and returns
+  // {file, totalBytes, opfsName} — opfsName is the file the SUCCESSFUL
+  // attempt wrote, which is the only file that becomes the delivered
+  // result. The main thread extracts one ≤16 MB slice, transfers its
+  // buffer to the worker, and awaits the worker's ack before
+  // extracting the next — exactly one slice in flight. In the worker:
+  // getDirectory, getFileHandle (create), createSyncAccessHandle,
+  // per-slice handle.write(buffer, {at: offset}) looping over short
+  // writes, flush() once at the end, close(), final size from
+  // getFile(). On a write failure: (a) close the sync handle
+  // (awaited in the worker); (b) removeEntry the partial file;
+  // (c) on the first failure only, re-acquire the OPFS root and
+  // restart from slice 0 into a NEW distinct filename with fresh
+  // handles. Failures surface promptly — no writable-stream lock to
+  // stall against. (Slicer errors are not retried this way:
+  // re-acquiring the storage root cannot fix the converter, and the
+  // caller handles them via size-based fallback.)
+  var attempt=0;
+  while(true){
+    attempt++;
+    var attemptName=opfsAttemptFileName(opfsName, attempt);
+    var total=0;
+    var deliveryT0=Date.now();
+    try{
+      await opfsWriterBegin(attemptName);
+      log('storage: streaming render output '+fsOutName+' → OPFS file '+attemptName+' (attempt '+attempt+') via sync-access-handle writes in slices of at most '+(OPFS_SLICE_BYTES/1048576)+' MB — dedicated writer worker (getDirectory, getFileHandle, createSyncAccessHandle, positional handle.write per slice); strictly serialized: extract one slice, transfer its buffer to the worker, await its ack, release the slice, repeat; the full output is never held in JS memory');
+      while(true){
+        var start=total;
+        var slice=await extractOutputSlice(ff, fsOutName, start, start+OPFS_SLICE_BYTES);
+        var n=slice?(slice.length||slice.byteLength||0):0;
+        if(n===0){ slice=null; break; }
+        var buf=opfsWriterExtractBuffer(slice);
+        slice=null;
+        await opfsWriterSend('write',{buffer:buf},[buf]);
+        total+=n;
+        log('storage: OPFS delivery via sync-access-handle writes — slice @'+start+' written and acked by writer worker ('+fmtBytesMB(total)+' delivered so far)');
+        if(n<OPFS_SLICE_BYTES) break; // short slice = EOF
+      }
+      var fin=await opfsWriterFinish();
+      var deliveryMs=Date.now()-deliveryT0;
+      if(fin.size!=null&&fin.size!==total) log('storage: OPFS delivery via sync-access-handle writes — size check: wrote '+fmtBytesMB(total)+' but the OPFS file reports '+fmtBytesMB(fin.size)+' (worker getFile() verification)');
+      var handle=await opfsRoot.getFileHandle(attemptName);
+      var file=await handle.getFile();
+      if(file.size!==total) log('storage: OPFS delivery via sync-access-handle writes — size check: wrote '+fmtBytesMB(total)+' but the main-thread getFile() reports '+fmtBytesMB(file.size));
+      log('storage: OPFS delivery via sync-access-handle writes complete — '+attemptName+' ('+fmtBytesMB(total)+') delivered in '+Math.max(1,Math.ceil(total/OPFS_SLICE_BYTES))+' slice(s); total delivery time '+deliveryMs+' ms; peak extra JS memory ≈ one slice');
+      return {file:file, totalBytes:total, opfsName:attemptName};
+    }catch(err){
+      // (a)+(b) Close the sync handle (awaited inside the worker)
+      // and removeEntry the partial file of THIS attempt — the retry
+      // must not inherit a partial file or a stale handle.
+      var slicerFailed=!!(err&&err.slicerError);
+      try{
+        await opfsWriterAbortDelete(attemptName, true);
+        log('storage: OPFS stream-out attempt '+attempt+' — sync handle closed and partial file '+attemptName+' deleted');
+      }catch(delErr){ log('storage: OPFS stream-out attempt '+attempt+' — deleting the partial file '+attemptName+' failed: '+(delErr.message||delErr)); }
+      if(slicerFailed){
+        // The converter failed, not the writer worker: the handle
+        // was still closed and the partial removed above; do not
+        // retry the stream-out — the caller handles slicer errors.
+        try{ if(opfsRoot) await opfsRoot.removeEntry(attemptName); }catch(_){}
+        throw err;
+      }
+      log('storage: OPFS stream-out attempt '+attempt+' failed after '+fmtBytesMB(total)+' delivered via sync-access-handle writes: '+(err.name||'Error')+': '+(err.message||err)+(isOpfsConnectionError(err)?' (connection-class error)':''));
+      if(attempt===1){
+        // (c) Restart into a NEW distinct filename (the next loop
+        // iteration derives it via opfsAttemptFileName) with fresh
+        // handles — nothing from this failed attempt is reused, and
+        // the worker dropped its cached root in abort-delete, so
+        // the retry re-acquires fresh state with no ~12 s stall.
+        log('storage: OPFS stream-out — attempting ONE recovery: re-acquire the OPFS root and restart the stream-out once into a NEW filename ('+opfsAttemptFileName(opfsName, 2)+') via sync-access-handle writes');
+        var reacq=await opfsReacquireRoot('stream-out recovery for '+opfsName);
+        if(reacq) continue;
+        log('storage: OPFS stream-out recovery impossible — the root could not be re-acquired');
+      }
+      err.streamBytesDelivered=total;
+      throw err;
+    }
+  }
+}
 async function readRenderOutput(ff, fsOutName, opfsName){
-  var data=await ff.readFile(fsOutName); if(!data||!data.length) throw new Error('Empty output file.');
-  var bytes=data.length||data.byteLength||0;
   if(diagStorage.opfsAvailable&&opfsName){
     try{
-      var file=await opfsWriteChunked(opfsName, data);
-      try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+') after streaming it to OPFS'); }catch(delErr){ log('memory: FS output delete after OPFS stream failed: '+(delErr.message||delErr)); }
-      log('memory: output streamed out of the converter into OPFS file '+opfsName+' in chunks ('+fmtBytesMB(bytes)+') — delivered from the disk-backed File; no additional full in-RAM blob copy built, readFile bytes reference dropped');
-      data=null;
-      await opfsCleanupAfterRender(opfsName);
-      return {blob:file, backend:'OPFS', opfsName:opfsName};
-    }catch(e){ logError('opfs-stream-output',e); log('OPFS stream-out failed — falling back to an in-memory blob for this output (storage: fallback=MEMFS)'); }
+      var res=await streamRenderOutputToOpfs(ff, fsOutName, opfsName);
+      if(!res.totalBytes) throw new Error('Empty output file.');
+      // Only the SUCCESSFUL attempt's file (res.opfsName — a recovery
+      // retry writes to a new distinct name) becomes the delivered
+      // result; failed attempts' partials were already deleted inside
+      // the stream-out.
+      try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(res.totalBytes)+') after slice-streaming it to OPFS'); }catch(delErr){ log('memory: FS output delete after OPFS stream failed: '+(delErr.message||delErr)); }
+      log('memory: output delivered from the disk-backed OPFS file '+res.opfsName+' ('+fmtBytesMB(res.totalBytes)+') — slice-streamed; no full in-memory copy was built at any point');
+      // Post-render cleanup keeps the current result's delivered file
+      // (res.opfsName) and removes staged inputs + superseded outputs.
+      await opfsCleanupAfterRender(res.opfsName);
+      return {blob:res.file, backend:'OPFS', opfsName:res.opfsName};
+    }catch(streamErr){
+      logError('opfs-stream-output', streamErr);
+      // Delivery to OPFS failed (after the one recovery retry). Decide
+      // by the output's exact size: >100 MB must NOT fall back to
+      // holding the whole output as an in-memory blob — that path gets
+      // the tab killed or produces an unplayable player on iOS.
+      var totalBytes=null;
+      if(!(streamErr&&streamErr.slicerError)){
+        try{ totalBytes=await measureConverterFileSize(ff, fsOutName); }
+        catch(mErr){ log('storage: measuring the output size after the delivery failure failed: '+(mErr.message||mErr)); }
+      }
+      if(totalBytes===0) totalBytes=null; // a zero measure means the size is unknown (or the output is genuinely empty — the read below reports that), not that it is small
+      if(totalBytes==null){
+        try{ totalBytes=await estimateConverterFileSize(ff, fsOutName); if(totalBytes!=null) log('storage: output size after the delivery failure estimated at '+fmtBytesMB(totalBytes)+' (duration × bitrate probe — slice measurement unavailable)'); }
+        catch(e){}
+      }
+      if(totalBytes!=null&&totalBytes>LARGE_OUTPUT_BYTES){
+        log('storage: OPFS delivery failed for a '+fmtBytesMB(totalBytes)+' output (over the ~100 MB in-memory fallback limit) — NOT falling back to a whole-output in-memory blob; ending the run as a handled delivery failure');
+        try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(totalBytes)+') after the handled delivery failure'); }catch(e){}
+        await opfsCleanupAfterRender(null);
+        throw makeDeliveryError(totalBytes, streamErr);
+      }
+      if(totalBytes!=null) log('OPFS stream-out failed — the output is '+fmtBytesMB(totalBytes)+' (≤ ~100 MB), so the in-memory blob fallback may be used for this output (storage: fallback=MEMFS)');
+      else log('OPFS stream-out failed and the output size could not be determined — falling back to an in-memory blob for this output (storage: fallback=MEMFS)');
+    }
   }
-  // No staged output for this render (stream-out failed or OPFS off):
-  // still clear this render's staged inputs and any superseded staged
+  // In-memory path: OPFS unavailable (the pre-existing MEMFS behavior),
+  // or OPFS delivery failed for an output ≤ ~100 MB (fallback above).
+  // Still clear this render's staged inputs and any superseded staged
   // outputs so stale files never accumulate across renders.
   await opfsCleanupAfterRender(null);
+  var data=await ff.readFile(fsOutName); if(!data||!data.length) throw new Error('Empty output file.');
+  var bytes=data.length||data.byteLength||0;
   try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+')'); }catch(delOutErr){ log('memory: FS output delete failed: '+(delOutErr.message||delOutErr)); }
   log('memory: output read ('+(bytes/1048576).toFixed(1)+' MB), FS copy deleted');
   var blob=new Blob([data],{type:'video/mp4'});
@@ -2867,7 +3369,7 @@ async function ensureExport(action){
   // them) so a cached export's Share keeps its transient user activation:
   // navigator.share() is effectively the first real action of the tap.
   if(isGenerating||pipelineRunning){ log('Export tap ('+action+') while the proxy is still generating — ignored until generation finishes.'); showError('Still generating the preview — Share/Download/Open will export once it finishes.'); return; }
-  if(!danceFile||!songFile){ log('Export tap ('+action+') with no source files loaded (e.g. a History preview restored after Start over) — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files (History previews are kept).'); return; }
+  if(!danceFile||!songFile){ log('Export tap ('+action+') with no source files loaded — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files.'); return; }
   if(isExporting){ pendingExportAction=action; log('Export already processing — the pending action is now '+action+'.'); return; }
   var sig=currentExportSignature();
   if(liveExport&&liveExport.sig===sig){ performExportAction(action); return; }
@@ -2885,6 +3387,13 @@ async function ensureExport(action){
     if(act) performExportAction(act);
   }catch(err){
     if(isExportCancelErr(err)||tok!==exportToken){ log('Export processing cancelled.'); }
+    else if(err&&err.deliveryFailure){
+      // Handled delivery failure — see doGenerate: one plain error, no
+      // dead result UI, journal marked finished/handled.
+      log('Delivery failed (handled): '+(err.message||err));
+      showError('❌ '+err.userMessage);
+      try{ journalMarkHandledError(); }catch(e){}
+    }
     else { console.error(err); logError('export',err); log('❌ Export failed: '+(err.message||err)); showError('❌ Export failed: '+(err.message||err)); try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     isExporting=false; ffmpegProgressCb=null;
@@ -2901,7 +3410,7 @@ try{ var _ebc=$('btnExportCancel'); if(_ebc) _ebc.addEventListener('click', func
   showExportProgress(false);
 }); }catch(e){ try{ logError('export-cancel-wiring',e); }catch(_){} }
 
-// ---------- output cache + history ----------
+// ---------- output cache ----------
 // PROXY outputs are cached keyed by the settings signature (both files +
 // trim + effective offset + blend + the fixed proxy kind — export quality
 // is NOT part of it, since the proxy is always 480p), so re-generating
@@ -2912,7 +3421,7 @@ try{ var _ebc=$('btnExportCancel'); if(_ebc) _ebc.addEventListener('click', func
 // OPFS file they held.
 var MAX_OUTPUTS=6;
 var MAX_CACHE_BYTES=600*1024*1024;
-var outCache=new Map(), outOrder=[], historyEntries=[], resultURL=null;
+var outCache=new Map(), outOrder=[], resultURL=null;
 function cacheTotalBytes(){ var t=0; outCache.forEach(function(e){ if(e&&e.blob&&e.blob.size) t+=e.blob.size; }); return t; }
 function settingsSignature(q,tStart,tEnd,eff,blend){
   return fileKey(danceFile)+'|'+fileKey(songFile)+'|'+tStart.toFixed(3)+'|'+tEnd.toFixed(3)+'|'+eff.toFixed(3)+'|'+blend.toFixed(2)+'|'+q;
@@ -2929,13 +3438,9 @@ function cachePut(sig,entry){
     // in showResult — never revoke the live resultURL for an old entry).
     if(oe&&oe.url){ try{ URL.revokeObjectURL(oe.url); }catch(e){} oe.url=null; }
     if(oe&&oe.opfsName){ opfsDelete(oe.opfsName); oe.opfsName=null; }
-    // An entry whose video also lives in the OPFS versions store stays
-    // restorable even when its in-memory cache payload is evicted.
-    historyEntries.forEach(function(h){ if(h.sig===old&&!payloadPathOf(h)) h.available=false; });
     evictedAny=true;
     log('Cache eviction — evicted oldest output ('+(oe?fmtSize(oe.blob.size):'?')+') | reason: '+(outOrder.length>=MAX_OUTPUTS?'count cap '+MAX_OUTPUTS:'byte cap '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB')+' | cache now holds '+outCache.size+' entries, '+fmtBytesMB(cacheTotalBytes())+' total: '+outOrder.map(function(k){ var e=outCache.get(k); return e?fmtSize(e.blob.size):'?'; }).join(', '));
   }
-  if(evictedAny) renderHistory();
 }
 function cacheGet(sig){
   var e=outCache.get(sig); if(!e) return null;
@@ -3080,8 +3585,8 @@ function showResult(blob, opts){
   var openA=document.createElement('a'); openA.className='saveBtn'; openA.setAttribute('role','button'); openA.innerHTML=ICON_OPEN+'<span>Open</span>'; // deliberately NO href/target: Open must never navigate the page to a blob URL — its click presents the Preview video fullscreen (openResultFullscreen)
   shareBtnEl=shareBtn; dlAnchorEl=dl; openAnchorEl=openA;
   // If an export for exactly these settings + the selected Export quality
-  // is already cached (e.g. a restored History version), point the links
-  // at it immediately so the buttons deliver it with no re-render.
+  // is already cached, point the links at it immediately so the buttons
+  // deliver it with no re-render.
   try{ var curSig=currentExportSignature(); var ce=exportCacheGet(curSig); if(ce){ setLiveExport(ce, curSig); } }catch(e){}
   dl.addEventListener('click',function(ev){
     var sig2=currentExportSignature();
@@ -3108,441 +3613,27 @@ function showResult(blob, opts){
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
 }
 function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
-var historyCounter=0; // sequential Video N numbering — survives New/resets
-var VERSIONS_KEEP=5; // stored version videos kept in OPFS — older entries degrade to settings-only
-var HISTORY_INDEX_KEY='dance-sync.history-index.v1';
-var HISTORY_INDEX_BACKUP_KEY='dance-sync.history-index.v1.bak';
-// FIRST-CLASS PAYLOAD REFERENCE: every payload-backed History entry —
-// whether it OWNS its stored file or SHARES another version's file via
-// the identical-settings dedupe — carries the reference the same way:
-// h.payload = {path, size, type} (mirrored into the legacy
-// versionFile / payloadSize / blobType fields the rest of the code was
-// written against). The dedupe path used to be a second-class citizen:
-// its shared reference lived only in the legacy field, was counted as a
-// separate payload by entry-count eviction (so an older dedupe entry
-// could be stripped of its reference while its shared file survived,
-// kept alive by a newer sharer), and was masked in-session by the
-// output cache — so the entry LOOKED payload-backed until a reload (or
-// a restore that keyed on the reference) exposed the loss. All payload
-// reads/writes now go through these helpers, eviction counts DISTINCT
-// payload files (see evictOldVersionPayloads), and the persisted index
-// stores the payload object explicitly.
-function payloadPathOf(h){ return (h&&(h.payload&&h.payload.path))||(h&&h.versionFile)||null; }
-function payloadRefOf(h){
-  if(!h) return null;
-  if(h.payload&&h.payload.path) return h.payload;
-  if(h.versionFile) return {path:h.versionFile, size:(h.payloadSize!=null?h.payloadSize:null), type:h.blobType||null};
-  return null;
-}
-function setPayloadRef(h, path, size, type){
-  if(!h) return;
-  if(path){
-    h.payload={path:path, size:(size!=null?size:null), type:type||null};
-    h.versionFile=path; h.payloadSize=(size!=null?size:null); if(type) h.blobType=type;
-    h.settingsOnly=false; h.available=true;
-  } else {
-    h.payload=null; h.versionFile=null; h.payloadSize=null; h.settingsOnly=true;
-  }
-}
-// The index is written to TWO localStorage keys (primary + backup) and
-// every failure is logged to diagnostics — a silent write failure here
-// once cost a whole session's History with no trace in the dump. If the
-// full write throws (quota / storage pressure), retry once with the
-// payload references stripped (entries survive as settings-only) rather
-// than losing the list entirely.
-function persistHistoryIndex(){
-  var json=null;
-  try{
-    var data={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
-      var ref=payloadRefOf(h);
-      return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:!!h.available, settingsOnly:!ref, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:h.blobType||null};
-    })};
-    json=JSON.stringify(data);
-  }catch(e){ try{ log('History: FAILED to serialize the History index ('+(e.message||e)+') — index not saved.'); }catch(_){} return; }
-  try{
-    localStorage.setItem(HISTORY_INDEX_KEY, json);
-    try{ localStorage.setItem(HISTORY_INDEX_BACKUP_KEY, json); }catch(_){}
-    // Read-back verify: a setItem that reported success but did not stick
-    // (storage eviction / partitioning) must not fail silently either.
-    var back=null; try{ back=localStorage.getItem(HISTORY_INDEX_KEY); }catch(_){}
-    if(back!==json){ try{ log('History: WARNING — index write did not read back intact (wrote '+json.length+' chars, read '+(back==null?'nothing':back.length+' chars')+').'); }catch(_){} }
-  }catch(e){
-    try{ log('History: FAILED to save index ('+(e.message||e)+') — retrying with payload references stripped.'); }catch(_){}
-    try{
-      var slim={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
-        return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:false, settingsOnly:true, payload:null, versionFile:null, payloadSize:null, blobType:h.blobType||null};
-      })};
-      var slimJson=JSON.stringify(slim);
-      localStorage.setItem(HISTORY_INDEX_KEY, slimJson);
-      try{ localStorage.setItem(HISTORY_INDEX_BACKUP_KEY, slimJson); }catch(_){}
-      try{ log('History: slim index saved ('+historyEntries.length+' entries, settings-only) after the full save failed.'); }catch(_){}
-    }catch(e2){ try{ log('History: FAILED to save even the slim index ('+(e2.message||e2)+') — History will not survive a reload.'); }catch(_){} }
-  }
-}
-function restoreHistoryIndex(){
-  // Every outcome is logged — a boot that finds no readable index must
-  // say so (and why), never just show an empty list in silence. Each
-  // entry is rebuilt inside its own try/catch: one malformed entry is
-  // skipped with a log line and can NOT take down the whole list.
-  var raw=null, rawErr='primary key absent';
-  try{ raw=localStorage.getItem(HISTORY_INDEX_KEY); }catch(e){ rawErr='primary read threw: '+(e.message||e); }
-  var parsed=null;
-  if(raw){ try{ parsed=JSON.parse(raw); if(!parsed||!Array.isArray(parsed.entries)){ parsed=null; rawErr='primary index has an unexpected shape'; } }catch(e){ rawErr='primary index unparseable: '+(e.message||e); } }
-  var fromBackup=false;
-  if(!parsed){
-    var bakRaw=null;
-    try{ bakRaw=localStorage.getItem(HISTORY_INDEX_BACKUP_KEY); }catch(e){}
-    if(bakRaw){ try{ var bp=JSON.parse(bakRaw); if(bp&&Array.isArray(bp.entries)){ parsed=bp; fromBackup=true; } }catch(e){} }
-  }
-  if(!parsed){
-    try{ log('History: no readable saved index ('+rawErr+') — starting with an empty History.'); }catch(_){}
-    return;
-  }
-  try{
-    var restored=[], skipped=0;
-    parsed.entries.forEach(function(pe){
-      try{
-        if(!pe||typeof pe.num!=='number'||!pe.snap||typeof pe.snap!=='object'){ skipped++; try{ log('History: skipped a malformed saved entry during rebuild (num='+(pe?pe.num:'?')+').'); }catch(_){} return; }
-        // Payload reference: prefer the explicit payload object; fall
-        // back to the legacy flat fields so indexes saved by earlier
-        // builds still rebuild their payloads — own AND dedupe-shared
-        // references alike (a shared reference is just a path pointing
-        // at another version's file; it rebuilds identically).
-        var ref=null;
-        if(pe.payload&&pe.payload.path) ref={path:pe.payload.path, size:(pe.payload.size!=null?pe.payload.size:null), type:pe.payload.type||pe.blobType||null};
-        else if(pe.versionFile) ref={path:pe.versionFile, size:(pe.payloadSize!=null?pe.payloadSize:null), type:pe.blobType||null};
-        var hasPayload=!!ref;
-        restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(ref&&ref.size!=null?ref.size:0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:pe.blobType||(ref?ref.type:null)||null, settingsOnly:!hasPayload});
-      }catch(ee){ skipped++; try{ log('History: skipped a saved entry that failed to rebuild ('+(ee.message||ee)+').'); }catch(_){} }
-    });
-    historyEntries.length=0;
-    restored.forEach(function(h){ historyEntries.push(h); });
-    var maxNum=0; restored.forEach(function(h){ if(h.num>maxNum) maxNum=h.num; });
-    historyCounter=Math.max((typeof parsed.counter==='number'?parsed.counter:0), maxNum);
-    log('History: restored '+restored.length+' entries from saved index'+(fromBackup?' (backup copy — the primary index was unreadable)':'')+(skipped?(' · '+skipped+' malformed entr'+(skipped===1?'y':'ies')+' skipped'):''));
-    var payloadList=restored.filter(function(h){ return !!payloadPathOf(h); }).map(function(h){ return 'v'+h.num+'→'+payloadPathOf(h); });
-    log('History: payload-backed entries after rebuild: '+(payloadList.length?payloadList.join(', '):'none')+' — every one of these (own or dedupe-shared reference) restores through the stored-File path.');
-    renderHistory();
-  }catch(e){ try{ log('History: failed to restore saved index: '+(e.message||e)); }catch(_){} }
-}
-function addHistory(sig,snap,size,available,blob){
-  historyCounter++;
-  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, payload:null, versionFile:null, payloadSize:null, blobType:blob?(blob.type||'video/mp4'):null, settingsOnly:!blob};
-  historyEntries.unshift(entry);
-  if(available===false&&!blob) log('History: entry stored without its video payload (size '+fmtBytesMB(size)+' exceeds the History cache caps — max '+MAX_OUTPUTS+' outputs / '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — restore requires re-generate.');
-  // A completed apply/generation becomes the applied-settings snapshot:
-  // Apply edits disables until the editor diverges from these settings.
+// A completed apply/generation becomes the applied-settings snapshot:
+// Apply edits disables until the editor diverges from these settings
+// (see updateApplyEditsState). Applying edits re-renders and replaces
+// the CURRENT result in place — no copy of the previous result is kept.
+function markApplied(snap){
   appliedSnapshot={eff:snap.eff, tStart:snap.tStart, tEnd:snap.tEnd, blend:snap.blend, q:snap.q};
-  // This generation becomes the base trim the readouts compose against.
-  baseTrimStart=snap.tStart; baseTrimEnd=snap.tEnd;
-  renderHistory();
-  layoutTimeline();
+  try{ layoutTimeline(); }catch(e){}
   updateApplyEditsState();
-  // Persist the actual video bytes so this version can be played and
-  // edited later, not just its settings (fire-and-forget; logs its own
-  // outcome to the diagnostics journal).
-  if(blob) storeVersionPayload(entry, blob);
-}
-// ---------- version video storage (OPFS 'versions' namespace) ----------
-// Each completed generation's output bytes are written to
-// OPFS versions/v<N>.mp4 and the History entry records the payload
-// reference as a first-class payload object (entry.payload =
-// {path, size, type}, mirrored to entry.versionFile / entry.payloadSize;
-// an identical-settings generation SHARES an earlier version's file by
-// copying its payload reference — see the dedupe branch below). Only
-// the newest VERSIONS_KEEP distinct payload files are kept; evicting a
-// file deletes it and marks every entry referencing it settings-only.
-// If OPFS is unavailable the version stays settings-only (the previous
-// behavior) and the reason is logged.
-function storeVersionPayload(entry, blob){
-  (async function(){
-    try{
-      if(!blob||!blob.size){ log('Version '+entry.num+': no video bytes to store — version kept settings-only.'); if(!outCache.has(entry.sig)){ entry.available=false; renderHistory(); } return; }
-      // Identical settings already stored by an earlier version — share
-      // its payload instead of writing a duplicate copy. The shared
-      // reference is assigned as a FIRST-CLASS payload (payload object +
-      // legacy mirrors, via setPayloadRef) — exactly like an owned
-      // payload — then persisted explicitly and put through the same
-      // retention accounting as an owned payload, so a dedupe entry is
-      // indistinguishable from an owned one for restore routing, for
-      // the saved index, and for eviction.
-      for(var i=0;i<historyEntries.length;i++){
-        var o=historyEntries[i];
-        var oRef=payloadRefOf(o);
-        if(o!==entry&&o.sig===entry.sig&&oRef){
-          setPayloadRef(entry, oRef.path, (oRef.size!=null?oRef.size:blob.size), oRef.type||entry.blobType||(blob.type||'video/mp4'));
-          log('Version '+entry.num+': identical settings already stored as '+oRef.path+' — reusing that stored video ('+fmtBytesMB(entry.payloadSize)+'). The shared payload reference is recorded on this entry as a first-class payload (path + size + type) and persisted with the History index.');
-          renderHistory();
-          persistHistoryIndex();
-          await evictOldVersionPayloads();
-          return;
-        }
-      }
-      var ok=await detectStorageBackend();
-      if(!ok||!opfsRoot){
-        log('Version '+entry.num+': OPFS unavailable ('+diagStorage.note+') — falling back to settings-only; restore will require re-generate.');
-        if(!outCache.has(entry.sig)){ entry.available=false; renderHistory(); }
-        return;
-      }
-      var dir=await opfsRoot.getDirectoryHandle('versions',{create:true});
-      var name='v'+entry.num+'.mp4';
-      var handle=await dir.getFileHandle(name,{create:true});
-      var writable=await handle.createWritable();
-      var CH=4*1024*1024;
-      try{
-        for(var off=0; off<blob.size; off+=CH){
-          var chunk=await blob.slice(off, Math.min(blob.size, off+CH)).arrayBuffer();
-          await writable.write(chunk);
-        }
-        await writable.close();
-      }catch(we){ try{ await writable.abort(); }catch(_){} throw we; }
-      setPayloadRef(entry, 'versions/'+name, blob.size, blob.type||entry.blobType||'video/mp4');
-      log('Version '+entry.num+' stored: '+blob.size+' bytes → OPFS versions/'+name+' | blob type='+(entry.blobType||'video/mp4'));
-      renderHistory();
-      persistHistoryIndex();
-      await evictOldVersionPayloads();
-      try{ await refreshStorageEstimate(); }catch(e){}
-    }catch(e){
-      logError('version-store',e);
-      log('Version '+entry.num+': storing the video failed ('+(e.message||e)+') — version kept settings-only; restore requires re-generate.');
-      if(!outCache.has(entry.sig)){ entry.available=false; renderHistory(); }
-    }
-  })();
-}
-async function evictOldVersionPayloads(){
-  if(!opfsRoot) return;
-  // Retention counts DISTINCT payload FILES, not entries. Several
-  // History entries can share one stored file (identical-settings
-  // dedupe); the old entry-count eviction stripped the payload
-  // reference from older dedupe entries while their shared file
-  // survived — kept alive by a newer sharer — and the in-memory output
-  // cache masked the loss (the entry still showed as payload-backed)
-  // until a reload exposed it as settings-only. A file's recency is
-  // the recency of its NEWEST referencing entry (historyEntries is
-  // newest-first, so the first sighting of each path wins); an entry
-  // loses its reference only when its FILE is evicted, and every entry
-  // referencing an evicted file is stripped together.
-  var seen={}, paths=[];
-  historyEntries.forEach(function(h){ var p=payloadPathOf(h); if(p&&!seen[p]){ seen[p]=true; paths.push(p); } });
-  if(paths.length<=VERSIONS_KEEP) return;
-  var evictPaths={};
-  paths.slice(VERSIONS_KEEP).forEach(function(p){ evictPaths[p]=true; });
-  for(var i=0;i<historyEntries.length;i++){
-    var h=historyEntries[i], hp=payloadPathOf(h);
-    if(hp&&evictPaths[hp]){
-      setPayloadRef(h, null);
-      // A stripped entry may still be restorable in-session from the
-      // output cache — but only for proxy versions; a direct-export
-      // entry's cached blob is never used as a restore embed, so it is
-      // marked unavailable (restore requires re-generate) right away
-      // instead of letting the cache mask the loss.
-      if(!outCache.has(h.sig)||(h.snap&&h.snap.isDirect)) h.available=false;
-      log('Version '+h.num+' payload evicted ('+hp+') — keeping only the newest '+VERSIONS_KEEP+' stored version videos; this entry is now settings-only (restore requires re-generate).');
-    }
-  }
-  for(var ep in evictPaths){
-    if(!Object.prototype.hasOwnProperty.call(evictPaths, ep)) continue;
-    // By construction no surviving entry references an evicted path.
-    try{ var dir=await opfsRoot.getDirectoryHandle('versions'); await dir.removeEntry(ep.split('/').pop()); log('Version storage: deleted OPFS '+ep+'.'); }catch(e){}
-  }
-  renderHistory();
-}
-// Load a stored version video from OPFS into the Preview as the current
-// result (Share/Download/Open then act on it via showResult, as usual).
-function loadVersionPayload(h){
-  (async function(){
-    try{
-      var vPath=payloadPathOf(h);
-      if(!vPath) throw new Error('this entry carries no payload reference');
-      var ok=await detectStorageBackend();
-      if(!ok||!opfsRoot) throw new Error('OPFS unavailable: '+diagStorage.note);
-      var dir=await opfsRoot.getDirectoryHandle('versions');
-      var handle=await dir.getFileHandle(vPath.split('/').pop());
-      var rawFile=await handle.getFile();
-      if(!rawFile||!rawFile.size) throw new Error('the stored version file is empty');
-      // Embed the stored File EXACTLY as-is — the identical construction
-      // the generation-time embed uses for an OPFS-backed render output
-      // (readRenderOutput hands showResult the raw handle.getFile()
-      // File, type '' and all). An earlier restore path re-wrapped the
-      // stored File in a NEW File/Blob with an overridden type; QA proved
-      // the re-wrapped embed still errored (code 4) on the HEVC version
-      // while the generation-time embed of the same bytes played, so the
-      // wrap itself was the last page-side difference. No re-wrap, no
-      // re-mux, no type override: the bytes and the File construction
-      // reaching the <video> element are now identical to generation.
-      log('Version '+h.num+' restored from storage: OPFS '+vPath+' — embedding the stored File directly ('+rawFile.size+' bytes, stored type='+(rawFile.type||'(empty)')+', recorded generation type='+(h.blobType||'(none)')+'), identical in construction to a generation-time OPFS embed (no re-wrap, no re-mux, no type override).');
-      generatedOnce=true;
-      try{ cachePut(h.sig,{blob:rawFile, opfsName:null}); }catch(e){}
-      showResult(rawFile,{isDirect:!!(h.snap&&h.snap.isDirect)});
-      if(h.snap&&h.snap.isDirect){ log('History: restored version is a direct export — Share/Download/Open deliver this stored file.'); }
-    }catch(e){
-      logError('version-restore',e);
-      setPayloadRef(h, null); h.available=false; renderHistory();
-      log('Version '+h.num+': the stored video could not be loaded ('+(e.message||e)+') — settings restored; restore requires re-generate — tap Apply edits to rebuild it.');
-    }
-  })();
-}
-// ---------- cache-hit generation embed (stored OPFS File) ----------
-// When a generation resolves via cache hit / identical-settings dedupe,
-// the payload already lives in the OPFS versions store — that is WHY
-// it is a cache hit: an earlier History entry with this exact
-// signature owns (or shares) the stored file. The result MUST be
-// embedded from that stored File, with the exact same construction as
-// a History restore (loadVersionPayload above) and a fresh OPFS-backed
-// generation: handle.getFile() handed straight to showResult — no
-// re-wrap, no type override. A cache-hit generation used to hand
-// showResult the in-memory cached blob instead, and the player
-// rejected it (code 4 MEDIA_ELEMENT_ERROR) while restoring the same
-// entry from History — the stored-File embed of the identical bytes —
-// played perfectly. After this change the in-memory cached blob is
-// never handed to the player on ANY path (a fresh generation embeds
-// its render output, a cache-hit generation embeds the stored File, a
-// restore embeds the stored File); the cached blob remains only a
-// Share/Download delivery object. Falls back to the cached-blob embed
-// ONLY when no stored payload exists for the signature at all (e.g.
-// OPFS was unavailable when the original was generated — the same
-// payload-less policy the restore routing uses for proxy entries).
-async function embedStoredVersionForGeneration(sig,isDirect){
-  try{
-    var path=null, num=null;
-    for(var i=0;i<historyEntries.length;i++){
-      var he=historyEntries[i];
-      if(he&&he.sig===sig){ var p=payloadPathOf(he); if(p){ path=p; num=he.num; break; } }
-    }
-    if(!path) return false;
-    var ok=await detectStorageBackend();
-    if(!ok||!opfsRoot) return false;
-    var dir=await opfsRoot.getDirectoryHandle('versions');
-    var handle=await dir.getFileHandle(path.split('/').pop());
-    var rawFile=await handle.getFile();
-    if(!rawFile||!rawFile.size) return false;
-    log('Generation resolved via cache hit — embedding the stored OPFS File '+path+' ('+rawFile.size+' bytes, stored type='+(rawFile.type||'(empty)')+') as the result, identical in construction to a History restore of Version '+num+' and to a fresh OPFS-backed generation (no re-wrap, no type override). The in-memory cached blob is NOT handed to the player; it remains only a Share/Download delivery object.');
-    showResult(rawFile,{isDirect:!!isDirect});
-    return true;
-  }catch(e){
-    try{ log('Generation cache hit: the stored OPFS File for these settings could not be loaded ('+(e.message||e)+') — falling back to the cached-blob embed.'); }catch(_){}
-    return false;
-  }
-}
-function renderHistory(){
-  var wrap=$('historyWrap'), list=$('historyList'); if(!wrap||!list) return;
-  wrap.classList.toggle('show',historyEntries.length>0);
-  updateNewBtn(); // History existing at all is session state — keep Start over in sync
-  list.innerHTML='';
-  historyEntries.forEach(function(h){
-    var b=document.createElement('button'); b.type='button'; b.className='histRow';
-    b.textContent='Version '+h.num+(h.available?'':' — restore requires re-generate');
-    b.addEventListener('click',function(){ restoreHistory(h); });
-    list.appendChild(b);
-  });
-  persistHistoryIndex();
-}
-function restoreHistory(h){
-  var s=h.snap;
-  // After a New reset the editor/result sections are hidden; restoring a
-  // History entry must bring them back so its video can be watched/saved.
-  $('playerSec').classList.add('show'); var _gr2=$('generateRow'); if(_gr2) _gr2.classList.toggle('show',firstGenDone);
-  var qEl=document.querySelector('input[name=quality][value="'+s.q+'"]'); if(qEl) qEl.checked=true;
-  blendVal=s.blend; var bl=$('blend'); bl.value=Math.round(s.blend*100); $('blendVal').textContent=Math.round(s.blend*100)+'%';
-  // Restore the entry's own context from its metadata BEFORE laying out
-  // the editor: the detected offset (so the Additional offset input shows
-  // eff − detected, the value the user actually set — not 0.000) and the
-  // source durations (so layoutTimeline can position the timeline and
-  // fill the trim/offset readouts). After a reload none of this survives
-  // in memory — danceDur/songDur/detectedOffset are all 0 — which is
-  // exactly why the editor used to show blank readouts and a 0.000
-  // offset. Entries saved before this metadata existed fall back to
-  // their trim end as the duration.
-  var sourcesAbsent=!(danceFile&&songFile);
-  if(typeof s.detected==='number'&&isFinite(s.detected)) detectedOffset=s.detected;
-  // Full-settings preservation for the re-upload flow (Question 3):
-  // with no sources loaded, stash this version's effective offset, its
-  // own detected offset (null when the entry's metadata predates it),
-  // its signature, AND its trim start/end, blend, and export quality.
-  // Re-uploading files zeroes detectedOffset and audioPos and resets
-  // the trim to full range (handleFile); when detection re-runs for
-  // the same file pair, runAnalysis consumes this stash and
-  // re-establishes the position as (new detected + TRUE additional
-  // offset) — the restored effective value is never re-interpreted as
-  // the additional offset, so the detected offset can never be
-  // double-applied — and carries the trim, blend, and export quality
-  // into the run. A restore promises the version's settings;
-  // re-uploading its sources to make it editable must not silently
-  // drop any of them. A restore WITH sources loaded needs no stash:
-  // the editor state is already live and consistent.
-  pendingRestoreCtx=sourcesAbsent?{eff:s.eff, detected:(typeof s.detected==='number'&&isFinite(s.detected))?s.detected:null, sig:h.sig||'', tStart:s.tStart, tEnd:s.tEnd, blend:s.blend, q:s.q}:null;
-  restoredDur=(typeof s.srcDur==='number'&&isFinite(s.srcDur)&&s.srcDur>0)?s.srcDur:(s.tEnd||0);
-  restoredSongDur=(typeof s.songDur==='number'&&isFinite(s.songDur)&&s.songDur>0)?s.songDur:0;
-  trimStartSec=(danceDur>0)?clamp(s.tStart,0,Math.max(0,danceDur-0.5)):s.tStart;
-  trimEndSec=(danceDur>0&&s.tEnd>=danceDur-0.01)?null:s.tEnd;
-  baseTrimStart=s.tStart; baseTrimEnd=s.tEnd; // restored version's trim becomes the composition base
-  audioPos=-s.eff;
-  // Without the source files the restored values are display-only:
-  // lock the timeline + Re-sync, keep Apply edits disabled, and show
-  // the re-upload note in the editor. With sources loaded (in-session
-  // restore) everything stays editable exactly as before.
-  setRestoreNeedsSources(sourcesAbsent);
-  showEditor();
-  layoutTimeline();
-  syncOffsetInput();
-  updatePreviewSub();
-  log('History: restored settings — '+(s.height?(s.q+'p'):'Full')+' · trim '+s.tStart.toFixed(2)+'–'+s.tEnd.toFixed(2)+'s · offset '+s.eff.toFixed(3)+'s · room '+Math.round(s.blend*100)+'%');
-  if(sourcesAbsent) log('History: restored after reload with no source files loaded — editor displays the restored values (additional offset '+(manualDelta()>=0?'+':'')+manualDelta().toFixed(3)+'s, trim '+trimStartSec.toFixed(2)+'–'+trimEnd().toFixed(2)+'s, effective offset '+effOffset().toFixed(3)+'s, duration '+editorDur().toFixed(2)+'s from the entry metadata); timeline dragging, Re-sync and Apply edits are disabled until the source files are re-uploaded.');
-  // A version WITH a playable payload becomes the applied-settings
-  // snapshot (Apply edits starts disabled; any edit branches a new
-  // version on apply). A settings-only entry must NOT become the
-  // snapshot — Apply edits stays enabled so it can be re-generated.
-  if(outCache.has(h.sig)||payloadPathOf(h)){ appliedSnapshot={eff:effOffset(), tStart:trimStartSec, tEnd:trimEnd(), blend:blendVal, q:s.q}; }
-  else { appliedSnapshot=null; }
-  updateApplyEditsState();
-  // DEFECT FIX (payload restore routing): a version WITH a payload
-  // reference — its OWN stored file or a dedupe-SHARED reference to
-  // another version's file; both are first-class payloads (see
-  // setPayloadRef) — is ALWAYS restored through the stored-File path
-  // (loadVersionPayload embeds the OPFS File with the exact same
-  // construction as generation and as a post-reload restore), in-session
-  // and post-reload alike. The in-memory cached blob is NEVER handed to
-  // the player for a payload-backed entry: dedupe-created entries used
-  // to fall into the cached-blob branch below because their shared
-  // reference was not recognized as a payload, and the player rejected
-  // the cached direct-export (HEVC) blob (code 4 MEDIA_ELEMENT_ERROR)
-  // while the identical stored file played fine. The cached-blob branch
-  // remains ONLY for entries with no payload reference at all (e.g. the
-  // OPFS-unavailable fallback's in-session proxy) — and never for a
-  // direct-export entry, whose cached blob is exactly the shape that
-  // failed; a direct entry without a payload reference restores as
-  // settings-only rather than risking the unplayable embed.
-  var hPayloadPath=payloadPathOf(h);
-  if(hPayloadPath){
-    log('History: restoring Version '+h.num+' via its stored OPFS File ('+hPayloadPath+') — the stored-File path is used for every payload restore, in-session and post-reload alike; the in-memory cached blob is not handed to the player.');
-    loadVersionPayload(h);
-  }
-  else if(s.isDirect){
-    h.available=false; renderHistory();
-    log('History: Version '+h.num+' is a direct export with no stored payload reference — settings restored; restore requires re-generate — tap Apply edits to rebuild it. (The in-memory cached blob is never used as a direct-export restore embed.)');
-  }
-  else {
-    var e=cacheGet(h.sig);
-    if(e){ var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:false}); generatedOnce=true; log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
-    else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
-  }
 }
 
 // ---------- New (full reset to initial state) ----------
 // Visible whenever any file or result is present. One tap: cancels any
 // running job (terminating the ffmpeg worker mid-run), clears both files,
 // the decode/filmstrip caches, timeline/edit state, settings, progress,
-// result, and log — and re-arms auto-generate for the next pair of
-// uploads. History and the cached output videos behind its rows are
-// PRESERVED: after a reset, a History entry still restores its settings
-// and its video. (The output cache's own LRU cap may still evict the
-// oldest outputs as new ones are generated, as before.)
+// and result — and re-arms auto-generate for the next pair of uploads.
+// Nothing is preserved across a reset: inputs, result, editor, and the
+// in-session caches all return to the fresh state.
 // Single source of truth for the one Start over button (bottom of page):
 // the page is "active" whenever any session state exists — an uploaded
-// file OR at least one History entry. Restoring a History entry after a
-// reset is session state too, so the buttons must come back; today they
-// vanished in exactly that flow because only files were checked.
-function sessionActive(){ return !!(danceFile||songFile||historyEntries.length>0); }
+// file is session state.
+function sessionActive(){ return !!(danceFile||songFile); }
 function updateNewBtn(){
   var active=sessionActive();
   // The single bottom Start over and the Generate button stay hidden
@@ -3572,13 +3663,16 @@ function resetAll(){
   danceFile=null; songFile=null;
   dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
-  trimStartSec=0; trimEndSec=null; baseTrimStart=0; baseTrimEnd=null; blendVal=0; appliedSnapshot=null;
-  restoredDur=0; restoredSongDur=0; pendingRestoreCtx=null; try{ setRestoreNeedsSources(false); }catch(e){}
+  trimStartSec=0; trimEndSec=null; blendVal=0; appliedSnapshot=null;
   analysisState='idle'; analysisPromise=null; analysisVersion=-1;
   autoGenForVersion=-1; generatedOnce=false; firstGenDone=false; pipelineRestartPending=false;
   pcmCache={}; pcmPromiseCache={}; stripCache={};
   filmstripBuiltFor=null; filmstripPending=false; filmstripBuilding=false;
-  // History + output cache intentionally preserved — see note above.
+  // The in-session output/export caches belong to the cleared files —
+  // drop them too (deleting any OPFS files they hold) so the reset is a
+  // genuinely fresh state.
+  outCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); outCache.clear(); outOrder=[];
+  exportCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); exportCache.clear(); exportOrder=[];
   exportToken++;
   if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
   isExporting=false; pendingExportAction=null;
@@ -3614,9 +3708,8 @@ function resetAll(){
   diagStage='boot'; diagRunT0=0; diagResult.blobSize=null; diagResult.hasObjectURL=false; diagResult.urlPrefix=''; diagResult.settings=null;
   diagFiles.video={role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
   diagFiles.audio={role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
-  // Keep diagEntries (History is preserved across New, and so are its
-  // diagnostics) — just note the reset in the timestamped log.
-  log('Reset (Start over) — session cleared; History preserved ('+historyEntries.length+' entries). Diagnostics log kept.');
+  // Keep diagEntries — just note the reset in the timestamped log.
+  log('Reset (Start over) — session cleared. Diagnostics log kept.');
   updateNewBtn();
 }
 $('btnNew').addEventListener('click', resetAll);
@@ -3648,7 +3741,7 @@ async function doGenerate(opts){
       log('Generate: sync analysis done — building video…');
     }
     var qEl=document.querySelector('input[name=quality]:checked');
-    var q=qEl?qEl.value:'full', height=(q==='full')?0:parseInt(q,10); // EXPORT quality selection — kept in the snapshot for History; for Full+no-trim it also selects the direct-export generate path below
+    var q=qEl?qEl.value:'full', height=(q==='full')?0:parseInt(q,10); // EXPORT quality selection — kept in the applied-settings snapshot; for Full+no-trim it also selects the direct-export generate path below
     var eff=effOffset(), tStart=trimStartSec, tEnd=trimEnd(), tDur=Math.max(0,tEnd-tStart);
     if(tDur<0.5) throw new Error('Clip too short — widen the trim.');
     var noTrimDirect=(tStart<=0.001)&&(danceDur>0?(tEnd>=danceDur-0.01):(trimEndSec==null));
@@ -3657,7 +3750,7 @@ async function doGenerate(opts){
     else log('generate path: proxy');
     var sig=settingsSignature('proxy480',tStart,tEnd,eff,blendVal);
     var exportSig=settingsSignature(q,tStart,tEnd,eff,blendVal);
-    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal,proxySig:sig,isDirect:isDirect,exportSig:exportSig,detected:detectedOffset,srcDur:danceDur,songDur:songDur}; // detected + source durations ride in the entry metadata so a post-reload restore can display the true additional offset (eff − detected) and the trim/offset readouts without the source files
+    var snap={q:q,height:height,tStart:tStart,tEnd:tEnd,tDur:tDur,eff:eff,blend:blendVal,proxySig:sig,isDirect:isDirect,exportSig:exportSig,detected:detectedOffset,srcDur:danceDur,songDur:songDur}; // full settings snapshot of this generation — markApplied keeps {eff,tStart,tEnd,blend,q} as the applied-settings snapshot; the rest feeds the diagnostics dump
     if(isDirect){
       // DIRECT EXPORT AS GENERATE: no 480p proxy at all. The two-stage
       // export (audio render + stream-copy mux) IS the generation step;
@@ -3675,18 +3768,13 @@ async function doGenerate(opts){
         diagResult.settings=snap;
         diagExport.size=dHitBlob.size; diagExport.durationSec=0; diagExport.quality='full'; diagExport.backend=(dHitOut||dHitExp).opfsName?'OPFS':(diagExport.backend||'MEMFS'); diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate — cache hit, no re-render';
         log('Direct export skipped — cache hit for identical settings (no re-render). Direct export blob '+fmtBytesMB(dHitBlob.size)+' — the export cache for these settings is already satisfied.');
-        // Ensure both caches hold the payload so History restore and
-        // Share/Download/Open both hit without rendering.
+        // Ensure both caches hold the payload so Share/Download/Open
+        // hit without rendering.
         var dHitOpfs=(dHitOut||dHitExp).opfsName||null;
         if(!dHitOut&&dHitBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dHitBlob, opfsName:null}); }catch(e){} }
         if(!dHitExp){ try{ exportCachePut(exportSig,{blob:dHitBlob, opfsName:dHitOpfs, q:q}); }catch(e){} }
-        // CACHE-HIT EMBED: embed the result from the stored OPFS File
-        // for these settings (identical construction to a History
-        // restore) — never the in-memory cached blob, which the player
-        // rejects on this path (code 4) while the stored File plays.
-        var dEmbedded=await embedStoredVersionForGeneration(exportSig,true);
-        if(!dEmbedded) showResult(dHitBlob,{isDirect:true});
-        addHistory(exportSig,snap,dHitBlob.size, dHitBlob.size<=MAX_CACHE_BYTES, dHitBlob);
+        showResult(dHitBlob,{isDirect:true});
+        markApplied(snap);
         log('Direct export loaded from cache — identical settings, no re-render. ('+fmtSize(dHitBlob.size)+')');
         try{ journalMarkCompleted(true); }catch(e){}
         return;
@@ -3707,11 +3795,9 @@ async function doGenerate(opts){
       // check arms liveExport and Share/Download/Open deliver instantly
       // with no Processing-bar render step.
       try{ exportCachePut(exportSig,{blob:dBlob, opfsName:dRes.opfsName, q:q}); }catch(e){ logError('direct-export-cache',e); }
-      var dFits=(dBlob.size<=MAX_CACHE_BYTES);
-      if(dFits){ try{ cachePut(exportSig,{blob:dBlob, opfsName:null}); }catch(e){} }
-      else { log('History: direct result '+fmtBytesMB(dBlob.size)+' does not fit the History byte cap ('+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — storing the History entry without the payload; restore requires re-generate.'); }
+      if(dBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dBlob, opfsName:null}); }catch(e){} }
       showResult(dBlob,{isDirect:true});
-      addHistory(exportSig,snap,dBlob.size,dFits,dBlob);
+      markApplied(snap);
       log('Done — direct export ready: '+tDur.toFixed(2)+'s output, '+fmtSize(dBlob.size)+', generated in '+dSecs+'s · stage 1: size='+(dRes.s1Size!=null?fmtBytesMB(dRes.s1Size):'n/a')+' duration='+Number(dRes.s1DurSec).toFixed(1)+'s · stage 2: duration='+Number(dRes.s2DurSec).toFixed(1)+'s · audio clipped to video duration (no audio beyond video). This IS the full-quality export — Share, Download and Open deliver it immediately, no further render.');
       try{ journalMarkCompleted(true); }catch(e){}
       return;
@@ -3721,12 +3807,8 @@ async function doGenerate(opts){
       generatedOnce=true; diagStage='result'; setBarPct(100); markStepDone(4);
       diagProxy.size=hit.blob.size; diagProxy.durationSec=0; diagProxy.backend=hit.opfsName?'OPFS':'MEMFS';
       log('Proxy encode skipped — cache hit for identical settings (no re-encode). Proxy blob '+fmtBytesMB(hit.blob.size)+'.');
-      // CACHE-HIT EMBED: same rule as the direct path above — the
-      // result is embedded from the stored OPFS File for these
-      // settings, never the in-memory cached blob.
-      var pEmbedded=await embedStoredVersionForGeneration(sig,false);
-      if(!pEmbedded) showResult(hit.blob);
-      addHistory(sig,snap,hit.blob.size,true,hit.blob);
+      showResult(hit.blob);
+      markApplied(snap);
       log('Proxy loaded from cache — identical settings, no re-encode. ('+fmtSize(hit.blob.size)+')');
       try{ journalMarkCompleted(true); }catch(e){}
       return;
@@ -3858,11 +3940,21 @@ async function doGenerate(opts){
     cachePut(sig,{blob:blob, opfsName:outRes.opfsName});
     await refreshStorageEstimate();
     showResult(blob);
-    addHistory(sig,snap,blob.size,true,blob);
+    markApplied(snap);
     log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Share, Download or Open.');
     try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
+    else if(err&&err.deliveryFailure){
+      // Handled delivery failure: the video was created but could not
+      // be saved to OPFS on this device. No result UI was produced for
+      // this run (showResult never ran), showError clears the progress
+      // bar, and the journal is marked as a finished, handled failure
+      // so the next visit shows no "ended unexpectedly" banner.
+      log('Delivery failed (handled): '+(err.message||err));
+      showError('❌ '+err.userMessage);
+      try{ journalMarkHandledError(); }catch(e){}
+    }
     else { console.error(err); logError('generate',err); var genMsg=(err.message||err); var genShown=(genMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Generate failed: '+genMsg); if(!errorAlreadySurfaced(genShown)){ log(genShown); showError(genShown); } try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     if(typeof proxyMounted!=='undefined'&&proxyMounted&&proxyMounted.ok&&ffmpeg){ try{ await unmountInputsWorkerFS(ffmpeg); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }catch(e){} proxyMounted=null; }
@@ -3943,12 +4035,6 @@ try{
   log('ENV PROBE (load): iframe=' + diagEnvAtLoad.inIframe + ' | origin=' + diagEnvAtLoad.locationOrigin + ' | crossOriginIsolated=' + diagEnvAtLoad.crossOriginIsolated + ' | SharedArrayBuffer=' + diagEnvAtLoad.sharedArrayBufferType + ' | DecompressionStream=' + diagEnvAtLoad.decompressionStreamType + ' | share=' + diagEnvAtLoad.sharePresent + ' | canShare=' + diagEnvAtLoad.canSharePresent + ' test: ' + diagEnvAtLoad.canShareTest + ' | downloadAttr=' + diagEnvAtLoad.downloadAttrSupport + ' | VideoDecoder=' + diagEnvAtLoad.videoDecoderType + ' | touchPoints=' + diagEnvAtLoad.maxTouchPoints);
   log('Page ready — Video/Audio Syncer diagnostics active. Tap Details → Copy diagnostics after any failure and paste the whole dump back.');
 }catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
-// Safety net: re-persist the History index as the page goes away, so
-// any entry mutation that did not pass through renderHistory (cache
-// eviction marking entries unavailable, a failed payload load marking an
-// entry settings-only) is still reflected in the saved index.
-try{ window.addEventListener('pagehide', function(){ try{ persistHistoryIndex(); }catch(e){} }); }catch(e){}
-try{ restoreHistoryIndex(); }catch(e){ try{ logError('history-restore-startup',e); }catch(_){} }
 try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
 // Global 'error' / 'unhandledrejection' handlers are registered once,
