@@ -253,7 +253,7 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet'};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
@@ -684,15 +684,23 @@ function buildDiagnosticsText(){
   ].join('\n');
   var storageLines='(storage diagnostics unavailable)';
   try{
+    var areaLines=['OPFS usage by top-level area (computed from file sizes, at boot and after each render):'];
+    if(diagStorage.areas&&diagStorage.areas.length){
+      diagStorage.areas.forEach(function(a){ areaLines.push('  '+a.name+': '+fmtBytesMB(a.bytes)+' ('+a.files+' file'+(a.files===1?'':'s')+')'); });
+      areaLines.push('  computed total (all top-level areas): '+fmtBytesMB(diagStorage.areasTotal));
+    } else {
+      areaLines.push('  (not itemized yet — '+(diagStorage.areaNote||'OPFS unavailable or not yet scanned')+')');
+    }
     storageLines=[
       'Storage backend detection: OPFS available='+String(diagStorage.opfsAvailable)+' | note: '+diagStorage.note+' | typeof navigator.storage.getDirectory='+storageGetDirectoryType(),
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
       'mount (last render): '+diagStorage.mountNote,
-      'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'),
+      'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a')
+    ].concat(areaLines).concat([
       'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
       'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'n/a')+(diagProxy.webcodecs?(' | webcodecs stages: demux '+(diagProxy.webcodecs.timings.demuxMs/1000).toFixed(2)+'s · decode+encode '+(diagProxy.webcodecs.timings.decodeEncodeMs/1000).toFixed(1)+'s · audio '+(diagProxy.webcodecs.timings.audioMs/1000).toFixed(1)+'s · mux '+(diagProxy.webcodecs.timings.muxMs/1000).toFixed(1)+'s · '+diagProxy.webcodecs.frames+' frames · '+diagProxy.webcodecs.outW+'x'+diagProxy.webcodecs.outH+' @ '+diagProxy.webcodecs.fps+' fps · '+diagProxy.webcodecs.srcCodec+' → '+diagProxy.webcodecs.encCodec):''),
       'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
-    ].join('\n');
+    ].join('\n'));
   }catch(e){}
   var parts=[];
   parts.push('--- HEADER ---'); parts.push(headerLines);
@@ -1706,6 +1714,43 @@ $('blend').addEventListener('change',invalidateDownload);
 function hashStr(str){ var h=5381; for(var i=0;i<str.length;i++){ h=((h<<5)+h+str.charCodeAt(i))|0; } return (h>>>0).toString(36); }
 var opfsRoot=null, opfsStaged={dance:null, song:null};
 function storageGetDirectoryType(){ try{ return typeof (navigator.storage&&navigator.storage.getDirectory); }catch(e){ return 'threw '+(e.message||e); } }
+// ---------- OPFS connection-loss recovery ----------
+// On the device failure this guards against, OPFS starts refusing EVERY
+// operation with UnknownError "Connection is lost" (getFileHandle inside
+// staging, stream-out, even a directory listing) and stays dead for the
+// rest of the session. Recovery: re-acquire the OPFS root directory
+// (navigator.storage.getDirectory()) and retry the failed operation
+// exactly ONCE. Both the failure and the recovery outcome are logged.
+function isOpfsConnectionError(e){
+  if(!e) return false;
+  var s=((e.name||'')+' '+((e.message!=null)?e.message:String(e)));
+  return /connection is lost/i.test(s);
+}
+async function opfsReacquireRoot(context){
+  try{
+    if(typeof navigator==='undefined'||!navigator.storage||typeof navigator.storage.getDirectory!=='function') return false;
+    opfsRoot=await navigator.storage.getDirectory();
+    if(opfsRoot) log('storage: OPFS root re-acquired ('+context+')');
+    return !!opfsRoot;
+  }catch(e){ log('storage: OPFS root re-acquire FAILED ('+context+'): '+(e.name||'Error')+': '+(e.message||e)); return false; }
+}
+async function opfsWithRecovery(label, fn){
+  try{ return await fn(); }
+  catch(e){
+    if(!isOpfsConnectionError(e)) throw e;
+    log('storage: OPFS operation "'+label+'" failed with a connection-class error: '+(e.name||'Error')+': '+(e.message||e)+' — attempting ONE recovery: re-acquire the OPFS root and retry the operation once');
+    var ok=await opfsReacquireRoot(label);
+    if(!ok) throw e;
+    try{
+      var v=await fn();
+      log('storage: OPFS operation "'+label+'" recovered — the retry succeeded after re-acquiring the root');
+      return v;
+    }catch(e2){
+      log('storage: OPFS operation "'+label+'" retry after root re-acquire FAILED: '+(e2.name||'Error')+': '+(e2.message||e2));
+      throw e2;
+    }
+  }
+}
 // ---------- one-time cleanup of the removed versioning feature ----------
 // Earlier builds persisted a History index + source-pair metadata in
 // localStorage and stored version videos / source files in OPFS under
@@ -1748,6 +1793,7 @@ async function detectStorageBackend(){
     await cleanupLegacyVersioning();
     await refreshStorageEstimate();
     await opfsStartupSweep();
+    await refreshOpfsAreas('boot');
     return true;
   }catch(e){
     diagStorage.opfsAvailable=false; diagStorage.note='getDirectory threw '+(e.name||'Error')+': '+(e.message||e);
@@ -1765,8 +1811,80 @@ async function refreshStorageEstimate(){
       log('storage: OPFS estimate usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a'));
     }
   }catch(e){ log('storage: estimate failed: '+(e.message||e)); }
+  // Itemize by top-level area as well — called at boot and after each render.
+  try{ await refreshOpfsAreas('usage refresh'); }catch(e){}
 }
-async function opfsWriteChunked(name, data){
+// ---------- OPFS storage itemization (diagnostics) ----------
+// Walk the OPFS root and total file sizes per TOP-LEVEL area: each
+// top-level directory (recursed) gets its own total, and files sitting
+// directly at the root are grouped as "(root files)". This is what makes
+// accumulated data visible — the plain usage estimate is one opaque
+// number that once hid ~34 GB nobody could attribute.
+async function opfsCollectEntries(dirHandle){
+  var out=[];
+  if(!dirHandle) return out;
+  if(typeof dirHandle.values==='function'){
+    for await (var h1 of dirHandle.values()){ if(h1) out.push(h1); }
+    return out;
+  }
+  if(typeof dirHandle.entries==='function'){
+    for await (var pair of dirHandle.entries()){ if(pair&&pair[1]) out.push(pair[1]); }
+    return out;
+  }
+  if(typeof dirHandle.keys==='function'){
+    for await (var nm of dirHandle.keys()){
+      try{ out.push(await dirHandle.getFileHandle(nm)); continue; }catch(e){}
+      try{ out.push(await dirHandle.getDirectoryHandle(nm)); }catch(e){}
+    }
+    return out;
+  }
+  return out;
+}
+async function opfsDirTotal(dirHandle){
+  var total=0, files=0;
+  var entries=await opfsCollectEntries(dirHandle);
+  for(var i=0;i<entries.length;i++){
+    var h=entries[i];
+    if(!h) continue;
+    if(h.kind==='file'){ try{ var f=await h.getFile(); if(f){ total+=f.size||0; files++; } }catch(e){} }
+    else if(h.kind==='directory'){ var sub=await opfsDirTotal(h); total+=sub.bytes; files+=sub.files; }
+  }
+  return {bytes:total, files:files};
+}
+async function opfsComputeAreas(){
+  if(!opfsRoot) return null;
+  return opfsWithRecovery('itemize OPFS storage', async function(){
+    var areas=[];
+    var rootBytes=0, rootFiles=0;
+    var entries=await opfsCollectEntries(opfsRoot);
+    for(var i=0;i<entries.length;i++){
+      var h=entries[i];
+      if(!h) continue;
+      if(h.kind==='directory'){ var t=await opfsDirTotal(h); areas.push({name:h.name+'/', bytes:t.bytes, files:t.files}); }
+      else if(h.kind==='file'){ try{ var f=await h.getFile(); if(f){ rootBytes+=f.size||0; rootFiles++; } }catch(e){} }
+    }
+    areas.push({name:'(root files)', bytes:rootBytes, files:rootFiles});
+    areas.sort(function(a,b){ return b.bytes-a.bytes; });
+    return areas;
+  });
+}
+async function refreshOpfsAreas(reason){
+  if(!opfsRoot||!diagStorage.opfsAvailable) return;
+  try{
+    var areas=await opfsComputeAreas();
+    if(!areas) return;
+    var total=0; areas.forEach(function(a){ total+=a.bytes; });
+    diagStorage.areas=areas;
+    diagStorage.areasTotal=total;
+    var line=areas.map(function(a){ return a.name+' '+fmtBytesMB(a.bytes)+' ('+a.files+' file'+(a.files===1?'':'s')+')'; }).join(' · ');
+    diagStorage.areaNote=line;
+    log('storage: OPFS areas ('+reason+'): '+line+' | computed total '+fmtBytesMB(total));
+  }catch(e){
+    diagStorage.areaNote='itemization failed: '+(e.message||e);
+    log('storage: OPFS area itemization failed ('+reason+'): '+(e.message||e));
+  }
+}
+async function opfsWriteChunkedOnce(name, data){
   if(!opfsRoot) throw new Error('OPFS root unavailable');
   var handle=await opfsRoot.getFileHandle(name,{create:true});
   var writable=await handle.createWritable();
@@ -1784,9 +1902,24 @@ async function opfsWriteChunked(name, data){
   }catch(e){ try{ await writable.abort(); }catch(_){} throw e; }
   return await handle.getFile();
 }
+async function opfsWriteChunked(name, data){
+  // Connection-class failures get the one root-re-acquire + retry;
+  // callers keep their own graceful fallback if it still fails.
+  return opfsWithRecovery('write OPFS file '+name, function(){ return opfsWriteChunkedOnce(name, data); });
+}
 async function opfsDelete(name){
   if(!opfsRoot||!name) return;
-  try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name); }catch(e){}
+  try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name); }
+  catch(e){
+    if(isOpfsConnectionError(e)){
+      log('storage: OPFS delete of '+name+' failed with a connection-class error: '+(e.message||e)+' — attempting one recovery (re-acquire root + retry once)');
+      var ok=await opfsReacquireRoot('delete '+name);
+      if(ok){
+        try{ await opfsRoot.removeEntry(name); log('storage: OPFS file removed '+name+' (delete recovered after root re-acquire)'); }
+        catch(e2){ log('storage: OPFS delete retry for '+name+' FAILED: '+(e2.message||e2)); }
+      }
+    }
+  }
 }
 // ---------- OPFS hygiene (startup sweep + post-render cleanup) ----------
 // Staged files all live at the OPFS root with recognizable names: staged
@@ -1802,25 +1935,25 @@ function opfsIsStagedName(name){
   return /^input-(dance|song)-/.test(name)||/^proxy-.+\.mp4$/i.test(name)||/^export-.+\.mp4$/i.test(name);
 }
 async function opfsListEntries(){
-  var out=[];
-  if(!opfsRoot) return out;
+  if(!opfsRoot) return [];
   try{
-    if(typeof opfsRoot.values==='function'){
-      for await (var handle of opfsRoot.values()){ if(handle) out.push(handle); }
-      return out;
-    }
-    if(typeof opfsRoot.entries==='function'){
-      for await (var pair of opfsRoot.entries()){ if(pair&&pair[1]) out.push(pair[1]); }
-      return out;
-    }
-    if(typeof opfsRoot.keys==='function'){
-      for await (var name of opfsRoot.keys()){
-        try{ out.push(await opfsRoot.getFileHandle(name)); }catch(e){}
+    return await opfsCollectEntries(opfsRoot);
+  }catch(e){
+    if(isOpfsConnectionError(e)){
+      log('storage: OPFS directory listing failed with a connection-class error: '+(e.message||e)+' — attempting one recovery (re-acquire root + retry once)');
+      var ok=await opfsReacquireRoot('directory listing');
+      if(ok){
+        try{
+          var again=await opfsCollectEntries(opfsRoot);
+          log('storage: OPFS directory listing recovered — retry succeeded after re-acquiring the root');
+          return again;
+        }catch(e2){ log('storage: OPFS directory listing retry FAILED: '+(e2.message||e2)); }
       }
-      return out;
+    } else {
+      log('storage: OPFS directory listing failed: '+(e.message||e));
     }
-  }catch(e){ log('storage: OPFS directory listing failed: '+(e.message||e)); }
-  return out;
+    return [];
+  }
 }
 async function opfsSweepStale(keepNames, reason){
   if(!opfsRoot) return {removed:0, bytes:0};
@@ -1887,7 +2020,14 @@ async function getInputFileForRender(which){
   var orig=(which==='dance')?danceFile:songFile;
   var st=opfsStaged[which];
   if(diagStorage.opfsAvailable&&opfsRoot&&st&&orig&&st.key===fileKey(orig)){
-    try{ var handle=await opfsRoot.getFileHandle(st.name); var f=await handle.getFile(); if(f&&f.size===orig.size) return f; }catch(e){ log('storage: OPFS staged input read failed ('+(e.message||e)+') — using the in-memory File'); }
+    try{
+      var f=await opfsWithRecovery('read staged OPFS input '+st.name, async function(){
+        var handle=await opfsRoot.getFileHandle(st.name);
+        return await handle.getFile();
+      });
+      if(f&&f.size===orig.size) return f;
+      if(f) log('storage: OPFS staged input '+st.name+' size mismatch ('+f.size+' vs '+orig.size+') — using the in-memory File');
+    }catch(e){ log('storage: OPFS staged input read failed ('+(e.message||e)+') — using the in-memory File'); }
   }
   return orig;
 }
@@ -2442,9 +2582,9 @@ async function tryWebCodecsProxy(ctx){
     var muxRc=null;
     await cancellable(withFFmpegLock(async function(){ muxRc=await withTimeout(ctx.ff.exec(mArgs),600000,'WebCodecs proxy final mux'); }));
     if(muxRc!=null&&muxRc!==0) throw wcFail('the final stream-copy mux failed (ffmpeg exit code '+muxRc+')');
-    var chk=null; try{ chk=await ctx.ff.readFile('dance-synced.mp4'); }catch(e){}
-    if(!chk||!chk.length) throw wcFail('the final stream-copy mux produced no output');
-    chk=null;
+    var chkThere=false;
+    try{ var chkDir=await ctx.ff.listDir('/'); for(var chi=0; chi<chkDir.length; chi++){ if(chkDir[chi]&&chkDir[chi].name==='dance-synced.mp4'){ chkThere=true; break; } } }catch(e){ chkThere=true; }
+    if(!chkThere) throw wcFail('the final stream-copy mux produced no output');
     try{ await ctx.ff.deleteFile('stage1-audio.m4a'); stage1Made=false; }catch(e){}
     try{ await ctx.ff.deleteFile('proxy-video-wc.mp4'); wcVideoMade=false; }catch(e){}
     timings.muxMs=Date.now()-mT0;
@@ -2485,23 +2625,192 @@ async function freeConverterInputs(ff, dExt, sExt){
   log('memory: inputs freed ('+(freedBytes/1048576).toFixed(1)+' MB)');
   return freedBytes;
 }
+// ---------- slice-streamed render-output delivery (converter FS → OPFS) ----------
+// The old read-out materialized the ENTIRE output as one JS Uint8Array
+// (ff.readFile) and only then chunk-wrote it to OPFS — for a ~290 MB
+// output that full in-memory copy (plus the giant fallback blob when
+// OPFS failed) is what killed delivery on iOS: the stream-out stalled
+// ~24 s and died, OPFS then refused every later operation with
+// "Connection is lost", and Safari's player rejected the fallback blob
+// (video error code 4), leaving a dead placeholder while the app said
+// Done. Delivery is now sliced end to end:
+//   1. ffmpeg extracts ONE byte slice (≤16 MB) of the output into a
+//      small slice file — the subfile protocol serves the exact byte
+//      range [start,end) of the converter-FS file as a raw data stream
+//      and a stream copy writes it out untouched (byte-exact);
+//   2. the slice file is read (≤16 MB in JS memory), written to the
+//      OPFS writable stream, and released before the next slice;
+//   3. the delivered result IS the resulting OPFS File — Preview,
+//      Share, Download and Open all serve from it.
+// Peak extra JS memory during delivery is ~one slice, independent of
+// the output size. The full output never exists as a JS buffer.
+var OPFS_SLICE_BYTES=16*1024*1024;
+var LARGE_OUTPUT_BYTES=100*1024*1024; // above this, a failed OPFS delivery must NOT fall back to a whole-output in-memory blob
+function makeDeliveryError(totalBytes, cause){
+  var e=new Error('OPFS delivery failed for a '+fmtBytesMB(totalBytes)+' output: '+((cause&&cause.message)||cause||'unknown error'));
+  e.deliveryFailure=true;
+  e.totalBytes=totalBytes;
+  e.userMessage='Your video was created, but it could not be saved on this device. Close and reopen your browser, then try again.';
+  return e;
+}
+async function extractOutputSlice(ff, fsOutName, start, end){
+  // Byte-exact slice [start,end) of fsOutName, via the subfile protocol
+  // + raw data stream copy. Returns a Uint8Array of at most (end-start)
+  // bytes (shorter at EOF, empty past EOF). Never holds more than one
+  // slice in JS memory.
+  var sliceName='out-slice.bin';
+  var url='subfile,,start,'+start+',end,'+end+',,:'+fsOutName;
+  var args=['-y','-protocol_whitelist','file,subfile,data,crypto','-f','data','-i',url,'-map','0','-c','copy','-f','data',sliceName];
+  var rc=null, execErr=null;
+  try{
+    await withFFmpegLock(async function(){ rc=await withTimeout(ff.exec(args),120000,'Extracting output slice at byte '+start); });
+  }catch(e){ execErr=e; }
+  var data=null;
+  try{ data=await ff.readFile(sliceName); }catch(e){ data=null; }
+  try{ await ff.deleteFile(sliceName); }catch(e){}
+  if(execErr) throw execErr;
+  if(rc!=null&&rc!==0){
+    // A nonzero exit with an empty/missing slice file at a nonzero
+    // offset is how ffmpeg reports a range starting at/past EOF (the
+    // subfile stream is empty and the data muxer has no stream) —
+    // treat it as a clean EOF, not an error.
+    if(start>0&&(!data||!data.length)) return new Uint8Array(0);
+    var serr=new Error('output slice extraction failed at byte '+start+' (ffmpeg exit code '+rc+')');
+    serr.slicerError=true;
+    throw serr;
+  }
+  if(!data) { var nerr=new Error('output slice extraction produced no data at byte '+start); nerr.slicerError=true; throw nerr; }
+  return data;
+}
+async function measureConverterFileSize(ff, fsOutName){
+  // Exact output size, measured by extracting slices and discarding
+  // them (bounded memory — one slice at a time). Used only on the
+  // delivery-failure path, to decide whether the in-memory fallback is
+  // allowed (≤100 MB) or the run must end as a handled delivery failure.
+  var total=0;
+  while(true){
+    var slice=await extractOutputSlice(ff, fsOutName, total, total+OPFS_SLICE_BYTES);
+    var n=slice?(slice.length||slice.byteLength||0):0;
+    slice=null;
+    if(n===0) break;
+    total+=n;
+    if(n<OPFS_SLICE_BYTES) break;
+  }
+  return total;
+}
+async function estimateConverterFileSize(ff, fsOutName){
+  // Fallback size estimate (duration × bitrate from ffmpeg's own probe
+  // of the output) for when slice extraction itself is unavailable.
+  try{
+    await withFFmpegLock(async function(){ await withTimeout(ff.exec(['-y','-i',fsOutName,'-map','0','-c','copy','-f','null','size-probe.out']),120000,'Probing output size'); });
+  }catch(e){}
+  try{ await ff.deleteFile('size-probe.out'); }catch(e){}
+  for(var i=diagEntries.length-1;i>=Math.max(0,diagEntries.length-80);i--){
+    var m=/Duration:\s*(\d+):(\d+):([\d.]+).*?bitrate:\s*(\d+)\s*kb\/s/.exec(diagEntries[i]);
+    if(m){
+      var dur=(+m[1])*3600+(+m[2])*60+(+m[3]);
+      var bps=(+m[4])*1000;
+      if(dur>0&&bps>0) return Math.round(dur*bps/8);
+    }
+  }
+  return null;
+}
+async function streamRenderOutputToOpfs(ff, fsOutName, opfsName){
+  // Streams the converter-FS output into an OPFS file slice by slice
+  // and returns {file, totalBytes}. On ANY failure the partial OPFS
+  // file is removed; on the first failure ONE recovery is attempted —
+  // re-acquire the OPFS root and restart the stream-out from slice 0 —
+  // before the error is thrown to the caller. (Slicer errors are not
+  // retried this way: re-acquiring the storage root cannot fix the
+  // converter, and the caller handles them via size-based fallback.)
+  var attempt=0;
+  while(true){
+    attempt++;
+    var handle=null, writable=null, total=0;
+    try{
+      var opened=await opfsWithRecovery('open OPFS output file '+opfsName, async function(){
+        var h=await opfsRoot.getFileHandle(opfsName,{create:true});
+        var w=await h.createWritable();
+        return {handle:h, writable:w};
+      });
+      handle=opened.handle; writable=opened.writable;
+      log('storage: streaming render output '+fsOutName+' → OPFS file '+opfsName+' in slices of at most '+(OPFS_SLICE_BYTES/1048576)+' MB (read one slice from the converter FS, write it to OPFS, release it, repeat — the full output is never held in JS memory)');
+      while(true){
+        var start=total;
+        var slice=await extractOutputSlice(ff, fsOutName, start, start+OPFS_SLICE_BYTES);
+        var n=slice?(slice.length||slice.byteLength||0):0;
+        if(n===0){ slice=null; break; }
+        await writable.write(slice);
+        total+=n;
+        slice=null;
+        log('storage: OPFS stream-out slice @'+start+' written ('+fmtBytesMB(total)+' delivered so far)');
+        if(n<OPFS_SLICE_BYTES) break; // short slice = EOF
+      }
+      await writable.close(); writable=null;
+      var file=await handle.getFile();
+      if(file.size!==total) log('storage: OPFS stream-out size check — streamed '+fmtBytesMB(total)+' but the OPFS file reports '+fmtBytesMB(file.size));
+      log('storage: OPFS stream-out complete — '+opfsName+' ('+fmtBytesMB(total)+') delivered in '+Math.max(1,Math.ceil(total/OPFS_SLICE_BYTES))+' slice(s); peak extra JS memory ≈ one slice');
+      return {file:file, totalBytes:total};
+    }catch(err){
+      if(writable){ try{ await writable.abort(); }catch(_){} }
+      try{ if(opfsRoot) await opfsRoot.removeEntry(opfsName); }catch(_){}
+      if(err&&err.slicerError) throw err;
+      log('storage: OPFS stream-out attempt '+attempt+' failed after '+fmtBytesMB(total)+' delivered: '+(err.name||'Error')+': '+(err.message||err)+(isOpfsConnectionError(err)?' (connection-class error)':''));
+      if(attempt===1){
+        log('storage: OPFS stream-out — attempting ONE recovery: re-acquire the OPFS root and restart the stream-out once');
+        var reacq=await opfsReacquireRoot('stream-out recovery for '+opfsName);
+        if(reacq) continue;
+        log('storage: OPFS stream-out recovery impossible — the root could not be re-acquired');
+      }
+      err.streamBytesDelivered=total;
+      throw err;
+    }
+  }
+}
 async function readRenderOutput(ff, fsOutName, opfsName){
-  var data=await ff.readFile(fsOutName); if(!data||!data.length) throw new Error('Empty output file.');
-  var bytes=data.length||data.byteLength||0;
   if(diagStorage.opfsAvailable&&opfsName){
     try{
-      var file=await opfsWriteChunked(opfsName, data);
-      try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+') after streaming it to OPFS'); }catch(delErr){ log('memory: FS output delete after OPFS stream failed: '+(delErr.message||delErr)); }
-      log('memory: output streamed out of the converter into OPFS file '+opfsName+' in chunks ('+fmtBytesMB(bytes)+') — delivered from the disk-backed File; no additional full in-RAM blob copy built, readFile bytes reference dropped');
-      data=null;
+      var res=await streamRenderOutputToOpfs(ff, fsOutName, opfsName);
+      if(!res.totalBytes) throw new Error('Empty output file.');
+      try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(res.totalBytes)+') after slice-streaming it to OPFS'); }catch(delErr){ log('memory: FS output delete after OPFS stream failed: '+(delErr.message||delErr)); }
+      log('memory: output delivered from the disk-backed OPFS file '+opfsName+' ('+fmtBytesMB(res.totalBytes)+') — slice-streamed; no full in-memory copy was built at any point');
+      // Post-render cleanup keeps the current result's delivered file
+      // (opfsName) and removes staged inputs + superseded outputs.
       await opfsCleanupAfterRender(opfsName);
-      return {blob:file, backend:'OPFS', opfsName:opfsName};
-    }catch(e){ logError('opfs-stream-output',e); log('OPFS stream-out failed — falling back to an in-memory blob for this output (storage: fallback=MEMFS)'); }
+      return {blob:res.file, backend:'OPFS', opfsName:opfsName};
+    }catch(streamErr){
+      logError('opfs-stream-output', streamErr);
+      // Delivery to OPFS failed (after the one recovery retry). Decide
+      // by the output's exact size: >100 MB must NOT fall back to
+      // holding the whole output as an in-memory blob — that path gets
+      // the tab killed or produces an unplayable player on iOS.
+      var totalBytes=null;
+      if(!(streamErr&&streamErr.slicerError)){
+        try{ totalBytes=await measureConverterFileSize(ff, fsOutName); }
+        catch(mErr){ log('storage: measuring the output size after the delivery failure failed: '+(mErr.message||mErr)); }
+      }
+      if(totalBytes===0) totalBytes=null; // a zero measure means the size is unknown (or the output is genuinely empty — the read below reports that), not that it is small
+      if(totalBytes==null){
+        try{ totalBytes=await estimateConverterFileSize(ff, fsOutName); if(totalBytes!=null) log('storage: output size after the delivery failure estimated at '+fmtBytesMB(totalBytes)+' (duration × bitrate probe — slice measurement unavailable)'); }
+        catch(e){}
+      }
+      if(totalBytes!=null&&totalBytes>LARGE_OUTPUT_BYTES){
+        log('storage: OPFS delivery failed for a '+fmtBytesMB(totalBytes)+' output (over the ~100 MB in-memory fallback limit) — NOT falling back to a whole-output in-memory blob; ending the run as a handled delivery failure');
+        try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(totalBytes)+') after the handled delivery failure'); }catch(e){}
+        await opfsCleanupAfterRender(null);
+        throw makeDeliveryError(totalBytes, streamErr);
+      }
+      if(totalBytes!=null) log('OPFS stream-out failed — the output is '+fmtBytesMB(totalBytes)+' (≤ ~100 MB), so the in-memory blob fallback may be used for this output (storage: fallback=MEMFS)');
+      else log('OPFS stream-out failed and the output size could not be determined — falling back to an in-memory blob for this output (storage: fallback=MEMFS)');
+    }
   }
-  // No staged output for this render (stream-out failed or OPFS off):
-  // still clear this render's staged inputs and any superseded staged
+  // In-memory path: OPFS unavailable (the pre-existing MEMFS behavior),
+  // or OPFS delivery failed for an output ≤ ~100 MB (fallback above).
+  // Still clear this render's staged inputs and any superseded staged
   // outputs so stale files never accumulate across renders.
   await opfsCleanupAfterRender(null);
+  var data=await ff.readFile(fsOutName); if(!data||!data.length) throw new Error('Empty output file.');
+  var bytes=data.length||data.byteLength||0;
   try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(bytes)+')'); }catch(delOutErr){ log('memory: FS output delete failed: '+(delOutErr.message||delOutErr)); }
   log('memory: output read ('+(bytes/1048576).toFixed(1)+' MB), FS copy deleted');
   var blob=new Blob([data],{type:'video/mp4'});
@@ -2813,6 +3122,13 @@ async function ensureExport(action){
     if(act) performExportAction(act);
   }catch(err){
     if(isExportCancelErr(err)||tok!==exportToken){ log('Export processing cancelled.'); }
+    else if(err&&err.deliveryFailure){
+      // Handled delivery failure — see doGenerate: one plain error, no
+      // dead result UI, journal marked finished/handled.
+      log('Delivery failed (handled): '+(err.message||err));
+      showError('❌ '+err.userMessage);
+      try{ journalMarkHandledError(); }catch(e){}
+    }
     else { console.error(err); logError('export',err); log('❌ Export failed: '+(err.message||err)); showError('❌ Export failed: '+(err.message||err)); try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     isExporting=false; ffmpegProgressCb=null;
@@ -3364,6 +3680,16 @@ async function doGenerate(opts){
     try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
+    else if(err&&err.deliveryFailure){
+      // Handled delivery failure: the video was created but could not
+      // be saved to OPFS on this device. No result UI was produced for
+      // this run (showResult never ran), showError clears the progress
+      // bar, and the journal is marked as a finished, handled failure
+      // so the next visit shows no "ended unexpectedly" banner.
+      log('Delivery failed (handled): '+(err.message||err));
+      showError('❌ '+err.userMessage);
+      try{ journalMarkHandledError(); }catch(e){}
+    }
     else { console.error(err); logError('generate',err); var genMsg=(err.message||err); var genShown=(genMsg==='Sync analysis failed')?'❌ Sync analysis failed':('❌ Generate failed: '+genMsg); if(!errorAlreadySurfaced(genShown)){ log(genShown); showError(genShown); } try{ journalMarkHandledError(); }catch(e){} }
   }finally{
     if(typeof proxyMounted!=='undefined'&&proxyMounted&&proxyMounted.ok&&ffmpeg){ try{ await unmountInputsWorkerFS(ffmpeg); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }catch(e){} proxyMounted=null; }
