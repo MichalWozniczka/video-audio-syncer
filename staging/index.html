@@ -1904,9 +1904,11 @@ async function opfsSweepStale(keepNames, reason){
   for(var i=0;i<entries.length;i++){
     var h=entries[i];
     // The 'versions' namespace (a directory holding stored History videos)
-    // is EXEMPT from every sweep — version payloads must survive renders,
-    // Start over, and the startup cleanup of previous sessions' files.
-    if(!h||h.name==='versions'||h.kind!=='file'||!opfsIsStagedName(h.name)) continue;
+    // and the 'sources' namespace (the one stored source pair) are
+    // EXEMPT from every sweep — version payloads and the stored sources
+    // must survive renders, Start over's staged cleanup, and the startup
+    // cleanup of previous sessions' files.
+    if(!h||h.name==='versions'||h.name==='sources'||h.kind!=='file'||!opfsIsStagedName(h.name)) continue;
     if(keepNames&&keepNames[h.name]) continue;
     try{ var f=await h.getFile(); if(f) bytes+=f.size||0; }catch(e){}
     try{ await opfsRoot.removeEntry(h.name); removed++; }catch(e){}
@@ -3112,6 +3114,15 @@ var historyCounter=0; // sequential Video N numbering — survives New/resets
 var VERSIONS_KEEP=5; // stored version videos kept in OPFS — older entries degrade to settings-only
 var HISTORY_INDEX_KEY='dance-sync.history-index.v1';
 var HISTORY_INDEX_BACKUP_KEY='dance-sync.history-index.v1.bak';
+// Stored source pair: exactly ONE pair of source files (the video and
+// audio as picked) is persisted in OPFS under 'sources/' so versions
+// generated from that pair stay fully editable across sessions. Its
+// identity metadata (name + size per slot, plus type/lastModified for
+// faithful File reconstruction) lives in localStorage under this key;
+// the bytes live in OPFS. The pair is replaced when a generation
+// completes with a different pair, and cleared by Start over.
+var SOURCES_META_KEY='dance-sync.source-pair.v1';
+var storedSourcePair=null; // {video:{name,size,type,lastModified}, audio:{...}} — the currently stored pair, or null
 // FIRST-CLASS PAYLOAD REFERENCE: every payload-backed History entry —
 // whether it OWNS its stored file or SHARES another version's file via
 // the identical-settings dedupe — carries the reference the same way:
@@ -3134,6 +3145,33 @@ function payloadRefOf(h){
   if(h.versionFile) return {path:h.versionFile, size:(h.payloadSize!=null?h.payloadSize:null), type:h.blobType||null};
   return null;
 }
+// Source-pair reference on a History entry: {video:{name,size},
+// audio:{name,size}} — the pair the entry was generated from. Pair
+// identity is name + size for each slot, exactly as picked. Entries
+// saved before pair references existed simply have none (null), and
+// restore for them keeps the previous locked behavior.
+function pairRefOf(h){
+  var p=(h&&h.pair)||(h&&h.snap&&h.snap.pair);
+  if(p&&p.video&&p.audio&&typeof p.video.name==='string'&&typeof p.video.size==='number'&&typeof p.audio.name==='string'&&typeof p.audio.size==='number') return {video:{name:p.video.name,size:p.video.size},audio:{name:p.audio.name,size:p.audio.size}};
+  return null;
+}
+function pairEquals(a,b){
+  return !!(a&&b&&a.video&&b.video&&a.audio&&b.audio&&a.video.name===b.video.name&&a.video.size===b.video.size&&a.audio.name===b.audio.name&&a.audio.size===b.audio.size);
+}
+function loadStoredSourcePairMeta(){
+  storedSourcePair=null;
+  try{
+    var raw=localStorage.getItem(SOURCES_META_KEY);
+    if(!raw) return;
+    var m=JSON.parse(raw);
+    if(m&&m.video&&m.audio&&typeof m.video.name==='string'&&typeof m.video.size==='number'&&typeof m.audio.name==='string'&&typeof m.audio.size==='number'){
+      storedSourcePair={video:{name:m.video.name,size:m.video.size,type:m.video.type||'',lastModified:m.video.lastModified||0},audio:{name:m.audio.name,size:m.audio.size,type:m.audio.type||'',lastModified:m.audio.lastModified||0}};
+    }
+  }catch(e){}
+}
+function persistStoredSourcePairMeta(){
+  try{ if(storedSourcePair) localStorage.setItem(SOURCES_META_KEY, JSON.stringify(storedSourcePair)); else localStorage.removeItem(SOURCES_META_KEY); }catch(e){}
+}
 function setPayloadRef(h, path, size, type){
   if(!h) return;
   if(path){
@@ -3155,7 +3193,7 @@ function persistHistoryIndex(){
   try{
     var data={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
       var ref=payloadRefOf(h);
-      return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:!!h.available, settingsOnly:!ref, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:h.blobType||null};
+      return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:!!h.available, settingsOnly:!ref, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:h.blobType||null, pair:pairRefOf(h)};
     })};
     json=JSON.stringify(data);
   }catch(e){ try{ log('History: FAILED to serialize the History index ('+(e.message||e)+') — index not saved.'); }catch(_){} return; }
@@ -3170,7 +3208,7 @@ function persistHistoryIndex(){
     try{ log('History: FAILED to save index ('+(e.message||e)+') — retrying with payload references stripped.'); }catch(_){}
     try{
       var slim={version:1, counter:historyCounter, entries:historyEntries.map(function(h){
-        return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:false, settingsOnly:true, payload:null, versionFile:null, payloadSize:null, blobType:h.blobType||null};
+        return {num:h.num, sig:h.sig, snap:h.snap, size:h.size, when:(h.when instanceof Date)?h.when.toISOString():(h.when||null), available:false, settingsOnly:true, payload:null, versionFile:null, payloadSize:null, blobType:h.blobType||null, pair:pairRefOf(h)};
       })};
       var slimJson=JSON.stringify(slim);
       localStorage.setItem(HISTORY_INDEX_KEY, slimJson);
@@ -3212,7 +3250,7 @@ function restoreHistoryIndex(){
         if(pe.payload&&pe.payload.path) ref={path:pe.payload.path, size:(pe.payload.size!=null?pe.payload.size:null), type:pe.payload.type||pe.blobType||null};
         else if(pe.versionFile) ref={path:pe.versionFile, size:(pe.payloadSize!=null?pe.payloadSize:null), type:pe.blobType||null};
         var hasPayload=!!ref;
-        restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(ref&&ref.size!=null?ref.size:0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:pe.blobType||(ref?ref.type:null)||null, settingsOnly:!hasPayload});
+        restored.push({sig:pe.sig||'', snap:pe.snap, size:(pe.size!=null?pe.size:(ref&&ref.size!=null?ref.size:0)), when:pe.when?new Date(pe.when):new Date(), available:hasPayload, num:pe.num, payload:ref, versionFile:ref?ref.path:null, payloadSize:ref?(ref.size!=null?ref.size:null):null, blobType:pe.blobType||(ref?ref.type:null)||null, settingsOnly:!hasPayload, pair:pairRefOf(pe)});
       }catch(ee){ skipped++; try{ log('History: skipped a saved entry that failed to rebuild ('+(ee.message||ee)+').'); }catch(_){} }
     });
     historyEntries.length=0;
@@ -3227,7 +3265,11 @@ function restoreHistoryIndex(){
 }
 function addHistory(sig,snap,size,available,blob){
   historyCounter++;
-  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, payload:null, versionFile:null, payloadSize:null, blobType:blob?(blob.type||'video/mp4'):null, settingsOnly:!blob};
+  // The source pair this generation used, recorded on the entry so a
+  // later restore can tell whether this entry's pair is the currently
+  // stored pair (identity = name + size for each slot, as picked).
+  var pairNow=(typeof danceFile!=='undefined'&&danceFile&&typeof songFile!=='undefined'&&songFile)?{video:{name:danceFile.name,size:danceFile.size},audio:{name:songFile.name,size:songFile.size}}:null;
+  var entry={sig:sig, snap:snap, size:size, when:new Date(), available:(available!==false)||!!blob, num:historyCounter, payload:null, versionFile:null, payloadSize:null, blobType:blob?(blob.type||'video/mp4'):null, settingsOnly:!blob, pair:pairNow};
   historyEntries.unshift(entry);
   if(available===false&&!blob) log('History: entry stored without its video payload (size '+fmtBytesMB(size)+' exceeds the History cache caps — max '+MAX_OUTPUTS+' outputs / '+(MAX_CACHE_BYTES/1048576).toFixed(0)+' MB) — restore requires re-generate.');
   // A completed apply/generation becomes the applied-settings snapshot:
@@ -3242,6 +3284,9 @@ function addHistory(sig,snap,size,available,blob){
   // edited later, not just its settings (fire-and-forget; logs its own
   // outcome to the diagnostics journal).
   if(blob) storeVersionPayload(entry, blob);
+  // Persist this generation's source pair (the single shared stored
+  // copy) so versions from this pair stay editable across sessions.
+  if(pairNow) storeSourcePairForGeneration();
 }
 // ---------- version video storage (OPFS 'versions' namespace) ----------
 // Each completed generation's output bytes are written to
@@ -3347,6 +3392,161 @@ async function evictOldVersionPayloads(){
   }
   renderHistory();
 }
+// ---------- stored source pair (OPFS 'sources' namespace) ----------
+// Exactly ONE source pair is stored at a time, in OPFS sources/video +
+// sources/audio (fixed names — storing a different pair overwrites and
+// thereby deletes the old pair's bytes). Every version generated from
+// that pair shares the single copy; no per-version copies are made.
+// The 'sources' directory is exempt from the OPFS sweeps the same way
+// 'versions' is (see opfsSweepStale). When a generation completes with
+// a DIFFERENT pair than the stored one, the stored pair is replaced;
+// Start over clears it. Entries from a no-longer-stored pair keep
+// their stored output videos (play/share/download unchanged) and
+// restore in the locked view-only mode.
+async function opfsWriteToDirFile(dirName, fileName, data){
+  var dir=await opfsRoot.getDirectoryHandle(dirName,{create:true});
+  var handle=await dir.getFileHandle(fileName,{create:true});
+  var writable=await handle.createWritable();
+  var CH=4*1024*1024;
+  try{
+    for(var off=0; off<data.size; off+=CH){
+      var chunk=await data.slice(off, Math.min(data.size, off+CH)).arrayBuffer();
+      await writable.write(chunk);
+    }
+    await writable.close();
+  }catch(e){ try{ await writable.abort(); }catch(_){} throw e; }
+  return handle;
+}
+function storeSourcePairForGeneration(){
+  (async function(){
+    try{
+      if(!danceFile||!songFile) return;
+      var identity={video:{name:danceFile.name,size:danceFile.size},audio:{name:songFile.name,size:songFile.size}};
+      var fullMeta={video:{name:danceFile.name,size:danceFile.size,type:danceFile.type||'',lastModified:danceFile.lastModified||0},audio:{name:songFile.name,size:songFile.size,type:songFile.type||'',lastModified:songFile.lastModified||0}};
+      var vFile=danceFile, aFile=songFile;
+      var ok=await detectStorageBackend();
+      if(!ok||!opfsRoot){ log('sources: OPFS unavailable ('+diagStorage.note+') — the source pair was not persisted; versions from this pair will restore in locked view-only mode.'); return; }
+      var prev=storedSourcePair;
+      var samePair=!!(prev&&pairEquals(prev,identity));
+      if(samePair){
+        // The single shared copy may already be stored — verify the
+        // bytes are actually still there (not evicted) and skip the
+        // rewrite if so; all versions from this pair share that copy.
+        try{
+          var dir0=await opfsRoot.getDirectoryHandle('sources');
+          var fv=await (await dir0.getFileHandle('video')).getFile();
+          var fa=await (await dir0.getFileHandle('audio')).getFile();
+          if(fv&&fv.size===identity.video.size&&fa&&fa.size===identity.audio.size) return;
+        }catch(e){ /* missing/evicted — fall through and store again */ }
+      }
+      await opfsWriteToDirFile('sources','video',vFile);
+      await opfsWriteToDirFile('sources','audio',aFile);
+      storedSourcePair=fullMeta; persistStoredSourcePairMeta();
+      if(prev&&!samePair){
+        log('sources replaced: previous stored pair ('+prev.video.name+' · '+fmtSize(prev.video.size)+' + '+prev.audio.name+' · '+fmtSize(prev.audio.size)+') deleted — new source pair stored: '+identity.video.name+' ('+fmtBytesMB(identity.video.size)+') + '+identity.audio.name+' ('+fmtBytesMB(identity.audio.size)+') → OPFS sources/ (one shared copy for every version from this pair). Versions from the previous pair keep their stored videos but now restore in locked view-only mode.');
+      } else {
+        log('sources stored: '+identity.video.name+' ('+fmtBytesMB(identity.video.size)+') + '+identity.audio.name+' ('+fmtBytesMB(identity.audio.size)+') → OPFS sources/ (one shared copy for every version generated from this pair; exempt from the OPFS sweep like versions/).');
+      }
+      try{ await refreshStorageEstimate(); }catch(e){}
+    }catch(e){
+      logError('sources-store',e);
+      log('sources: storing the source pair failed ('+(e.message||e)+') — versions from this pair will restore in locked view-only mode.');
+    }
+  })();
+}
+function clearStoredSources(reason){
+  var had=storedSourcePair;
+  storedSourcePair=null; persistStoredSourcePairMeta();
+  (async function(){
+    try{
+      var ok=await detectStorageBackend();
+      if(ok&&opfsRoot){
+        try{ var dir=await opfsRoot.getDirectoryHandle('sources'); try{ await dir.removeEntry('video'); }catch(e){} try{ await dir.removeEntry('audio'); }catch(e){} }catch(e){}
+      }
+    }catch(e){}
+    log('sources cleared ('+reason+')'+(had?(': stored pair '+had.video.name+' + '+had.audio.name+' deleted'):'')+' — versions from that pair keep their stored videos but restore in locked view-only mode from now on.');
+  })();
+}
+// Restore-time adoption of the stored source pair: load the stored
+// files so the page state is as if the user had just uploaded them,
+// with the restored entry's saved settings in force. Analysis is NOT
+// re-run and the detected offset is NOT re-derived — the entry's
+// stored settings are used exactly as an in-session restore uses
+// them; the sources' audio is decoded (decode only, no alignment)
+// so analysisState can be marked done and Apply edits generates from
+// those settings. Any failure to read the stored sources degrades to
+// the locked restore — it never fails the restore itself (the caller
+// has already set up the locked state and the payload delivery).
+function tryAdoptStoredSources(h,s){
+  (async function(){
+    var vFile=null, aFile=null;
+    try{
+      var meta=storedSourcePair;
+      if(!meta) throw new Error('no stored source pair metadata');
+      var ok=await detectStorageBackend();
+      if(!ok||!opfsRoot) throw new Error('OPFS unavailable: '+diagStorage.note);
+      var dir=await opfsRoot.getDirectoryHandle('sources');
+      var vRaw=await (await dir.getFileHandle('video')).getFile();
+      var aRaw=await (await dir.getFileHandle('audio')).getFile();
+      if(!vRaw||vRaw.size!==meta.video.size) throw new Error('stored video source missing or size mismatch');
+      if(!aRaw||aRaw.size!==meta.audio.size) throw new Error('stored audio source missing or size mismatch');
+      vFile=new File([vRaw], meta.video.name, {type:meta.video.type||'', lastModified:meta.video.lastModified||0});
+      aFile=new File([aRaw], meta.audio.name, {type:meta.audio.type||'', lastModified:meta.audio.lastModified||0});
+    }catch(e){
+      log('History: restore fell back to locked — the stored sources for Version '+h.num+' could not be read ('+(e.message||e)+'); the version restores in view-only mode with the re-upload note, exactly as before.');
+      return;
+    }
+    // If the user picked files (or reset) while the stored sources
+    // were being read, that newer action wins — do not clobber it.
+    if(danceFile||songFile) return;
+    filesVersion++;
+    danceFile=vFile; songFile=aFile;
+    dancePCM=null; songPCM=null;
+    danceDur=(typeof s.srcDur==='number'&&isFinite(s.srcDur)&&s.srcDur>0)?s.srcDur:0;
+    songDur=(typeof s.songDur==='number'&&isFinite(s.songDur)&&s.songDur>0)?s.songDur:0;
+    danceVideoW=0; danceVideoH=0;
+    filmstripBuiltFor=null;
+    try{
+      diagFiles.video.name=vFile.name; diagFiles.video.sizeBytes=vFile.size; diagFiles.video.type=vFile.type||'';
+      diagFiles.audio.name=aFile.name; diagFiles.audio.sizeBytes=aFile.size; diagFiles.audio.type=aFile.type||'';
+      $('metaDance').textContent=vFile.name+' · '+fmtSize(vFile.size);
+      $('metaSong').textContent=aFile.name+' · '+fmtSize(aFile.size);
+      $('dropDance').classList.add('has'); $('dropSong').classList.add('has');
+      if(danceURL) URL.revokeObjectURL(danceURL);
+      danceURL=URL.createObjectURL(vFile);
+      $('vid').src=danceURL;
+      $('playerSec').classList.add('show');
+    }catch(e){}
+    // Probe the video's metadata for its pixel size (render scaling
+    // decisions read danceVideoW/H), mirroring the upload probe.
+    try{
+      var purl=URL.createObjectURL(vFile);
+      var pel=document.createElement('video'); pel.preload='metadata'; pel.src=purl;
+      pel.onloadedmetadata=function(){ if(danceFile===vFile){ if(pel.videoWidth){ danceVideoW=pel.videoWidth; danceVideoH=pel.videoHeight; } if(!danceDur&&isFinite(pel.duration)) danceDur=pel.duration; } URL.revokeObjectURL(purl); };
+      pel.onerror=function(){ URL.revokeObjectURL(purl); };
+    }catch(e){}
+    pendingRestoreCtx=null; // the entry's settings are already in force — no re-upload normalization stash, and no re-analysis
+    setRestoreNeedsSources(false);
+    var rbS=$('btnResync'); if(rbS) rbS.disabled=false;
+    updateNewBtn();
+    layoutTimeline();
+    log('History: restore used stored sources — Version '+h.num+'\'s source pair is the stored pair, so the stored files were loaded as if just uploaded ('+vFile.name+' · '+fmtSize(vFile.size)+' + '+aFile.name+' · '+fmtSize(aFile.size)+'); the editor is fully unlocked with the version\'s saved settings in force (detected offset '+(typeof s.detected==='number'?Number(s.detected).toFixed(3):'?')+'s from the entry — analysis was NOT re-run and the offset was NOT re-derived).');
+    var ver=filesVersion;
+    try{
+      var dd=await fileToMono22050(vFile,'Decoding Video');
+      if(ver!==filesVersion||danceFile!==vFile) return;
+      dancePCM=dd.pcm; if(dd.duration) danceDur=dd.duration;
+      var ss2=await fileToMono22050(aFile,'Decoding Audio');
+      if(ver!==filesVersion||danceFile!==vFile||songFile!==aFile) return;
+      songPCM=ss2.pcm; if(ss2.duration) songDur=ss2.duration;
+      analysisState='done'; analysisVersion=ver;
+      log('History: stored sources decoded for Version '+h.num+' — editing and Apply edits now work across sessions with no re-upload (analysis state restored from the entry\'s stored settings; no re-analysis).');
+      layoutTimeline(); buildFilmstrip();
+    }catch(decodeErr){
+      log('History: stored sources for Version '+h.num+' loaded, but decoding their audio failed ('+(decodeErr.message||decodeErr)+') — the files stay loaded and the editor unlocked; Apply edits will run analysis as a fallback.');
+    }
+  })();
+}
 // Load a stored version video from OPFS into the Preview as the current
 // result (Share/Download/Open then act on it via showResult, as usual).
 function loadVersionPayload(h){
@@ -3375,6 +3575,16 @@ function loadVersionPayload(h){
       try{ cachePut(h.sig,{blob:rawFile, opfsName:null}); }catch(e){}
       showResult(rawFile,{isDirect:!!(h.snap&&h.snap.isDirect)});
       if(h.snap&&h.snap.isDirect){ log('History: restored version is a direct export — Share/Download/Open deliver this stored file.'); }
+      // A finished restore is a CLEAN session outcome: the stored
+      // version has been delivered to the player and nothing is in
+      // flight after it. Mark the session journal completed here —
+      // the restore advanced the journal stage to "delivery" (via
+      // showResult) but no generation ran to complete it, so without
+      // this a restore-only session reads as a mid-run crash
+      // ("Previous session ended unexpectedly during delivery") on
+      // the next visit. A later real run re-arms the journal via
+      // journalBeginRun exactly as usual.
+      try{ journalMarkCompleted(true); }catch(e){}
     }catch(e){
       logError('version-restore',e);
       setPayloadRef(h, null); h.available=false; renderHistory();
@@ -3523,8 +3733,22 @@ function restoreHistory(h){
   }
   else {
     var e=cacheGet(h.sig);
-    if(e){ var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:false}); generatedOnce=true; log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
+    if(e){ var rawBlob=e.blob; var useBlob=rawBlob; log('History: restoring the cached result — embedding the cached blob exactly as generation embedded it ('+rawBlob.size+' bytes, type='+(rawBlob.type||'(empty)')+'; no re-wrap, no type override — the restore embed is construction-identical to the generation-time embed).'); showResult(useBlob,{isDirect:false}); generatedOnce=true; try{ journalMarkCompleted(true); }catch(e){} log('History: proxy preview restored instantly from cache ('+fmtSize(useBlob.size)+').'); var esig=settingsSignature(s.q,s.tStart,s.tEnd,s.eff,s.blend); if(exportCacheGet(esig)){ log('History: a cached export for this version at its Export quality still exists — Share/Download/Open will deliver it without re-rendering.'); } else { log('History: no cached export for this version — Share/Download/Open will render the export on demand (Processing bar).'); } }
     else { h.available=false; renderHistory(); log('History: that video is not stored as a restore payload (evicted or over the History cache caps) — settings restored; restore requires re-generate — tap Apply edits to rebuild it.'); }
+  }
+  // Stored-source restore: with no sources loaded, if this entry's
+  // source pair IS the currently stored pair, load the stored files
+  // and fully unlock the editor with this entry's settings in force
+  // (no re-upload note, no re-analysis). The locked state set up
+  // above is the fallback — if the stored sources cannot be read,
+  // tryAdoptStoredSources logs the fallback and the restore stands
+  // exactly as it was. Entries with no pair reference (saved before
+  // pair references existed), entries from an older/replaced pair,
+  // and restores after Start over cleared the sources never enter
+  // this path and keep the locked behavior unchanged.
+  if(sourcesAbsent){
+    var hPair=pairRefOf(h);
+    if(hPair&&storedSourcePair&&pairEquals(hPair,storedSourcePair)) tryAdoptStoredSources(h,s);
   }
 }
 
@@ -3588,6 +3812,10 @@ function resetAll(){
   if(opfsStaged.dance) opfsDelete(opfsStaged.dance.name);
   if(opfsStaged.song) opfsDelete(opfsStaged.song.name);
   opfsStaged={dance:null, song:null};
+  // Start over also deletes the stored source pair: History entries
+  // remain and their stored videos still play/share/download, but
+  // they restore in locked view-only mode from now on.
+  try{ clearStoredSources('Start over'); }catch(e){}
   if(resultURL){ URL.revokeObjectURL(resultURL); resultURL=null; }
   resultBlob=null; resultFile=null; resultCanShare=false; resultVideoEl=null; lastResultIsDirect=false; directStageLabel='';
   if(danceURL){ URL.revokeObjectURL(danceURL); danceURL=null; }
@@ -3948,6 +4176,7 @@ try{
 // eviction marking entries unavailable, a failed payload load marking an
 // entry settings-only) is still reflected in the saved index.
 try{ window.addEventListener('pagehide', function(){ try{ persistHistoryIndex(); }catch(e){} }); }catch(e){}
+try{ loadStoredSourcePairMeta(); }catch(e){}
 try{ restoreHistoryIndex(); }catch(e){ try{ logError('history-restore-startup',e); }catch(_){} }
 try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
