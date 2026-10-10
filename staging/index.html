@@ -775,6 +775,7 @@ function endProgressOnFailure(){ if(barPct>=100) return; var w=$('progWrap'); if
 function clearError(){ surfacedErrorMsg=null; var el=$('errLine'); if(!el) return; el.textContent=''; el.classList.remove('show'); }
 var stepState={1:false,2:false,3:false,4:false};
 var barPct=0, barCeiling=5, progPhase='', progressEverShown=false;
+var progressSuppressed=false; // set by Start over (resetAll): every progress painter below no-ops while true, so no stale async completion can repaint the bar after a reset. Cleared only by resetProgress() at the start of a new run.
 // Progress milestone ladder — percentage ALLOCATION (not bar width; the
 // track itself stays full width): the pre-render phases together fill
 // roughly the first half of the range, and the render fills the second
@@ -798,14 +799,14 @@ var runT0=0, runClockTimer=null;
 var directStageLabel='', lastResultIsDirect=false;
 function fmtClock(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
 function setProgPhase(p){ if(p) progPhase=p; renderProgText(); }
-function renderProgText(){ var el=$('progText'); if(!el) return; if(barPct>=100){ el.textContent='100% · Done'; return; } el.textContent=Math.round(barPct)+'%'+(progPhase?(' · '+progPhase):''); }
+function renderProgText(){ var el=$('progText'); if(!el) return; if(progressSuppressed){ el.textContent=''; return; } if(barPct>=100){ el.textContent='100% · Done'; return; } el.textContent=Math.round(barPct)+'%'+(progPhase?(' · '+progPhase):''); }
 function creepTick(){ if(barPct<100&&barCeiling>barPct){ var gap=barCeiling-barPct; var inc=gap*0.025; if(inc>0){ barPct=Math.min(barCeiling-0.05, barPct+inc); var b=$('progBar'); if(b) b.style.width=barPct+'%'; } } renderProgText(); }
-function startRunClock(){ runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(creepTick,250); renderProgText(); }
+function startRunClock(){ if(progressSuppressed) return; runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(creepTick,250); renderProgText(); }
 function stopRunClock(){ if(runClockTimer){ clearInterval(runClockTimer); runClockTimer=null; } renderProgText(); }
-function setBarPct(pct,phase){ if(phase) progPhase=phase; pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; if(barPct>=100){ progPhase='Done'; barCeiling=100; } else { barCeiling=progNextCeiling(barPct); } markProgressShown(); var w=$('progWrap'); if(w) w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); var pb=$('progBar'); if(pb) pb.style.width=pct+"%"; renderProgText(); }
+function setBarPct(pct,phase){ if(progressSuppressed) return; if(phase) progPhase=phase; pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; if(barPct>=100){ progPhase='Done'; barCeiling=100; } else { barCeiling=progNextCeiling(barPct); } markProgressShown(); var w=$('progWrap'); if(w) w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); var pb=$('progBar'); if(pb) pb.style.width=pct+"%"; renderProgText(); }
 function markStepDone(n){ stepState[n]=true; var el=$('step'+n); if(el){ el.classList.remove('active'); el.classList.add('done'); el.textContent='\u2713 '+el.dataset.label; } var next=$('step'+(n+1)); if(next&&!stepState[n+1]) next.classList.add('active'); }
 function markStepActive(n){ var el=$('step'+n); if(el&&!stepState[n]) el.classList.add('active'); }
-function resetProgress(full){ clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); if(w) w.style.display="flex"; markProgressShown(); var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; barCeiling=progNextCeiling(0); progPhase='Loading'; var pb0=$('progBar'); if(pb0) pb0.style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=50; barCeiling=progNextCeiling(50); progPhase='Generating'; var pb1=$('progBar'); if(pb1) pb1.style.width="50%"; } startRunClock(); }
+function resetProgress(full){ progressSuppressed=false; clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); if(w) w.style.display="flex"; markProgressShown(); var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; barCeiling=progNextCeiling(0); progPhase='Loading'; var pb0=$('progBar'); if(pb0) pb0.style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=50; barCeiling=progNextCeiling(50); progPhase='Generating'; var pb1=$('progBar'); if(pb1) pb1.style.width="50%"; } startRunClock(); }
 function progressForGenerate(ratio){ if(ratio==null) return; setBarPct(50+Math.max(0,Math.min(1,ratio))*47,'Generating'); }
 var analysisState="idle", analysisPromise=null, filesVersion=0, analysisVersion=-1, confidence=0, lastCandidates=[];
 var _scratchDanceSpec=null, _scratchSongSpec=null, _scratchCoarse=null, _scratchEvals=null;
@@ -832,6 +833,7 @@ var pipelineRestartPending=false; // a file change cancelled an in-flight run; r
 // signal (so in-flight awaits abort promptly), and terminates the ffmpeg
 // worker. ensureFFmpeg() re-creates the worker on the next run.
 var runToken=0, cancelReject=null, cancelPromise=null;
+var sessionGen=0; // bumped by Start over (resetAll) ONLY. Async work that outlives a run (filmstrip extraction above all) captures it at start and checks it at every step: a mismatch means a reset happened mid-flight and the work must stop and drop its results silently — no progress repaint, no result/preview, no further pipeline log lines.
 function newCancelSignal(){ cancelPromise=new Promise(function(_,rej){ cancelReject=rej; }); cancelPromise.catch(function(){}); }
 function cancellable(p){ return cancelPromise?Promise.race([p,cancelPromise]):p; }
 function isCancelErr(e){ return e&&e.message==='Cancelled'; }
@@ -1506,15 +1508,17 @@ function drawCover(ctx,img,cw,ch){
   var s=Math.max(cw/iw,ch/ih), dw=iw*s, dh=ih*s;
   ctx.drawImage(img,(cw-dw)/2,(ch-dh)/2,dw,dh);
 }
-async function extractStripTiles(N,tw,W,laneH){
+async function extractStripTiles(N,tw,W,laneH,gen){
   var file=danceFile; if(!file) return null;
   return withFFmpegLock(async function(){
+    if(gen!=null&&gen!==sessionGen) return null; // reset while queued behind the ffmpeg lock — never start
     var ff=await withTimeout(ensureFFmpeg(null),60000,'Loading ffmpeg for filmstrip');
     var ext=(file.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
     var inName='strip.'+ext;
     await withTimeout(ff.writeFile(inName, await FFmpegUtil.fetchFile(file)),120000,'Writing '+file.name+' for filmstrip');
     var tiles=[];
     for(var j=0;j<N;j++){
+      if(gen!=null&&gen!==sessionGen) return null; // Start over landed mid-extraction: stop here, don't extract or log another tile
       var time=Math.min(Math.max(0,danceDur-0.05),(j*tw/W)*danceDur);
       var outName='tile'+j+'.png';
       try{
@@ -1536,6 +1540,7 @@ async function extractStripTiles(N,tw,W,laneH){
       try{ await ff.deleteFile(outName); }catch(e){}
     }
     try{ await ff.deleteFile(inName); }catch(e){}
+    if(gen!=null&&gen!==sessionGen) return null;
     return tiles;
   });
 }
@@ -1554,6 +1559,7 @@ async function buildFilmstrip(){
   if(!(tw>4)) tw=W/6;
   var N=Math.max(1,Math.ceil(W/tw));
   filmstripBuilding=true; filmstripBuiltFor=key;
+  var gen=sessionGen; // a Start over bumps sessionGen: this build then aborts in extractStripTiles and its result is dropped below without drawing or logging
   var strip=$('filmstrip'); strip.innerHTML='';
   var canvases=[];
   for(var i=0;i<N;i++){
@@ -1567,10 +1573,10 @@ async function buildFilmstrip(){
     var tiles=(cached&&cached.count===N)?cached.tiles:null;
     if(!tiles){
       log('Filmstrip: extracting '+N+' stills with ffmpeg…');
-      tiles=await extractStripTiles(N,tw,W,laneH);
-      if(tiles) stripCache[fkey]={count:N,tiles:tiles};
+      tiles=await extractStripTiles(N,tw,W,laneH,gen);
+      if(tiles&&gen===sessionGen) stripCache[fkey]={count:N,tiles:tiles};
     }
-    if(filmstripBuiltFor!==key||!tiles) { filmstripBuilding=false; return; }
+    if(gen!==sessionGen||filmstripBuiltFor!==key||!tiles) { filmstripBuilding=false; return; }
     var drawn=0;
     for(var j=0;j<N;j++){
       if(!tiles[j]||!canvases[j]) continue;
@@ -1582,7 +1588,7 @@ async function buildFilmstrip(){
     }
     if(drawn>0) log('Filmstrip: '+drawn+'/'+N+' stills drawn.');
     else log('Filmstrip: no stills could be extracted from '+danceFile.name+'.');
-  }catch(e){ logError('filmstrip',e); log('Filmstrip failed: '+(e.message||e)); }
+  }catch(e){ if(gen!==sessionGen){ filmstripBuilding=false; return; } logError('filmstrip',e); log('Filmstrip failed: '+(e.message||e)); }
   filmstripBuilding=false;
 }
 function flushFilmstrip(){ if(filmstripPending){ filmstripPending=false; buildFilmstrip(); } }
@@ -3647,19 +3653,30 @@ function updateNewBtn(){
   var gr=$('generateRow'); if(gr&&firstGenDone) gr.classList.add('show');
 }
 function resetAll(){
-  // Start over cancels any in-flight work first (generation, export, or
-  // analysis): bump tokens, terminate the converter worker (aborts the
-  // running ffmpeg exec; the WebCodecs pipeline checks runToken), and
-  // reject both cancel signals so pending stages abort.
+  // Start over cancels ALL in-flight work belonging to the current
+  // generation — generation, export, analysis, delivery, AND the
+  // post-completion background work (filmstrip extraction) that keeps
+  // running after a result lands (B11). Unconditionally: bump every
+  // token, reject both cancel signals, and terminate the converter
+  // worker even when no run is active — terminate() rejects the pending
+  // ffmpeg exec, so a filmstrip tile loop dies with its worker instead
+  // of logging tiles past this reset, and no further ffmpeg progress
+  // events can fire to repaint the bar. sessionGen is the generation
+  // guard: async work captured before this bump (filmstrip above all)
+  // checks it and drops itself silently. progressSuppressed seals the
+  // progress UI until the next run's resetProgress() clears it, so the
+  // bar reset at the bottom of this function is final — hidden, 0%,
+  // no text, under all circumstances.
   var running=isGenerating||pipelineRunning||analysisState==='running'||isExporting;
+  sessionGen++;
+  progressSuppressed=true;
   runToken++; filesVersion++;
   exportToken++;
-  if(running&&cancelReject) cancelReject(new Error('Cancelled'));
-  if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
-  if(running){
-    ffmpegChain=Promise.resolve();
-    if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; ffmpegProgressCb=null; }
-  }
+  if(cancelReject) cancelReject(new Error('Cancelled'));
+  if(exportCancelReject) exportCancelReject(new Error('Export cancelled'));
+  ffmpegChain=Promise.resolve();
+  if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; }
+  ffmpegProgressCb=null;
   danceFile=null; songFile=null;
   dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
