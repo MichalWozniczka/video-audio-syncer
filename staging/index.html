@@ -1094,18 +1094,23 @@ async function decodeViaFFmpeg(file,startPct){
     if(startPct) setBarPct(startPct,'Decoding'); // event: decode starts (converter ready, extraction begins)
     var ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,'')||'bin';
     var inName='in.'+ext, outName='out.wav';
-    log('ffmpeg: writing '+file.name+' ('+fmtSize(file.size)+')…');
-    await withTimeout(ff.writeFile(inName, await FFmpegUtil.fetchFile(file)),90000,'Writing '+file.name+' to converter');
-    log('ffmpeg: extracting audio only (mono '+TARGET_SR+' Hz, PCM WAV, no video decode)…');
+    // B12: never fetchFile/writeFile the whole user file here — mount
+    // it via WORKERFS (ffmpeg reads on demand) or, if mounting is
+    // unavailable, slice-stream it in ≤16 MB slices. The old whole-file
+    // copy (JS Uint8Array + MEMFS copy, ~2x file size) is what killed
+    // the tab on the 1 GB HEVC input at exactly this step.
+    var ingest=await ingestSingleFileForFFmpeg(ff, file, inName, 'decode');
+    var inPath=ingest.path;
+    log('ffmpeg: extracting audio only (mono '+TARGET_SR+' Hz, PCM WAV, no video decode) from '+inPath+'…');
     var execCode=null;
-    try{ execCode=await withTimeout(ff.exec(['-y','-i',inName,'-vn','-ac','1','-ar',String(TARGET_SR),'-c:a','pcm_s16le', outName]),180000,'ffmpeg audio extraction of '+file.name+' ('+fmtSize(file.size)+')'); }catch(e){ throw new Error('Could not extract audio from '+file.name+' ('+fmtSize(file.size)+') — '+(e.message||e)+'. The file may exceed what the in-browser converter can handle.'); }
-    var data; try{ data=await ff.readFile(outName); }catch(e){ throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')'); }
-    if(!data||!data.length) throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')');
+    try{ execCode=await withTimeout(ff.exec(['-y','-i',inPath,'-vn','-ac','1','-ar',String(TARGET_SR),'-c:a','pcm_s16le', outName]),180000,'ffmpeg audio extraction of '+file.name+' ('+fmtSize(file.size)+')'); }catch(e){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('Could not extract audio from '+file.name+' ('+fmtSize(file.size)+') — '+(e.message||e)+'. The file may exceed what the in-browser converter can handle.'); }
+    var data; try{ data=await ff.readFile(outName); }catch(e){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')'); }
+    if(!data||!data.length){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')'); }
     log('ffmpeg: extracted '+fmtSize(data.length)+' of audio — reading WAV samples directly…');
     var parsed;
-    try{ parsed=parseWavToMonoFloat32(data); }catch(pe){ throw new Error('Could not parse extracted WAV from '+file.name+': '+(pe.message||pe)); }
+    try{ parsed=parseWavToMonoFloat32(data); }catch(pe){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('Could not parse extracted WAV from '+file.name+': '+(pe.message||pe)); }
     log('ffmpeg: parsed WAV '+parsed.duration.toFixed(2)+'s · '+parsed.sampleRate+' Hz · '+parsed.pcm.length+' samples');
-    try{ await ff.deleteFile(inName); await ff.deleteFile(outName); }catch(e){}
+    try{ await cleanupSingleFileIngest(ff, ingest); await ff.deleteFile(outName); }catch(e){}
     return parsed;
   });
 }
@@ -1515,14 +1520,17 @@ async function extractStripTiles(N,tw,W,laneH,gen){
     var ff=await withTimeout(ensureFFmpeg(null),60000,'Loading ffmpeg for filmstrip');
     var ext=(file.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
     var inName='strip.'+ext;
-    await withTimeout(ff.writeFile(inName, await FFmpegUtil.fetchFile(file)),120000,'Writing '+file.name+' for filmstrip');
+    // B12: same bounded ingest as decode — mount the video via
+    // WORKERFS or slice-stream it; never a whole-file fetchFile copy.
+    var ingest=await ingestSingleFileForFFmpeg(ff, file, inName, 'filmstrip');
+    var inPath=ingest.path;
     var tiles=[];
     for(var j=0;j<N;j++){
-      if(gen!=null&&gen!==sessionGen) return null; // Start over landed mid-extraction: stop here, don't extract or log another tile
+      if(gen!=null&&gen!==sessionGen){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(e){} return null; } // Start over landed mid-extraction: stop here, don't extract or log another tile
       var time=Math.min(Math.max(0,danceDur-0.05),(j*tw/W)*danceDur);
       var outName='tile'+j+'.png';
       try{
-        await withTimeout(ff.exec(['-ss',time.toFixed(3),'-i',inName,'-frames:v','1','-vf','scale=-2:112',outName]),60000,'Filmstrip frame at '+time.toFixed(2)+'s');
+        await withTimeout(ff.exec(['-ss',time.toFixed(3),'-i',inPath,'-frames:v','1','-vf','scale=-2:112',outName]),60000,'Filmstrip frame at '+time.toFixed(2)+'s');
         var data=await ff.readFile(outName);
         if(data&&data.length){
           var blob=new Blob([data],{type:'image/png'});
@@ -1539,7 +1547,7 @@ async function extractStripTiles(N,tw,W,laneH,gen){
       }catch(e){ tiles.push(null); }
       try{ await ff.deleteFile(outName); }catch(e){}
     }
-    try{ await ff.deleteFile(inName); }catch(e){}
+    try{ await cleanupSingleFileIngest(ff, ingest); }catch(e){}
     if(gen!=null&&gen!==sessionGen) return null;
     return tiles;
   });
@@ -1714,9 +1722,13 @@ $('blend').addEventListener('change',invalidateDownload);
 // uploaded Files directly into the converter via WORKERFS (see
 // mountInputsWorkerFS below) so ffmpeg reads their bytes on demand from
 // the File handles — zero input residency in the converter FS, and it
-// works over plain HTTP (no secure context needed, unlike OPFS). The
-// writeFile-into-MEMFS path above is the exact fallback when mounting is
-// unavailable, throws, or returns false.
+// works over plain HTTP (no secure context needed, unlike OPFS). When
+// mounting is unavailable, throws, or returns false, the fallback is
+// the B12 slice-streamed ingest (writeFileSliceStreamed): the file is
+// written to MEMFS in ≤16 MB slices read from the staged/selected
+// Blob and released after each write — never a whole-file copy. The
+// decode and filmstrip paths use the same mount-first, slice-streamed
+// fallback ingest via ingestSingleFileForFFmpeg.
 function hashStr(str){ var h=5381; for(var i=0;i<str.length;i++){ h=((h<<5)+h+str.charCodeAt(i))|0; } return (h>>>0).toString(36); }
 var opfsRoot=null, opfsStaged={dance:null, song:null};
 function storageGetDirectoryType(){ try{ return typeof (navigator.storage&&navigator.storage.getDirectory); }catch(e){ return 'threw '+(e.message||e); } }
@@ -2267,8 +2279,8 @@ async function tryMountOPFS(ff){
 // both inputs (~396 MB) AND the growing ~290 MB output during the
 // encode. Returns {ok:true, danceIn, songIn} or {ok:false, reason}; a
 // failed verdict is cached for the session (diagStorage.workerfsVerdict)
-// so later renders go straight to the writeFile fallback — the caller
-// still logs the per-render mount line either way. Callers must
+// so later renders go straight to the slice-streamed fallback — the
+// caller still logs the per-render mount line either way. Callers must
 // unmountInputsWorkerFS(ff) after the render.
 var WORKERFS_DANCE_DIR='/mnt/dance', WORKERFS_SONG_DIR='/mnt/song';
 async function mountInputsWorkerFS(ff, dFile, sFile){
@@ -2297,6 +2309,128 @@ async function unmountInputsWorkerFS(ff){
   if(!ff) return;
   try{ await ff.unmount(WORKERFS_DANCE_DIR); }catch(e){}
   try{ await ff.unmount(WORKERFS_SONG_DIR); }catch(e){}
+}
+// ---------- B12: bounded-memory ingest of user files ----------
+// Ingesting ANY user file into the converter — decode/analysis,
+// filmstrip, and every render/export fallback — must never
+// materialize the whole file in JS or wasm memory at once (the
+// 1,067,264,984-byte HEVC input killed the tab at decode: fetchFile
+// built a whole-file Uint8Array and writeFile then copied it into
+// MEMFS, ~2x the file size at peak). Two mechanisms, both logged per
+// file so a diagnostics dump proves which one ran:
+//   1. MOUNTED (preferred): the File (selected file or its OPFS-staged
+//      copy — both are disk-backed Blob handles) is mounted via
+//      WORKERFS and ffmpeg reads it on demand; nothing is copied.
+//   2. SLICE-STREAMED (fallback when mounting is unavailable): the
+//      file is read from its (OPFS-staged, when present) Blob in
+//      slices of at most INGEST_SLICE_BYTES, each slice written to
+//      the converter FS and released before the next is read; for
+//      multi-slice files the parts are then concatenated INSIDE the
+//      converter by a raw data copy (byte-exact, no JS copy), so the
+//      peak extra JS memory stays ~one slice regardless of file size.
+var INGEST_SLICE_BYTES=16*1024*1024; // 16 MB — at most the 32 MB bound, one slice in flight
+var ingestMountSeq=0;
+async function mountSingleFileWorkerFS(ff, file, label){
+  if(diagStorage.workerfsVerdict===false) return {ok:false, reason:'WORKERFS mount already reported unsupported this session ('+diagStorage.workerfsReason+')'};
+  if(!ff||typeof ff.mount!=='function'){ diagStorage.workerfsVerdict=false; diagStorage.workerfsReason='the converter wrapper exposes no mount()'; return {ok:false, reason:diagStorage.workerfsReason}; }
+  if(!file) return {ok:false, reason:'source File is missing'};
+  var mountDir='/mnt/ingest-'+(++ingestMountSeq)+'-'+String(label||'file').replace(/[^a-z0-9]+/gi,'');
+  try{
+    try{ await ff.createDir('/mnt'); }catch(e){}
+    try{ await ff.createDir(mountDir); }catch(e){}
+    var r=await ff.mount('WORKERFS',{files:[file]},mountDir);
+    if(r===false) throw new Error('mount("WORKERFS") returned false — the bundled core does not expose the WORKERFS filesystem');
+    diagStorage.workerfsVerdict=true;
+    return {ok:true, path:mountDir+'/'+file.name, mountDir:mountDir};
+  }catch(e){
+    try{ await ff.unmount(mountDir); }catch(_){}
+    diagStorage.workerfsVerdict=false; diagStorage.workerfsReason=(e&&e.message)||String(e);
+    return {ok:false, reason:diagStorage.workerfsReason};
+  }
+}
+async function unmountSingleFileWorkerFS(ff, mountDir){
+  if(!ff||!mountDir) return;
+  try{ await ff.unmount(mountDir); }catch(e){}
+}
+// Resolve the best ingest source for a user file: the OPFS-staged copy
+// when one is staged for it (disk-backed; slice reads come from it),
+// otherwise the selected File itself (also a disk-backed Blob handle —
+// Blob.slice reads never load the whole file).
+async function resolveIngestSource(file){
+  try{
+    var role=null;
+    if(typeof danceFile!=='undefined'&&danceFile&&fileKey(file)===fileKey(danceFile)) role='dance';
+    else if(typeof songFile!=='undefined'&&songFile&&fileKey(file)===fileKey(songFile)) role='song';
+    if(role){
+      var staged=await getInputFileForRender(role);
+      if(staged) return {blob:staged, fromOpfs:(staged!==file)};
+    }
+  }catch(e){}
+  return {blob:file, fromOpfs:false};
+}
+// Slice-streamed ingest into the converter FS. execFn(args) runs one
+// ffmpeg exec with the caller's lock discipline (callers already
+// inside withFFmpegLock pass a direct exec; callers outside wrap the
+// exec in withFFmpegLock) — used only for the multi-slice byte-exact
+// assembly. Logs the mechanism + slice count for this file.
+async function writeFileSliceStreamed(ff, destName, sourceBlob, label, displayName, execFn){
+  var total=(sourceBlob&&sourceBlob.size)||0;
+  var sliceCount=Math.max(1, Math.ceil(total/INGEST_SLICE_BYTES));
+  log('ingest ['+label+']: '+(displayName||destName)+' ('+fmtBytesMB(total)+') — slice-streamed into converter FS as '+destName+' in '+sliceCount+' slice(s) of at most '+(INGEST_SLICE_BYTES/1048576)+' MB (slices read from the staged/selected Blob and released after each write; peak extra JS memory ≈ one slice; no whole-file copy)');
+  if(sliceCount===1){
+    var singleBuf=await sourceBlob.arrayBuffer();
+    var singleU8=new Uint8Array(singleBuf);
+    await withTimeout(ff.writeFile(destName, singleU8),120000,'Writing slice-streamed '+destName);
+    singleU8=null; singleBuf=null;
+    log('ingest ['+label+']: '+(displayName||destName)+' — slice-streamed ingest complete: '+sliceCount+' slice(s), '+fmtBytesMB(total)+' written to '+destName);
+    return {sliceCount:sliceCount};
+  }
+  var partNames=[];
+  for(var si=0; si<sliceCount; si++){
+    var start=si*INGEST_SLICE_BYTES, end=Math.min(total, start+INGEST_SLICE_BYTES);
+    var partName=destName+'.part'+si;
+    var sliceBlob=sourceBlob.slice(start, end);
+    var sliceBuf=await sliceBlob.arrayBuffer();
+    sliceBlob=null;
+    var sliceU8=new Uint8Array(sliceBuf);
+    await withTimeout(ff.writeFile(partName, sliceU8),120000,'Writing ingest slice '+(si+1)+'/'+sliceCount+' of '+(displayName||destName));
+    sliceU8=null; sliceBuf=null; // release this slice before reading the next
+    partNames.push(partName);
+    log('ingest ['+label+']: '+(displayName||destName)+' — slice '+(si+1)+'/'+sliceCount+' written ('+fmtBytesMB(end)+' of '+fmtBytesMB(total)+' staged in converter FS parts)');
+  }
+  // Assemble the parts into destName INSIDE the converter with a raw
+  // data stream copy (concat protocol over the part files → data
+  // muxer): byte-exact concatenation, performed by ffmpeg itself, so
+  // no whole-file buffer ever exists in JS.
+  var concatArg='concat:'+partNames.join('|');
+  var asmArgs=['-y','-protocol_whitelist','file,concat,data,crypto','-f','data','-i',concatArg,'-map','0','-c','copy','-f','data',destName];
+  log('ingest ['+label+']: '+(displayName||destName)+' — assembling '+sliceCount+' FS parts into '+destName+' inside the converter (raw data concat copy, byte-exact; no JS copy) | ffmpeg args='+asmArgs.join(' '));
+  var asmRc=await execFn(asmArgs);
+  if(asmRc!=null&&asmRc!==0) throw new Error('slice-streamed ingest assembly failed for '+(displayName||destName)+' (ffmpeg exit code '+asmRc+')');
+  for(var pi=0; pi<partNames.length; pi++){ try{ await ff.deleteFile(partNames[pi]); }catch(e){} }
+  log('ingest ['+label+']: '+(displayName||destName)+' — slice-streamed ingest complete: '+sliceCount+' slice(s), '+fmtBytesMB(total)+' assembled at '+destName+'; parts deleted; peak extra JS memory ≈ one slice');
+  return {sliceCount:sliceCount};
+}
+// Unified single-file ingest for the decode and filmstrip paths (both
+// run inside withFFmpegLock): mount first, slice-stream as fallback.
+// Returns {path, mode:'mounted'|'slice-streamed', mountDir, destName,
+// cleanup(ff)} — call cleanup after the file has been consumed.
+async function ingestSingleFileForFFmpeg(ff, file, destName, label){
+  var src=await resolveIngestSource(file);
+  var mountFile=src.blob||file;
+  var mnt=await mountSingleFileWorkerFS(ff, mountFile, label);
+  if(mnt.ok){
+    log('ingest ['+label+']: '+file.name+' ('+fmtBytesMB(file.size)+') — mounted via WORKERFS at '+mnt.path+' (source: '+(src.fromOpfs?'OPFS-staged copy':'selected File')+'; ffmpeg reads on demand; no whole-file copy in JS or converter memory)');
+    return {path:mnt.path, mode:'mounted', mountDir:mnt.mountDir, destName:destName};
+  }
+  log('ingest ['+label+']: '+file.name+' — WORKERFS mount unavailable ('+mnt.reason+'); falling back to slice-streamed ingest');
+  await writeFileSliceStreamed(ff, destName, src.blob, label, file.name, async function(args){ return await withTimeout(ff.exec(args),300000,'Assembling slice-streamed ingest of '+file.name); });
+  return {path:destName, mode:'slice-streamed', mountDir:null, destName:destName};
+}
+async function cleanupSingleFileIngest(ff, ingest){
+  if(!ff||!ingest) return;
+  if(ingest.mode==='mounted'){ await unmountSingleFileWorkerFS(ff, ingest.mountDir); }
+  else { try{ await ff.deleteFile(ingest.destName); }catch(e){} }
 }
 // Shared encode-argument builder for BOTH the proxy and the export render.
 // The audio pipeline is identical in both: detected sync offset (including
@@ -3192,12 +3326,14 @@ async function renderExport(sig){
       diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
       log('mount: inputs=WORKERFS (/mnt)');
       log('Export: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+      log('ingest [export] video: '+danceFile.name+' ('+fmtBytesMB(dFile.size)+') — mounted via WORKERFS at '+danceIn+' (ffmpeg reads on demand; no whole-file copy)');
+      log('ingest [export] audio: '+songFile.name+' ('+fmtBytesMB(sFile.size)+') — mounted via WORKERFS at '+songIn+' (ffmpeg reads on demand; no whole-file copy)');
     } else {
-      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+mounted.reason;
-      log('mount: inputs=MEMFS (writeFile fallback) — '+mounted.reason);
-      log('Export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for export');
-      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for export');
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (slice-streamed fallback) — '+mounted.reason;
+      log('mount: inputs=MEMFS (slice-streamed fallback) — '+mounted.reason);
+      log('Export: slice-streaming files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await writeFileSliceStreamed(ff, 'dance.'+dExt, dFile, 'export', danceFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed export video input'); }); });
+      await writeFileSliceStreamed(ff, 'song.'+sExt, sFile, 'export', songFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed export audio input'); }); });
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
     setExportBarPct(15); // event: export encode starts
@@ -3286,12 +3422,14 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
       diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
       log('mount: inputs=WORKERFS (/mnt)');
       log('Direct export: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+      log('ingest [direct-export] video: '+danceFile.name+' ('+fmtBytesMB(dFile.size)+') — mounted via WORKERFS at '+danceIn+' (ffmpeg reads on demand; no whole-file copy)');
+      log('ingest [direct-export] audio: '+songFile.name+' ('+fmtBytesMB(sFile.size)+') — mounted via WORKERFS at '+songIn+' (ffmpeg reads on demand; no whole-file copy)');
     } else {
-      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+mounted.reason;
-      log('mount: inputs=MEMFS (writeFile fallback) — '+mounted.reason);
-      log('Direct export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for direct export');
-      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for direct export');
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (slice-streamed fallback) — '+mounted.reason;
+      log('mount: inputs=MEMFS (slice-streamed fallback) — '+mounted.reason);
+      log('Direct export: slice-streaming files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await writeFileSliceStreamed(ff, 'dance.'+dExt, dFile, 'direct-export', danceFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed direct-export video input'); }); });
+      await writeFileSliceStreamed(ff, 'song.'+sExt, sFile, 'direct-export', songFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed direct-export audio input'); }); });
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
     setBarPct(50,'Generating');
@@ -3855,12 +3993,14 @@ async function doGenerate(opts){
       diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
       log('mount: inputs=WORKERFS (/mnt)');
       log('Generate: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+      log('ingest [generate] video: '+danceFile.name+' ('+fmtBytesMB(dFile.size)+') — mounted via WORKERFS at '+danceIn+' (ffmpeg reads on demand; no whole-file copy)');
+      log('ingest [generate] audio: '+songFile.name+' ('+fmtBytesMB(sFile.size)+') — mounted via WORKERFS at '+songIn+' (ffmpeg reads on demand; no whole-file copy)');
     } else {
-      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+proxyMounted.reason;
-      log('mount: inputs=MEMFS (writeFile fallback) — '+proxyMounted.reason);
-      log('Generate: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter');
-      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (slice-streamed fallback) — '+proxyMounted.reason;
+      log('mount: inputs=MEMFS (slice-streamed fallback) — '+proxyMounted.reason);
+      log('Generate: slice-streaming files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await writeFileSliceStreamed(ff, 'dance.'+dExt, dFile, 'generate', danceFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed generate video input'); }); });
+      await writeFileSliceStreamed(ff, 'song.'+sExt, sFile, 'generate', songFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed generate audio input'); }); });
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
     // WEBCODECS PROXY ENGINE: try the hardware pipeline first (demux →
