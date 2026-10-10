@@ -253,7 +253,7 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet'};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet', streamOutVerdict:null, streamOutReason:'', streamOutNote:'no streamed render yet'};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
@@ -695,6 +695,7 @@ function buildDiagnosticsText(){
       'Storage backend detection: OPFS available='+String(diagStorage.opfsAvailable)+' | note: '+diagStorage.note+' | typeof navigator.storage.getDirectory='+storageGetDirectoryType(),
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
       'mount (last render): '+diagStorage.mountNote,
+      'output streaming (B13): '+(diagStorage.streamOutNote||'n/a'),
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a')
     ].concat(areaLines).concat([
       'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
@@ -1058,7 +1059,7 @@ async function ensureFFmpeg(onProgress){
   setBarPct(2,'Loading'); // event: converter load starts
   log('Converter load starts: FFmpegWASM present='+!!window.FFmpegWASM+' | FFmpegUtil present='+!!window.FFmpegUtil);
   ffmpeg=new FFmpegWASM.FFmpeg();
-  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
+  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/\[streamout\]|ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
   ffmpeg.on('progress', function(p){ if(ffmpegProgressCb&&p&&isFinite(p.progress)) ffmpegProgressCb(Math.max(0,Math.min(1,p.progress))); });
   var base=new URL('assets/ffmpeg/', document.baseURI).href;
   diagConverter.base=base; diagConverter.coreURL=base+'ffmpeg-core.js'; diagConverter.workerURL=base+'814.ffmpeg.js'; diagConverter.wasmGzURL=base+'ffmpeg-core.wasm.gz'; diagConverter.wasmURL=base+'ffmpeg-core.wasm'; diagConverter.version='ffmpeg.wasm wrapper assets/ffmpeg/ffmpeg.js + core assets/ffmpeg/ffmpeg-core.js (ffmpeg-core.wasm.gz '+ '9.8 MB compressed, same-origin) — exact core -version line appears as "ffmpeg>" lines in this log once the worker runs';
@@ -2269,6 +2270,101 @@ async function tryMountOPFS(ff){
     return !!r;
   }catch(e){ diagStorage.mountSupported=false; log('storage: ffmpeg mount("OPFS") threw '+(e.name||'Error')+': '+(e.message||e)+' — renders run on MEMFS with OPFS stream-out of outputs'); return false; }
 }
+// ---------- B13: streamed render output (converter → OPFS as produced) ----------
+// The converter worker (assets/ffmpeg/814.ffmpeg.js) mounts a custom
+// filesystem at /out (STREAMOPFS) backed by an OPFS sync access handle
+// it opens per render. A render whose output path is /out/<name> has
+// every byte the muxer writes forwarded positionally to the OPFS file
+// <name> in slices of at most 16 MB, synchronously as produced — the
+// output never accumulates in converter (wasm) memory, so peak render
+// memory is independent of output size. (Before B13 the output grew
+// inside MEMFS; a ~1.02 GB stage-2 copy mux on a 1,067,264,984-byte
+// HEVC input killed the iOS tab at the 60% milestone, before the
+// finished-file slice delivery could ever run.) faststart is still
+// ffmpeg's own -movflags +faststart: its second pass reads the moov
+// back and relocates it in place through the same handle (the FS
+// serves positional reads), so the delivered OPFS file is a valid
+// faststart MP4 — moov before mdat — of exactly the render's duration,
+// achieved with no whole-file re-processing on either side.
+// Fallbacks, all journal-logged: MEMFS output (dance-synced.mp4 +
+// readRenderOutput slice delivery) is used only when this browser's
+// probe found streaming unavailable at all, so the render was never
+// addressed to /out. If /out exists but arming the stream fails for a
+// specific render, the worker refuses the exec BEFORE the mux starts
+// and the render ends with an honest error — a render planned for
+// streamed output never falls back to accumulating its output in
+// converter memory, which is the exact B13 death path. And
+// claimRenderOutput only adopts the OPFS file when this render
+// actually targeted /out, so a stale streamed file can never be
+// mistaken for a fresh result.
+// Availability is probed once per converter instance (listDir('/out'))
+// and cached in diagStorage.streamOutVerdict, mirroring the OPFS /
+// WORKERFS mount probes. The worker posts [streamout] lines on the
+// converter log channel as the render proceeds (armed · slices
+// forwarded / total bytes · closed with final counts), so a
+// diagnostics dump proves the output streamed out of the converter.
+var streamOutProbeFF=null;
+async function tryStreamOut(ff){
+  if(streamOutProbeFF===ff&&diagStorage.streamOutVerdict!=null) return diagStorage.streamOutVerdict;
+  streamOutProbeFF=ff;
+  try{
+    if(!ff||typeof ff.listDir!=='function') throw new Error('the converter wrapper exposes no listDir()');
+    await ff.listDir('/out');
+    diagStorage.streamOutVerdict=true; diagStorage.streamOutReason='';
+    log('storage: streamed output available (B13) — the converter worker has /out mounted (STREAMOPFS); renders addressed there forward their output to OPFS in ≤16 MB slices as produced, so converter memory never accumulates the output');
+    return true;
+  }catch(e){
+    diagStorage.streamOutVerdict=false; diagStorage.streamOutReason=(e&&e.message)||String(e);
+    log('storage: streamed output unavailable ('+diagStorage.streamOutReason+') — renders write to MEMFS and deliver via the slice-streamed delivery, as before B13');
+    return false;
+  }
+}
+// The converter-FS output path a render should use for the OPFS result
+// file opfsName: the streamed /out path when streaming is available,
+// otherwise the legacy MEMFS name every caller already delivers from.
+function streamOutPathFor(opfsName){
+  if(diagStorage.streamOutVerdict&&diagStorage.opfsAvailable&&opfsName) return '/out/'+opfsName;
+  return 'dance-synced.mp4';
+}
+// Existence check that understands both output locations (root MEMFS
+// files and /out streamed files). On any doubt it answers true, like
+// the checks it replaces — a false negative would trigger a spurious
+// retry/failure, a false positive is caught by the caller's read-out.
+async function fsPathExists(ff, p){
+  try{
+    var dir='/', name=p;
+    if(p.indexOf('/out/')===0){ dir='/out'; name=p.slice(5); }
+    var list=await ff.listDir(dir);
+    for(var i=0;i<list.length;i++){ if(list[i]&&list[i].name===name) return true; }
+    return false;
+  }catch(e){ return true; }
+}
+// Delivers a render output, streamed-first. When this render targeted
+// /out (streamedTarget) and the OPFS file is present and non-empty,
+// the OPFS file IS the result — it was written slice-by-slice as the
+// render produced it; there is no converter-FS copy to read out and no
+// post-render delivery pass. Otherwise (the render never targeted
+// /out because streaming is unavailable on this browser) the legacy
+// readRenderOutput runs unchanged.
+async function claimRenderOutput(ff, fsName, opfsName, streamedTarget){
+  if(streamedTarget&&opfsName&&opfsRoot){
+    var sFile=null;
+    try{ var sh=await opfsRoot.getFileHandle(opfsName); sFile=await sh.getFile(); }catch(e){ sFile=null; }
+    if(sFile&&sFile.size>0){
+      log('storage: render output delivered streamed — OPFS file '+opfsName+' ('+fmtBytesMB(sFile.size)+') was written by the converter worker in ≤16 MB slices as the render produced it (B13); no converter-FS output accumulated and no post-render slice delivery was needed');
+      diagStorage.streamOutNote='last render: streamed to OPFS '+opfsName+' ('+fmtBytesMB(sFile.size)+') via /out sync-handle slices as produced (B13)';
+      try{ await ff.deleteFile('/out/'+opfsName); }catch(e){}
+      // A same-named MEMFS output can only be a stale leftover of an
+      // earlier render (this render wrote to /out) — remove it so it
+      // is never mistaken for a later render's output.
+      try{ await ff.deleteFile(fsName); }catch(e){}
+      await opfsCleanupAfterRender(opfsName);
+      return {blob:sFile, backend:'OPFS', opfsName:opfsName, streamed:true};
+    }
+    log('storage: this render targeted streamed output ('+opfsName+') but no non-empty OPFS file was found — the streamed write did not complete; delivering '+fsName+' with the slice-streamed delivery if a converter-FS output exists');
+  }
+  return await readRenderOutput(ff, fsName, opfsName);
+}
 // ---------- WORKERFS input mounting ----------
 // mountInputsWorkerFS(ff, dFile, sFile): mounts each File at its own
 // mount point (/mnt/dance, /mnt/song) with the wrapper's mount API and
@@ -2921,13 +3017,12 @@ async function tryWebCodecsProxy(ctx){
     if(muxed.startOffsetUs>0) log('Proxy (webcodecs) mux: encoder used frame reordering — edit-list start offset '+muxed.startOffsetUs+'µs written so presentation starts at exactly 0 (no timestamps clamped).');
     await ctx.ff.writeFile('proxy-video-wc.mp4', muxed.bytes);
     wcVideoMade=true;
-    var mArgs=['-y','-i','proxy-video-wc.mp4','-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',ctx.tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
+    var mArgs=['-y','-i','proxy-video-wc.mp4','-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',ctx.tDur.toFixed(3),'-movflags','+faststart',(ctx.outFsPath||'dance-synced.mp4')];
     log('Proxy (webcodecs) mux: video-only MP4 ('+fmtBytesMB(muxed.bytes.length)+') + stage-1 audio → ffmpeg stream-copy mux (audio starts at exactly 0; video timestamps start at 0) | faststart: -movflags +faststart applied to the final mux; the hand-rolled muxer already writes moov before mdat for proxy-video-wc.mp4 | ffmpeg args='+mArgs.join(' '));
     var muxRc=null;
     await cancellable(withFFmpegLock(async function(){ muxRc=await withTimeout(ctx.ff.exec(mArgs),600000,'WebCodecs proxy final mux'); }));
     if(muxRc!=null&&muxRc!==0) throw wcFail('the final stream-copy mux failed (ffmpeg exit code '+muxRc+')');
-    var chkThere=false;
-    try{ var chkDir=await ctx.ff.listDir('/'); for(var chi=0; chi<chkDir.length; chi++){ if(chkDir[chi]&&chkDir[chi].name==='dance-synced.mp4'){ chkThere=true; break; } } }catch(e){ chkThere=true; }
+    var chkThere=await fsPathExists(ctx.ff, ctx.outFsPath||'dance-synced.mp4');
     if(!chkThere) throw wcFail('the final stream-copy mux produced no output');
     try{ await ctx.ff.deleteFile('stage1-audio.m4a'); stage1Made=false; }catch(e){}
     try{ await ctx.ff.deleteFile('proxy-video-wc.mp4'); wcVideoMade=false; }catch(e){}
@@ -3302,16 +3397,23 @@ async function renderExport(sig){
   showExportProgress(true); setExportBarPct(2); // event: export requested
   var ff=await cancellableExport(ensureFFmpeg(function(ratio){ progressForExport(ratio); }));
   await tryMountOPFS(ff);
+  await tryStreamOut(ff);
   var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
   var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
   var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  var exportOpfsName='export-'+hashStr(sig)+'.mp4';
+  var exportOutTarget=streamOutPathFor(exportOpfsName);
+  var exportStreamed=(exportOutTarget!=='dance-synced.mp4');
+  if(exportStreamed) log('Export: render output target is '+exportOutTarget+' — the output streams to OPFS file '+exportOpfsName+' in ≤16 MB slices as produced (B13); it never accumulates in converter memory');
   // TWO-STAGE EXPORT: Full quality with NO trim set is the common case
   // and never needs the video re-encoded or fully decoded — stage 1
   // renders ONLY the processed audio track (the full audio filter graph)
   // to a small AAC file, stage 2 stream-copies the video from the
   // (mounted) input and muxes it with that audio. With WORKERFS inputs
-  // the converter FS then only ever holds the small stage-1 file plus
-  // the growing output — never both inputs AND the output together.
+  // the converter FS then only ever holds the small stage-1 file — and
+  // with B13 streamed output (exportOutTarget under /out) not even the
+  // output: it is forwarded to OPFS as produced, never both inputs AND
+  // the output together, and never the output at all.
   var noTrim=(tStart<=0.001)&&(danceDur>0?(tEnd>=danceDur-0.01):(trimEndSec==null));
   var twoStage=(q==='full')&&noTrim;
   diagExport.stages=twoStage?'two-stage (stage 1 audio render + stage 2 stream-copy mux)':'single-graph encode';
@@ -3351,16 +3453,16 @@ async function renderExport(sig){
       log('Export stage 1 (audio): size='+fmtBytesMB(s1Size)+' | duration='+s1DurSec.toFixed(1)+'s');
       setExportBarPct(50);
       exportProgLo=50; exportProgHi=95;
-      var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
+      var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart',exportOutTarget];
       diagStage='export-stage-2';
-      log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied | ffmpeg args='+s2Args.join(' '));
+      log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied'+(exportStreamed?(' | output: streamed to OPFS file '+exportOpfsName+' via /out as produced (B13 — no MEMFS output accumulation)'):'')+' | ffmpeg args='+s2Args.join(' '));
       var s2T0=Date.now();
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Export stage 2 (copy mux) from '+danceFile.name); }));
       log('Export stage 2 (copy mux): duration='+((Date.now()-s2T0)/1000).toFixed(1)+'s (pure stream copy — no decode, no encode)');
       try{ await ff.deleteFile('stage1-audio.m4a'); log('memory: deleted FS stage-1 audio stage1-audio.m4a ('+fmtBytesMB(s1Size)+') after the mux'); }catch(e){}
     } else {
       exportProgLo=15; exportProgHi=95;
-      var args=buildRenderArgs({encHeight:height, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
+      var args=buildRenderArgs({encHeight:height, outName:exportOutTarget, tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
       diagStage='export-stage-1';
       log('Export exec: ffmpeg args='+args.join(' '));
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Exporting video from '+danceFile.name); }));
@@ -3374,7 +3476,7 @@ async function renderExport(sig){
   log('Export encode ends — freeing inputs from converter FS before reading output…');
   await freeConverterInputs(ff,dExt,sExt);
   if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }
-  var outRes=await readRenderOutput(ff,'dance-synced.mp4','export-'+hashStr(sig)+'.mp4');
+  var outRes=await claimRenderOutput(ff,'dance-synced.mp4',exportOpfsName,exportStreamed);
   setExportBarPct(100);
   var durSec=(Date.now()-renderT0)/1000;
   diagStorage.lastOutput=outRes.backend;
@@ -3408,9 +3510,14 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
     if(m>directLastMilestone){ directLastMilestone=m; log('Direct export '+(directStageNum===1?'stage 1 (audio)':'stage 2 (mux)')+' progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); }
   }));
   await tryMountOPFS(ff);
+  await tryStreamOut(ff);
   var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
   var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
   var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  var directOpfsName='export-'+hashStr(exportSig)+'.mp4';
+  var directOutTarget=streamOutPathFor(directOpfsName);
+  var directStreamed=(directOutTarget!=='dance-synced.mp4');
+  if(directStreamed) log('Direct export: render output target is '+directOutTarget+' — stage 2 streams to OPFS file '+directOpfsName+' in ≤16 MB slices as produced (B13); the ~full-size output never accumulates in converter memory');
   diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate';
   var mounted=null;
   var s1Size=null, s1DurSec=0, s2DurSec=0;
@@ -3447,9 +3554,9 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
     setBarPct(75,'Exporting');
     // Stage 2 — pure stream-copy mux.
     directStageNum=2; directStageLabel=''; progPhase='Exporting'; renderProgText(); directLastMilestone=-1;
-    var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
+    var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart',directOutTarget];
     diagStage='export-stage-2';
-    log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied | ffmpeg args='+s2Args.join(' '));
+    log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied'+(directStreamed?(' | output: streamed to OPFS file '+directOpfsName+' via /out as produced (B13 — no MEMFS output accumulation)'):'')+' | ffmpeg args='+s2Args.join(' '));
     var s2T0=Date.now();
     await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Direct export stage 2 (copy mux) from '+danceFile.name); }));
     s2DurSec=(Date.now()-s2T0)/1000;
@@ -3465,7 +3572,7 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
   log('Direct export encode ends — freeing inputs from converter FS before reading output…');
   await freeConverterInputs(ff,dExt,sExt);
   if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }
-  var outRes=await readRenderOutput(ff,'dance-synced.mp4','export-'+hashStr(exportSig)+'.mp4');
+  var outRes=await claimRenderOutput(ff,'dance-synced.mp4',directOpfsName,directStreamed);
   var totalDurSec=(Date.now()-renderT0)/1000;
   diagStorage.lastOutput=outRes.backend;
   diagExport.size=outRes.blob.size; diagExport.durationSec=Number(totalDurSec.toFixed(2)); diagExport.quality='full'; diagExport.backend=outRes.backend;
@@ -3983,6 +4090,7 @@ async function doGenerate(opts){
     var renderT0=Date.now();
     var ff=await cancellable(ensureFFmpeg(function(ratio){ if(ratio!=null){ progressForGenerate(ratio); var m=Math.floor(ratio*10)*10; if(m>diagLastEncodeMilestone){ diagLastEncodeMilestone=m; log('Proxy encode progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } } }));
     await tryMountOPFS(ff);
+    await tryStreamOut(ff);
     var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
     var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
     var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
@@ -4003,6 +4111,10 @@ async function doGenerate(opts){
       await writeFileSliceStreamed(ff, 'song.'+sExt, sFile, 'generate', songFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed generate audio input'); }); });
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
+    var proxyOpfsName='proxy-'+hashStr(sig)+'.mp4';
+    var proxyOutTarget=streamOutPathFor(proxyOpfsName);
+    var proxyStreamed=(proxyOutTarget!=='dance-synced.mp4');
+    if(proxyStreamed) log('Generate: proxy render output target is '+proxyOutTarget+' — the output streams to OPFS file '+proxyOpfsName+' in ≤16 MB slices as produced (B13); it never accumulates in converter memory');
     // WEBCODECS PROXY ENGINE: try the hardware pipeline first (demux →
     // VideoDecoder → canvas scale → VideoEncoder → JS video mux + ffmpeg
     // stream-copy mux with the processed audio from the existing filter
@@ -4013,7 +4125,7 @@ async function doGenerate(opts){
     var wcOutcome=null, wcFailReason=null, outRes=null;
     var wcToken=runToken;
     try{
-      wcOutcome=await tryWebCodecsProxy({ff:ff, dFile:dFile, sFile:sFile, danceIn:danceIn, songIn:songIn, dExt:dExt, sExt:sExt, tStart:tStart, tEnd:tEnd, tDur:tDur, eff:eff, isCancelled:function(){ return runToken!==wcToken; }});
+      wcOutcome=await tryWebCodecsProxy({ff:ff, dFile:dFile, sFile:sFile, danceIn:danceIn, songIn:songIn, dExt:dExt, sExt:sExt, tStart:tStart, tEnd:tEnd, tDur:tDur, eff:eff, outFsPath:proxyOutTarget, opfsName:proxyOpfsName, isCancelled:function(){ return runToken!==wcToken; }});
     }catch(wcErr){
       if(isCancelErr(wcErr)) throw wcErr;
       wcFailReason=(wcErr&&wcErr.wcReason)||(wcErr&&wcErr.message)||String(wcErr);
@@ -4024,7 +4136,7 @@ async function doGenerate(opts){
       log('proxy engine: webcodecs (hardware)');
       log('Proxy (webcodecs) encode ends — freeing inputs from converter FS before reading output…');
       await freeConverterInputs(ff,dExt,sExt);
-      outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
+      outRes=await claimRenderOutput(ff,'dance-synced.mp4',proxyOpfsName,proxyStreamed);
       if(proxyMounted&&proxyMounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); proxyMounted=null; }
       var wcT=wcOutcome.timings;
       log('Proxy (webcodecs) stage timings: demux='+(wcT.demuxMs/1000).toFixed(2)+'s | decode+encode='+(wcT.decodeEncodeMs/1000).toFixed(1)+'s | audio='+(wcT.audioMs/1000).toFixed(1)+'s | mux='+(wcT.muxMs/1000).toFixed(1)+'s | output size='+fmtBytesMB(outRes.blob.size)+' | '+wcOutcome.frames+' frames · '+wcOutcome.outW+'x'+wcOutcome.outH+' @ '+wcOutcome.fps+' fps · '+wcOutcome.srcCodec+' → '+wcOutcome.encCodec);
@@ -4051,7 +4163,7 @@ async function doGenerate(opts){
       diagProxy.lowres='not used (source height '+(srcH?srcH+'p':'unknown')+')';
       log('Proxy: -lowres not used (source height '+(srcH?srcH+'p':'unknown')+' — below the 1440p threshold).');
     }
-    var args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:wantLowres});
+    var args=buildRenderArgs({encHeight:480, outName:proxyOutTarget, tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:wantLowres});
     setBarPct(50,'Generating'); // event: render starts (ffmpeg progress then interpolates 50% -> 97%)
     log('Proxy encode exec: ffmpeg args='+args.join(' '));
     var proxyExecErr=null, proxyExecRC=null;
@@ -4064,8 +4176,7 @@ async function doGenerate(opts){
         lowresFailed=true; lowresWhy='exec error: '+(proxyExecErr.message||proxyExecErr);
       } else if(proxyExecRC!=null&&proxyExecRC!==0){ lowresFailed=true; lowresWhy='ffmpeg exit code '+proxyExecRC; }
       else {
-        var outThere=false;
-        try{ var ld=await ff.listDir('/'); for(var li=0; li<ld.length; li++){ if(ld[li]&&ld[li].name==='dance-synced.mp4'){ outThere=true; break; } } }catch(le){ outThere=true; }
+        var outThere=await fsPathExists(ff, proxyOutTarget);
         if(!outThere){ lowresFailed=true; lowresWhy='exec reported success but dance-synced.mp4 is missing from the converter FS'; }
       }
       if(lowresFailed){
@@ -4073,7 +4184,7 @@ async function doGenerate(opts){
         diagProxy.lowres='failed ('+lowresWhy+') — retried without -lowres';
         try{ await ff.deleteFile('dance-synced.mp4'); }catch(e){}
         proxyExecErr=null;
-        args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:false});
+        args=buildRenderArgs({encHeight:480, outName:proxyOutTarget, tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:false});
         log('Proxy encode exec (retry without -lowres): ffmpeg args='+args.join(' '));
         await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating proxy video from '+danceFile.name); }));
       } else {
@@ -4084,7 +4195,7 @@ async function doGenerate(opts){
     if(proxyExecErr) throw proxyExecErr;
     log('Proxy encode ends: ffmpeg exec resolved — freeing inputs from converter FS before reading output…');
     await freeConverterInputs(ff,dExt,sExt);
-    var outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
+    var outRes=await claimRenderOutput(ff,'dance-synced.mp4',proxyOpfsName,proxyStreamed);
     if(proxyMounted&&proxyMounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); proxyMounted=null; }
     }
     var blob=outRes.blob;
