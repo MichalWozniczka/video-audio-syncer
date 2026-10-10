@@ -253,7 +253,7 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet', streamOutVerdict:null, streamOutReason:'', streamOutNote:'no streamed render yet'};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet', streamOutVerdict:null, streamOutReason:'', streamOutNote:'no streamed render yet', streamOutSetupLine:''};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
@@ -696,6 +696,7 @@ function buildDiagnosticsText(){
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
       'mount (last render): '+diagStorage.mountNote,
       'output streaming (B13): '+(diagStorage.streamOutNote||'n/a'),
+      'output streaming probe (B13): verdict='+(diagStorage.streamOutVerdict==null?'not probed yet':String(diagStorage.streamOutVerdict))+' | worker setup report at load: '+(diagStorage.streamOutSetupLine||'NONE — the converter worker posted no [streamout] setup line at load (the loaded worker build lacks the STREAMOPFS filesystem: stock or stale class worker)')+(diagStorage.streamOutReason?(' | last probe failure: '+diagStorage.streamOutReason):''),
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a')
     ].concat(areaLines).concat([
       'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
@@ -1059,7 +1060,7 @@ async function ensureFFmpeg(onProgress){
   setBarPct(2,'Loading'); // event: converter load starts
   log('Converter load starts: FFmpegWASM present='+!!window.FFmpegWASM+' | FFmpegUtil present='+!!window.FFmpegUtil);
   ffmpeg=new FFmpegWASM.FFmpeg();
-  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/\[streamout\]|ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
+  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&/\[streamout\]/.test(m.message)&&/(setup step|mounted at \/out|setup failed|setup:)/.test(m.message)) diagStorage.streamOutSetupLine=m.message; if(m&&m.message&&(/\[streamout\]|ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
   ffmpeg.on('progress', function(p){ if(ffmpegProgressCb&&p&&isFinite(p.progress)) ffmpegProgressCb(Math.max(0,Math.min(1,p.progress))); });
   var base=new URL('assets/ffmpeg/', document.baseURI).href;
   diagConverter.base=base; diagConverter.coreURL=base+'ffmpeg-core.js'; diagConverter.workerURL=base+'814.ffmpeg.js'; diagConverter.wasmGzURL=base+'ffmpeg-core.wasm.gz'; diagConverter.wasmURL=base+'ffmpeg-core.wasm'; diagConverter.version='ffmpeg.wasm wrapper assets/ffmpeg/ffmpeg.js + core assets/ffmpeg/ffmpeg-core.js (ffmpeg-core.wasm.gz '+ '9.8 MB compressed, same-origin) — exact core -version line appears as "ffmpeg>" lines in this log once the worker runs';
@@ -2289,7 +2290,11 @@ async function tryMountOPFS(ff){
 // Fallbacks, all journal-logged: MEMFS output (dance-synced.mp4 +
 // readRenderOutput slice delivery) is used only when this browser's
 // probe found streaming unavailable at all, so the render was never
-// addressed to /out. If /out exists but arming the stream fails for a
+// addressed to /out — and, since round 2, only when the render's
+// expected output is within the in-memory limit
+// (guardLargeRenderWithoutStreamOut): a large render with streaming
+// unavailable refuses before encoding instead of silently taking
+// the path that kills the tab. If /out exists but arming the stream fails for a
 // specific render, the worker refuses the exec BEFORE the mux starts
 // and the render ends with an honest error — a render planned for
 // streamed output never falls back to accumulating its output in
@@ -2297,27 +2302,112 @@ async function tryMountOPFS(ff){
 // claimRenderOutput only adopts the OPFS file when this render
 // actually targeted /out, so a stale streamed file can never be
 // mistaken for a fresh result.
-// Availability is probed once per converter instance (listDir('/out'))
-// and cached in diagStorage.streamOutVerdict, mirroring the OPFS /
-// WORKERFS mount probes. The worker posts [streamout] lines on the
-// converter log channel as the render proceeds (armed · slices
-// forwarded / total bytes · closed with final counts), so a
-// diagnostics dump proves the output streamed out of the converter.
+// Availability is probed once per converter instance and cached in
+// diagStorage.streamOutVerdict, mirroring the OPFS / WORKERFS mount
+// probes. The worker posts [streamout] lines on the converter log
+// channel as the render proceeds (armed · slices forwarded / total
+// bytes · closed with final counts), so a diagnostics dump proves the
+// output streamed out of the converter.
+//
+// B13 round 2: round 1's probe was a single listDir('/out') whose
+// failure surfaced only as "ErrnoError: FS error" — in this core
+// build EVERY ErrnoError carries the literal message "FS error" (the
+// errno lives on a property the stock worker error channel drops),
+// so the dump could not say WHICH step failed, or even whether the
+// worker contained the filesystem at all. (In the round-2 device
+// evidence the deployed class worker was a stock build with no
+// STREAMOPFS in it: /out was never created, the probe's ENOENT was
+// reported as a bare "FS error", and the render silently took the
+// in-memory path that kills the tab.) The probe below therefore
+// verifies and journals EVERY step — the worker's own setup report
+// from converter load, the root listing (is "out" even mounted?),
+// and the /out listing — and composes the full error (name, message,
+// errno when carried, failing operation) into streamOutReason.
 var streamOutProbeFF=null;
+function streamOutErrText(e){
+  if(!e) return 'unknown error';
+  if(typeof e==='string') return e;
+  var t=(e.name||'Error')+': '+(e.message||String(e));
+  if(e.errno!==undefined&&e.errno!==null) t+=' [errno '+e.errno+']';
+  return t;
+}
 async function tryStreamOut(ff){
   if(streamOutProbeFF===ff&&diagStorage.streamOutVerdict!=null) return diagStorage.streamOutVerdict;
   streamOutProbeFF=ff;
+  var steps=[];
+  function step(name, ok, detail){
+    steps.push(name+'='+(ok?'ok':'FAILED'));
+    log('storage: streamed-output probe step "'+name+'": '+(ok?'ok':'FAILED')+(detail?(' — '+detail):''));
+  }
   try{
     if(!ff||typeof ff.listDir!=='function') throw new Error('the converter wrapper exposes no listDir()');
-    await ff.listDir('/out');
+    step('wrapper listDir available', true);
+    // What did the worker itself report at converter load? Its setup
+    // posts one [streamout] line per step plus a summary; the page's
+    // log handler keeps the latest setup line in
+    // diagStorage.streamOutSetupLine. NO line at all means the loaded
+    // class worker does not contain the streamed-output filesystem
+    // (stock or stale worker script) — /out then cannot exist.
+    if(diagStorage.streamOutSetupLine){
+      step('worker setup report at load', diagStorage.streamOutSetupLine.indexOf('mounted at /out')!==-1, diagStorage.streamOutSetupLine);
+    } else {
+      step('worker setup report at load', false, 'the converter worker posted NO [streamout] setup line at load — the loaded class worker (814.ffmpeg.js) does not contain the STREAMOPFS streamed-output filesystem (stock or stale worker build), so /out was never created');
+    }
+    var rootList=null;
+    try{ rootList=await ff.listDir('/'); }
+    catch(e){ step('list converter root "/"', false, 'operation listDir("/") raised '+streamOutErrText(e)); throw e; }
+    var hasOut=false, rootNames=[];
+    for(var i=0;i<rootList.length;i++){ if(rootList[i]&&rootList[i].name){ rootNames.push(rootList[i].name); if(rootList[i].name==='out') hasOut=true; } }
+    step('list converter root "/"', true, hasOut?('"out" mount point is present in the root listing'):('"out" is NOT present in the root listing (root contains: '+rootNames.join(', ')+') — the STREAMOPFS mount never happened in this worker'));
+    var outList=null;
+    try{ outList=await ff.listDir('/out'); }
+    catch(e2){ step('list "/out" (STREAMOPFS mount)', false, 'operation listDir("/out") raised '+streamOutErrText(e2)); throw e2; }
+    step('list "/out" (STREAMOPFS mount)', true, outList.length+' entr'+(outList.length===1?'y':'ies')+' listed');
     diagStorage.streamOutVerdict=true; diagStorage.streamOutReason='';
-    log('storage: streamed output available (B13) — the converter worker has /out mounted (STREAMOPFS); renders addressed there forward their output to OPFS in ≤16 MB slices as produced, so converter memory never accumulates the output');
+    log('storage: streamed output available (B13) — the converter worker has /out mounted (STREAMOPFS); renders addressed there forward their output to OPFS in ≤16 MB slices as produced, so converter memory never accumulates the output | probe steps: '+steps.join(' · '));
     return true;
   }catch(e){
-    diagStorage.streamOutVerdict=false; diagStorage.streamOutReason=(e&&e.message)||String(e);
-    log('storage: streamed output unavailable ('+diagStorage.streamOutReason+') — renders write to MEMFS and deliver via the slice-streamed delivery, as before B13');
+    diagStorage.streamOutVerdict=false; diagStorage.streamOutReason=streamOutErrText(e);
+    log('storage: streamed output unavailable ('+diagStorage.streamOutReason+') | probe steps: '+steps.join(' · ')+' — the legacy MEMFS output + slice-streamed delivery now applies ONLY to renders whose expected output is within the in-memory limit; a render expecting more refuses before encoding (B13 round 2 guard, see guardLargeRenderWithoutStreamOut)');
     return false;
   }
+}
+// ---------- B13 round 2: no silent killer fallback ----------
+// Round 1 fell back to MEMFS output whenever the probe failed — the
+// exact unbounded path that kills the tab mid-mux on a large render
+// (the output accumulates in converter memory faster than any
+// finished-file delivery can save it). Now: when streamed output is
+// unavailable, a render whose EXPECTED output exceeds
+// STREAM_OUT_REQUIRED_BYTES throws here — before any mux starts —
+// and the throw lands in the render's existing handled-failure path
+// (clear message, journal finished/handled, no tab death, no partial
+// result presented as success). Renders at or under the limit keep
+// the legacy MEMFS + slice-streamed delivery, and the journal says
+// which branch each render took and why.
+var STREAM_OUT_REQUIRED_BYTES=300*1024*1024;
+// Expected size of a stream-copy mux result: the video input's bytes
+// pro-rated by the trimmed fraction of the source duration, plus the
+// stage-1 AAC audio at ~192 kbps. Also used (conservatively) for the
+// full-quality single-graph encode, whose output tracks source size.
+function estimateCopiedOutputBytes(dFile, tDur){
+  var srcDur=(typeof danceDur==='number'&&danceDur>0)?danceDur:0;
+  var frac=srcDur>0?Math.max(0,Math.min(1,tDur/srcDur)):1;
+  return Math.round((dFile&&dFile.size?dFile.size:0)*frac+24000*Math.max(0,tDur));
+}
+function guardLargeRenderWithoutStreamOut(label, estBytes, streamed){
+  // The guard keys on THIS render's actual output target, not just
+  // the probe verdict: streamOutPathFor can decline /out for reasons
+  // beyond the probe (notably OPFS itself being unavailable in the
+  // browser, so there is no disk-backed destination to stream to),
+  // and any render that is not actually streamed accumulates its
+  // output in converter memory exactly like the B13 death path.
+  if(streamed) return;
+  var why=diagStorage.streamOutVerdict?('the streamed-output probe passed, but this render is not targeted at /out (OPFS available='+String(diagStorage.opfsAvailable)+')'):('the streamed-output probe failed: '+diagStorage.streamOutReason);
+  if(estBytes>STREAM_OUT_REQUIRED_BYTES){
+    log('storage: '+label+' REFUSED before encoding — expected output '+fmtBytesMB(estBytes)+' exceeds the '+fmtBytesMB(STREAM_OUT_REQUIRED_BYTES)+' in-memory limit and '+why+'. Accumulating this output in converter memory is the B13 tab-death path, so the render fails here, before any mux starts, with a handled error.');
+    throw new Error('This video is too large to render safely in this browser session: the result would be about '+fmtSize(estBytes)+', and streamed saving is unavailable ('+why+'), so the video would have to build up in the converter\u2019s memory \u2014 which crashes the tab on large videos. The render was stopped before it started. Reload the page and try again; if it keeps happening, copy the diagnostics (Details \u2192 Copy diagnostics) and send them.');
+  }
+  log('storage: '+label+' — this render is not streamed ('+why+'), but the expected output ('+fmtBytesMB(estBytes)+') is within the '+fmtBytesMB(STREAM_OUT_REQUIRED_BYTES)+' in-memory limit; using the legacy MEMFS output + slice-streamed delivery');
 }
 // The converter-FS output path a render should use for the OPFS result
 // file opfsName: the streamed /out path when streaming is available,
@@ -3405,6 +3495,7 @@ async function renderExport(sig){
   var exportOutTarget=streamOutPathFor(exportOpfsName);
   var exportStreamed=(exportOutTarget!=='dance-synced.mp4');
   if(exportStreamed) log('Export: render output target is '+exportOutTarget+' — the output streams to OPFS file '+exportOpfsName+' in ≤16 MB slices as produced (B13); it never accumulates in converter memory');
+  guardLargeRenderWithoutStreamOut('Export render', estimateCopiedOutputBytes(dFile, tDur), exportStreamed);
   // TWO-STAGE EXPORT: Full quality with NO trim set is the common case
   // and never needs the video re-encoded or fully decoded — stage 1
   // renders ONLY the processed audio track (the full audio filter graph)
@@ -3518,6 +3609,7 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
   var directOutTarget=streamOutPathFor(directOpfsName);
   var directStreamed=(directOutTarget!=='dance-synced.mp4');
   if(directStreamed) log('Direct export: render output target is '+directOutTarget+' — stage 2 streams to OPFS file '+directOpfsName+' in ≤16 MB slices as produced (B13); the ~full-size output never accumulates in converter memory');
+  guardLargeRenderWithoutStreamOut('Direct export render', estimateCopiedOutputBytes(dFile, tDur), directStreamed);
   diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate';
   var mounted=null;
   var s1Size=null, s1DurSec=0, s2DurSec=0;
@@ -4115,6 +4207,11 @@ async function doGenerate(opts){
     var proxyOutTarget=streamOutPathFor(proxyOpfsName);
     var proxyStreamed=(proxyOutTarget!=='dance-synced.mp4');
     if(proxyStreamed) log('Generate: proxy render output target is '+proxyOutTarget+' — the output streams to OPFS file '+proxyOpfsName+' in ≤16 MB slices as produced (B13); it never accumulates in converter memory');
+    // A 480p encode is small for any realistic clip (≈3 MB/s is a
+    // generous ceiling for 480p video + 192k audio), but the guard
+    // applies here too so no render path can accumulate an unbounded
+    // MEMFS output when streaming is unavailable.
+    guardLargeRenderWithoutStreamOut('Proxy render', Math.round(tDur*375000), proxyStreamed);
     // WEBCODECS PROXY ENGINE: try the hardware pipeline first (demux →
     // VideoDecoder → canvas scale → VideoEncoder → JS video mux + ffmpeg
     // stream-copy mux with the processed audio from the existing filter
