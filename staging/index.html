@@ -410,6 +410,21 @@ function journalMarkHandledError(){
   journalCompleted=true;
   journalPersistNow();
 }
+function journalDeliveryPending(){
+  // B15: a Share/Download/Open tap AFTER a completed generation is a
+  // new in-flight operation. Generation success already marked the
+  // journal completed=true, and the recovery gate on the next load
+  // only surfaces journals with completed=false — so a tab death
+  // during a post-generation delivery (the Share handoff) was
+  // silently swallowed and the next dump showed a clean session.
+  // Every delivery tap re-arms the journal as not-completed (and the
+  // caller persists synchronously) BEFORE the platform call; the
+  // delivery's resolve / dismiss / handled-error paths mark it
+  // completed again. A death mid-handoff now leaves completed=false
+  // at stage=delivery with the tap line on disk.
+  journalCompleted=false;
+  journalPersistNow();
+}
 function journalSafeClear(){
   try{ localStorage.removeItem(JOURNAL_KEY); }catch(e){}
 }
@@ -3453,6 +3468,54 @@ function fileConstruction(f){
   if(diskBackedResultFiles&&diskBackedResultFiles.has(f)) return 'disk-backed OPFS File — used directly (no Blob/File rebuild, no byte copy)';
   return 'File — used directly (no Blob/File rebuild)';
 }
+// B15: resolve the File handed to navigator.share. The delivered
+// result File is used DIRECTLY whenever the platform accepts it
+// (canShare) — the B14 behavior, unchanged. But an OPFS getFile()
+// File carries an EMPTY MIME type (OPFS stores no type; only the
+// name survives), and iOS validates shared files by type/UTI: a
+// type-less .mp4 can fail canShare / the share handoff even though
+// the bytes are a valid MP4 (the diagnostics' own 1-byte probe File
+// passes precisely because it is built with type 'video/mp4').
+// When — and only when — the delivered File fails canShare, fall
+// back to a typed shell: new File([file], 'dance-synced.mp4',
+// {type:'video/mp4'}). The shell's single blob part REFERENCES the
+// delivered File — Blob parts are lazy, no bytes are read or copied
+// at construction — it only supplies the name + type the platform
+// validates. The shell becomes the share File only if IT passes
+// canShare. Returns {file, canShare, how}.
+function resolveShareFile(file){
+  var shareFile=file, how;
+  if(file instanceof File){ how=fileConstruction(file); }
+  else { try{ shareFile=new File([file],'dance-synced.mp4',{type:'video/mp4'}); how='in-memory Blob wrapped in a new File at export-ready time (non-OPFS fallback path only)'; }catch(e){ shareFile=file; how='in-memory Blob (File construction failed)'; } }
+  var can=false;
+  if(shareFile&&typeof navigator!=='undefined'&&typeof navigator.canShare==='function'&&typeof navigator.share==='function'){
+    try{ can=!!navigator.canShare({files:[shareFile]}); }catch(e){ can=false; }
+    if(!can&&shareFile instanceof File){
+      try{
+        var shell=new File([shareFile],'dance-synced.mp4',{type:'video/mp4'});
+        var canShell=false;
+        try{ canShell=!!navigator.canShare({files:[shell]}); }catch(e){ canShell=false; }
+        log('Share File check: delivered File "'+shareFile.name+'" (type="'+(shareFile.type||'')+'") canShare=false — typed shell "dance-synced.mp4" (type="video/mp4"; blob part references the delivered File, no byte copy) canShare='+String(canShell));
+        if(canShell){ shareFile=shell; can=true; how='typed shell over the delivered File (name=dance-synced.mp4, type=video/mp4 — used because the delivered File itself failed canShare; the shell references its bytes, no copy)'; }
+      }catch(e){}
+    }
+  }
+  return {file:shareFile, canShare:can, how:how};
+}
+// B15: free the heaviest memory the page holds BEFORE the platform
+// share handoff. The ffmpeg converter worker's wasm heap is the
+// largest releasable chunk resident at delivery time, and the
+// preview video's media pipeline holds buffers of its own; on iOS a
+// ~1 GB File handoff on top of that resident memory is what kills
+// the tab at the Share tap. Terminating the converter is the
+// established cancel pattern (ffmpeg=null, ffmpegLoaded=false) and
+// it reloads on demand via ensureFFmpeg if a later render needs it.
+// Everything here is synchronous and runs BEFORE navigator.share(),
+// so the tap's transient user activation is preserved.
+function freeMemoryBeforeShare(){
+  try{ if(typeof ffmpeg!=='undefined'&&ffmpeg){ ffmpeg.terminate(); ffmpeg=null; ffmpegLoaded=false; log('Share: converter worker terminated before the platform handoff to free its wasm heap for the share sheet (it reloads on demand).'); } }catch(e){}
+  try{ if(typeof resultVideoEl!=='undefined'&&resultVideoEl&&!resultVideoEl.paused) resultVideoEl.pause(); }catch(e){}
+}
 function exportCacheTotalBytes(){ var t=0; exportCache.forEach(function(e){ if(e&&e.blob&&e.blob.size) t+=e.blob.size; }); return t; }
 function exportCachePut(sig, entry){
   if(exportCache.has(sig)) exportOrder=exportOrder.filter(function(k){return k!==sig});
@@ -3484,16 +3547,15 @@ function invalidateExport(reason){
 function setLiveExport(entry, sig){
   if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
   var file=entry.blob;
-  // B14: hand the delivered File to the platform DIRECTLY — never
+  // B14/B15: hand the delivered File to the platform DIRECTLY — never
   // rebuild it with new File([blob]) (on a ~1 GB result that rebuild
-  // is a whole-payload materialization). Only a non-File Blob (the
-  // small in-memory fallback path, which large outputs never take)
-  // still needs wrapping in a File for navigator.share.
-  var shareFile=file, shareHow;
-  if(file instanceof File){ shareHow=fileConstruction(file); }
-  else { try{ shareFile=new File([file],'dance-synced.mp4',{type:'video/mp4'}); shareHow='in-memory Blob wrapped in a new File at export-ready time (non-OPFS fallback path only)'; }catch(e){ shareFile=file; shareHow='in-memory Blob (File construction failed)'; } }
-  var can=false;
-  if(shareFile&&typeof navigator!=='undefined'&&navigator.canShare&&navigator.share){ try{ can=!!navigator.canShare({files:[shareFile]}); }catch(e){ can=false; } }
+  // is a whole-payload materialization). resolveShareFile keeps that
+  // behavior whenever the delivered File passes canShare; only if it
+  // fails (an OPFS File's empty MIME type is the known iOS cause)
+  // does it substitute a typed shell that references the same bytes.
+  var resolved=resolveShareFile(file);
+  var shareFile=resolved.file, shareHow=resolved.how;
+  var can=resolved.canShare;
   liveExport={sig:sig, file:shareFile, blob:file, url:URL.createObjectURL(file), canShare:can, size:file.size, opfsName:entry.opfsName||null, q:entry.q||null, how:shareHow};
   if(dlAnchorEl) dlAnchorEl.href=liveExport.url;
   if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen
@@ -3718,26 +3780,36 @@ function performExportAction(action){
   if(action==='share'){
     diagStage='share';
     log('Share (export) tapped → action=share | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | canShare='+String(liveExport.canShare)+' | invoking navigator.share({files:[that File]}) next — the File itself is handed to the platform; no arrayBuffer read and no Blob/File rebuild at tap time. If this share follows a Processing render, iOS may have expired the original tap activation — a NotAllowedError below means: tap Share again (export is cached, the next tap shares instantly).');
+    // B15: re-arm the journal as not-completed BEFORE the handoff —
+    // generation already marked it completed, which made a tab death
+    // during this share invisible to the next session's dump.
+    try{ journalDeliveryPending(); }catch(e){}
+    // B15: free the converter wasm heap + pause the preview BEFORE
+    // the handoff (synchronous — tap activation is preserved), then
+    // flush the journal again so that step is on disk too.
+    freeMemoryBeforeShare();
     try{ journalPersistNow(); }catch(e){}
     if(liveExport.file&&liveExport.canShare&&navigator.share){
       var pr=null, syncErr=null;
       try{ pr=navigator.share({files:[liveExport.file]}); }catch(err){ syncErr=err; }
       if(syncErr){ log('Share (export) → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
       if(pr&&pr.then) pr.then(function(){ log('Share (export) → navigator.share resolved.'); try{ journalMarkCompleted(true); }catch(e){} },function(err){
-        if(err&&err.name==='AbortError'){ log('Share (export) → dismissed by user (AbortError, not a failure).'); }
-        else { log('Share (export) → navigator.share rejected: '+diagErrText(err)); if(err&&err.name==='NotAllowedError'){ showError('Export is ready ('+fmtSize(liveExport.size)+') — tap Share again to open the share sheet.'); } else shareFailed(err); }
+        if(err&&err.name==='AbortError'){ log('Share (export) → dismissed by user (AbortError, not a failure).'); try{ journalMarkCompleted(true); }catch(e){} }
+        else { log('Share (export) → navigator.share rejected: '+diagErrText(err)); if(err&&err.name==='NotAllowedError'){ showError('Export is ready ('+fmtSize(liveExport.size)+') — tap Share again to open the share sheet.'); try{ journalMarkHandledError(); }catch(e){} } else shareFailed(err); }
       });
       return;
     }
     log('Share (export) → file sharing unavailable in this browser (canShare='+String(liveExport.canShare)+') — use Download or Open.');
     showError('File sharing is not available in this browser — use Download or Open for the export.');
+    try{ journalMarkHandledError(); }catch(e){}
     return;
   }
   if(action==='download'){
     diagStage='download';
     log('Download (export) tapped → action=download | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | canShare='+String(liveExport.canShare)+' | handing off via the in-DOM download anchor (object URL of that same File — no byte copy at tap time); activating the anchor next (if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).');
-    try{ journalPersistNow(); }catch(e){}
-    if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; try{ dlAnchorEl.click(); }catch(clickErr){ log('Download (export) → anchor activation threw: '+diagErrText(clickErr)); showError('Download could not start for the export ('+fmtSize(liveExport.size)+') — tap Download again.'); return; } try{ journalMarkCompleted(true); }catch(e){} }
+    try{ journalDeliveryPending(); }catch(e){}
+    if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; try{ dlAnchorEl.click(); }catch(clickErr){ log('Download (export) → anchor activation threw: '+diagErrText(clickErr)); showError('Download could not start for the export ('+fmtSize(liveExport.size)+') — tap Download again.'); try{ journalMarkHandledError(); }catch(e){} return; } try{ journalMarkCompleted(true); }catch(e){} }
+    else { try{ journalMarkHandledError(); }catch(e){} }
     return;
   }
   if(action==='open'){
@@ -3746,7 +3818,7 @@ function performExportAction(action){
     // the in-page Preview video in the native fullscreen player instead.
     diagStage='open-video';
     log('Open (export) tapped → action=open | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | canShare='+String(liveExport.canShare)+' | no file handoff: presenting the in-page Preview video fullscreen next (no blob URL navigation).');
-    try{ journalPersistNow(); }catch(e){}
+    try{ journalDeliveryPending(); }catch(e){}
     openResultFullscreen();
     return;
   }
@@ -3954,11 +4026,11 @@ function showResult(blob, opts){
   // materialization and is banned at any result size. Only a non-File
   // Blob (the small in-memory fallback path) is wrapped, as before.
   resultBlob=blob; resultFile=null; resultCanShare=false; resultFileHow='';
-  if(blob instanceof File){ resultFile=blob; resultFileHow=fileConstruction(blob); }
-  else { try{ resultFile=new File([blob],'dance-synced.mp4',{type:'video/mp4'}); resultFileHow='in-memory Blob wrapped in a new File at generation (non-OPFS fallback path only)'; }catch(e){ resultFile=null; resultFileHow='none (File construction failed)'; logError('result-file-build',e); } }
-  if(resultFile&&navigator.canShare&&navigator.share){
-    try{ resultCanShare=!!navigator.canShare({files:[resultFile]}); log('Result: share File "'+resultFile.name+'" ('+blob.size+' bytes, '+fmtBytesMB(blob.size)+') | construction: '+resultFileHow+' | canShare with real output File → '+String(resultCanShare)); }catch(e){ resultCanShare=false; logError('result-canShare',e); }
-  } else { log('Result: canShare check skipped — resultFile='+(resultFile?'present':'null')+' | construction: '+resultFileHow+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent')+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')); }
+  var resolvedResult=resolveShareFile(blob);
+  resultFile=(resolvedResult.file instanceof File)?resolvedResult.file:null;
+  resultFileHow=resolvedResult.how; resultCanShare=resolvedResult.canShare;
+  if(resultFile){ log('Result: share File "'+resultFile.name+'" ('+blob.size+' bytes, '+fmtBytesMB(blob.size)+') | construction: '+resultFileHow+' | canShare with real output File → '+String(resultCanShare)); }
+  else { log('Result: no share File could be resolved — construction: '+resultFileHow+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent')+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')); }
   diagResult.blobSize=blob.size; diagResult.blobType=blob.type||'video/mp4'; diagResult.canShare=resultCanShare; diagResult.shareFileBuilt=!!resultFile;
   try{ var qe2=document.querySelector('input[name=quality]:checked'); var qv=qe2?qe2.value:'full'; diagResult.settings={q:qv,height:(qv==='full'?0:parseInt(qv,10)),tStart:trimStartSec,tEnd:trimEnd(),tDur:Math.max(0,trimEnd()-trimStartSec),eff:effOffset(),blend:blendVal}; }catch(e){}
   var oldURL=resultURL;
