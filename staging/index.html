@@ -2322,8 +2322,31 @@ async function tryRestoreRetainedResult(){
   restoredResultActive=true;
   showResult(file,{isDirect:!!rec.isDirect});
   try{ markProgressShown(); }catch(e){}
+  // Deterministic restore visibility (B17): in a fresh flow #playerSec
+  // is visible by completion time because picking the Video file showed
+  // it; a restore has no file pick, so without this the restored result
+  // sits populated inside a hidden section. Show the section explicitly
+  // so every successful restore ends in exactly the visible state a
+  // fresh completion produces (Preview header + subheading + player +
+  // Download row + editor — all wired by showResult/showEditor above —
+  // and Start over, via markProgressShown/updateNewBtn).
+  try{ var _psec=$('playerSec'); if(_psec) _psec.classList.add('show'); }catch(e){}
   diagStorage.retainedNote='retained result restored as the current result: '+rec.opfsName+' ('+fmtBytesMB(file.size)+') | delivered '+(rec.savedAt||'unknown');
   log('Retained result recovered: "'+rec.opfsName+'" ('+file.size+' bytes, '+fmtBytesMB(file.size)+') | delivered at '+(rec.savedAt||'unknown')+' | quality='+(rec.q||'?')+' | trim '+Number(rec.tStart||0).toFixed(3)+'s to '+Number(rec.tEnd||0).toFixed(3)+'s | effective offset='+Number(rec.eff||0).toFixed(3)+'s | detected offset='+(rec.detected!=null?Number(rec.detected).toFixed(3)+'s':'?')+' | blend='+Math.round((rec.blend||0)*100)+'% — Preview + Download restored from the retained OPFS file (journal metadata above); no regeneration needed.');
+  // B17: the restore has fully settled and is, so far, this session's
+  // ONLY activity — close the session journal cleanly. showResult set
+  // diagStage='result' (normalized to 'delivery') and its log lines
+  // persisted the journal with completed=false; left like that, the
+  // NEXT load would misread this view-only visit as a session that died
+  // mid-delivery and show the recovery notice + a recovered section.
+  // Marking completed here disarms nothing genuine: a Download tap
+  // re-arms via journalDeliveryPending() before the platform call, and
+  // starting a new generation re-arms via journalBeginRun(). clean is
+  // deliberately NOT passed, so a recovered record from an earlier
+  // genuine crash (if one is being shown) is left for dismissal or a
+  // clean run, exactly as before.
+  log('Retained result restore settled — session journal marked completed: this visit only restored/viewed the retained result and started no work, so the session closes cleanly (no recovery notice on the next load).');
+  try{ journalMarkCompleted(); }catch(e){}
 }
 async function opfsStartupSweep(){
   if(diagStorage.sweepDone) return;
