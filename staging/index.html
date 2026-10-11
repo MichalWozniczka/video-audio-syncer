@@ -49,6 +49,11 @@ button{appearance:none;border:0;border-radius:999px;padding:11px 16px;font-weigh
 .diagBar{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
 .diagBar .secondary{padding:8px 14px;font-size:13px}
 #diagCopyStatus{font-size:12.5px;color:var(--ok)}
+.probePanel{margin-top:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.probeTitle{font-size:13px;font-weight:700}
+.probeNote{font-size:12px;color:var(--muted);margin:4px 0 8px}
+.probeRow{display:flex;gap:8px;flex-wrap:wrap}
+.probeRow .secondary{padding:8px 14px;font-size:13px}
 #diagFallback{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;pointer-events:none;font-size:16px}
 .errline{color:#ff8a75;font-size:13px;margin-top:8px;display:none}
 .errline.show{display:block}
@@ -214,7 +219,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 
   <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
   <div class="errline" id="errLine"></div>
-  <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
+  <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea><div class="probePanel" id="shareProbePanel" style="display:none"><div class="probeTitle">Share investigation</div><p class="probeNote">Probe shares of the current result. Each tap journals the arm, payload size and construction, re-arms the crash journal to the delivery stage, and runs a ~100 ms heartbeat while the share is in flight — if the tab dies, the next diagnostics dump names the arm and how long preparation ran.</p><div class="probeRow"><button type="button" class="secondary" id="btnProbeFull">Share full file</button><button type="button" class="secondary" id="btnProbe300">Share 300 MB slice</button><button type="button" class="secondary" id="btnProbe600">Share 600 MB slice</button></div></div></details>
   <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
 </div>
 
@@ -253,7 +258,7 @@ var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:''
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
 var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet', streamOutVerdict:null, streamOutReason:'', streamOutNote:'no streamed render yet', streamOutSetupLine:''};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet', streamOutVerdict:null, streamOutReason:'', streamOutNote:'no streamed render yet', streamOutSetupLine:'', retainedNote:'no retained result recorded yet'};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
@@ -316,6 +321,16 @@ var journalLastMemoryCheckpoint='';
 var journalLastError='';
 var journalLastStage='';
 var journalPersistTimer=null;
+// Share-investigation probes: PROBE_HB_KEY holds the in-flight probe
+// heartbeat ({arm,count,startedAt,updatedAt}, rewritten every ~100 ms
+// while a probe share is in flight and removed when it settles — a
+// leftover record at boot therefore means the tab died mid-probe).
+// probeJournal is the bounded probe event log persisted inside the
+// journal state so a recovered session reports every probe step.
+var PROBE_HB_KEY='dance-sync.share-probe-heartbeat.v1';
+var probeJournal=[];
+var probeLastHeartbeatFinal=null;
+var recoveredProbeHeartbeat=null;
 function journalTruncate(s,n){ s=String(s==null?'':s); return s.length>n?(s.slice(0,n)+'…[truncated]'):s; }
 function journalNormalizeStage(raw){
   var s=String(raw||'boot');
@@ -381,6 +396,9 @@ function journalBuildState(){
     renderTargets:renderTargets,
     lastMemoryCheckpoint:journalLastMemoryCheckpoint||'',
     lastError:journalLastError||'',
+    probeJournal:(typeof probeJournal!=='undefined'&&probeJournal)?probeJournal.slice(-24):[],
+    probeHeartbeatFinal:(typeof probeLastHeartbeatFinal!=='undefined')?probeLastHeartbeatFinal:null,
+    probeHeartbeatRecovered:(typeof recoveredProbeHeartbeat!=='undefined'&&recoveredProbeHeartbeat)?recoveredProbeHeartbeat:null,
     entries:diagEntries.slice(-200)
   };
 }
@@ -472,6 +490,17 @@ function journalDismissRecovered(){
   journalRecovered=null;
   journalHideRecoveredNotice();
 }
+function journalProbeHeartbeatText(r){
+  // The in-flight heartbeat of a probe that killed the tab can never be
+  // written into that session's own journal record (the tab was dead) —
+  // it survives under its own localStorage key and is read into THIS
+  // session's recoveredProbeHeartbeat at boot. Prefer the record's own
+  // field, fall back to the live recovered value.
+  var hb=(r&&r.probeHeartbeatRecovered)||((typeof recoveredProbeHeartbeat!=='undefined'&&recoveredProbeHeartbeat)?recoveredProbeHeartbeat:null);
+  if(hb) return 'IN-FLIGHT AT DEATH — arm='+(hb.arm||'?')+' | count='+(hb.count!=null?hb.count:'?')+' (≈'+((hb.count||0)*100)+' ms of share preparation) | started='+(hb.startedAt||'?')+' | last beat='+(hb.updatedAt||'?')+' — the probe share never settled; the tab died during this arm';
+  if(r&&r.probeHeartbeatFinal!=null) return 'final count='+r.probeHeartbeatFinal+' — the last probe settled (see probe journal)';
+  return 'none recorded';
+}
 function journalRecoveredText(){
   if(!journalRecovered) return '';
   var r=journalRecovered;
@@ -491,6 +520,8 @@ function journalRecoveredText(){
     'Render targets: '+JSON.stringify(r.renderTargets||{}),
     'Last memory checkpoint: '+(r.lastMemoryCheckpoint||'none recorded'),
     'Last error: '+(r.lastError||'none recorded'),
+    'Probe journal: '+(Array.isArray(r.probeJournal)&&r.probeJournal.length?('\n'+r.probeJournal.join('\n')):'(no share probes recorded)'),
+    'Last probe heartbeat: '+journalProbeHeartbeatText(r),
     '--- RECOVERED RUN STATE ---',
     JSON.stringify(stateCopy,null,2),
     '--- RECOVERED PIPELINE LOG ---',
@@ -553,6 +584,16 @@ try{
     if(_keptRecovered&&_keptRecovered.completed===false&&journalSessionDidWork(_keptRecovered)) journalRecovered=_keptRecovered;
     else if(_keptRecovered&&!journalSessionDidWork(_keptRecovered)) journalSafeClearRecovered();
   }
+}catch(e){}
+// A share-probe heartbeat that was never cleared means the previous
+// session died (or was killed) while a probe share was in flight:
+// capture it NOW, before any probe in this session can overwrite or
+// clear it. It is surfaced in the recovered-session diagnostics and in
+// a boot log line, naming the arm that died and how long share
+// preparation ran (≈ count × 100 ms).
+try{
+  var _hbRaw=localStorage.getItem(PROBE_HB_KEY);
+  if(_hbRaw){ var _hbParsed=JSON.parse(_hbRaw); if(_hbParsed&&typeof _hbParsed==='object') recoveredProbeHeartbeat=_hbParsed; }
 }catch(e){}
 // Global error handlers: registered early and writing SYNCHRONOUSLY to
 // the journal, so an uncaught error / unhandled rejection is on disk
@@ -715,6 +756,7 @@ function buildDiagnosticsText(){
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a')
     ].concat(areaLines).concat([
       'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
+      'Retained result (share-investigation test vehicle): '+(diagStorage.retainedNote||'n/a'),
       'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'n/a')+(diagProxy.webcodecs?(' | webcodecs stages: demux '+(diagProxy.webcodecs.timings.demuxMs/1000).toFixed(2)+'s · decode+encode '+(diagProxy.webcodecs.timings.decodeEncodeMs/1000).toFixed(1)+'s · audio '+(diagProxy.webcodecs.timings.audioMs/1000).toFixed(1)+'s · mux '+(diagProxy.webcodecs.timings.muxMs/1000).toFixed(1)+'s · '+diagProxy.webcodecs.frames+' frames · '+diagProxy.webcodecs.outW+'x'+diagProxy.webcodecs.outH+' @ '+diagProxy.webcodecs.fps+' fps · '+diagProxy.webcodecs.srcCodec+' → '+diagProxy.webcodecs.encCodec):''),
       'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
     ].join('\n'));
@@ -1829,6 +1871,7 @@ async function detectStorageBackend(){
     await refreshStorageEstimate();
     await opfsStartupSweep();
     await refreshOpfsAreas('boot');
+    try{ await tryRestoreRetainedResult(); }catch(e){ try{ logError('retained-restore',e); }catch(_){} }
     return true;
   }catch(e){
     diagStorage.opfsAvailable=false; diagStorage.note='getDirectory threw '+(e.name||'Error')+': '+(e.message||e);
@@ -2218,11 +2261,134 @@ async function opfsSweepStale(keepNames, reason){
   log('storage: OPFS sweep '+note);
   return {removed:removed, bytes:bytes};
 }
+// ---------- retained result (share-investigation test vehicle) ----------
+// The newest DELIVERED result is retained across reloads/crashes: its
+// OPFS file is kept by the boot sweep (below) and its metadata record
+// (localStorage, a few hundred bytes) lets the next boot restore the
+// result area — Preview + Share/Download/Open — from the file itself,
+// so a save attempt that kills the tab becomes a retry instead of a
+// full regeneration. Staged inputs and superseded results are still
+// swept exactly as before; Start over clears the retained result, and
+// every newly delivered result supersedes the record.
+var RETAINED_KEY='dance-sync.retained-result.v1';
+var restoredResultActive=false;
+var retainedRestoreChecked=false;
+function retentionReadRecord(){
+  try{ var raw=localStorage.getItem(RETAINED_KEY); if(!raw) return null; var rec=JSON.parse(raw); return (rec&&typeof rec==='object'&&rec.opfsName)?rec:null; }catch(e){ return null; }
+}
+function retentionBuildRecord(opfsName, size){
+  var s=(typeof diagResult!=='undefined'&&diagResult.settings)||null;
+  var q='full'; try{ q=currentExportQuality().q; }catch(e){}
+  if(s&&s.q) q=s.q;
+  return {
+    v:1, opfsName:opfsName, size:size, q:q,
+    tStart:(s&&s.tStart!=null)?s.tStart:trimStartSec,
+    tEnd:(s&&s.tEnd!=null)?s.tEnd:trimEnd(),
+    tDur:(s&&s.tDur!=null)?s.tDur:Math.max(0,trimEnd()-trimStartSec),
+    eff:(s&&s.eff!=null)?s.eff:effOffset(),
+    blend:(s&&s.blend!=null)?s.blend:blendVal,
+    detected:(typeof detectedOffset!=='undefined')?detectedOffset:null,
+    srcDur:(typeof danceDur!=='undefined')?danceDur:0,
+    songDur:(typeof songDur!=='undefined')?songDur:0,
+    isDirect:(typeof lastResultIsDirect!=='undefined')?!!lastResultIsDirect:false,
+    savedAt:new Date().toISOString()
+  };
+}
+function retentionSetRecord(opfsName, size){
+  if(!opfsName) return;
+  try{
+    var prev=retentionReadRecord();
+    if(prev&&prev.opfsName===opfsName&&prev.size===size) return;
+    var rec=retentionBuildRecord(opfsName, size);
+    localStorage.setItem(RETAINED_KEY, JSON.stringify(rec));
+    diagStorage.retainedNote='newest delivered result retained: '+opfsName+' ('+fmtBytesMB(size)+') | delivered '+rec.savedAt+' | quality='+(rec.q||'?')+' — kept across reload/crash until Start over or a newer result';
+    log('Retained result: "'+opfsName+'" ('+fmtBytesMB(size)+') is now the retained delivered result — the boot sweep will keep it and the next session restores the result area from it, until Start over or a newer result supersedes it.');
+  }catch(e){}
+}
+function retentionClear(reason){
+  var rec=retentionReadRecord();
+  try{ localStorage.removeItem(RETAINED_KEY); }catch(e){}
+  restoredResultActive=false;
+  diagStorage.retainedNote='no retained result ('+reason+')';
+  return rec;
+}
+function retentionFindOpfsName(blob){
+  var found=null;
+  try{ exportCache.forEach(function(e){ if(!found&&e&&e.blob===blob&&e.opfsName) found=e.opfsName; }); }catch(e){}
+  if(!found){ try{ outCache.forEach(function(e){ if(!found&&e&&e.blob===blob&&e.opfsName) found=e.opfsName; }); }catch(e){} }
+  if(!found&&typeof liveExport!=='undefined'&&liveExport&&liveExport.blob===blob&&liveExport.opfsName) found=liveExport.opfsName;
+  return found;
+}
+function retentionSyncFromResult(blob){
+  // Called whenever a result is delivered to the screen: the newest
+  // delivered result becomes the retained one.
+  if(!blob) return;
+  var name=retentionFindOpfsName(blob);
+  if(name){ retentionSetRecord(name, blob.size); return; }
+  // In-memory (MEMFS) delivery — no OPFS file exists to retain.
+  if(retentionReadRecord()){ try{ localStorage.removeItem(RETAINED_KEY); }catch(e){} }
+  diagStorage.retainedNote='latest result was delivered in memory (no OPFS file) — nothing retained across reload';
+}
+async function tryRestoreRetainedResult(){
+  if(retainedRestoreChecked) return; retainedRestoreChecked=true;
+  var rec=retentionReadRecord();
+  if(!rec) return;
+  if(!opfsRoot||!diagStorage.opfsAvailable){ log('Retained result: a retained result is recorded ('+rec.opfsName+') but OPFS is unavailable this session — it cannot be restored.'); return; }
+  if(resultBlob||danceFile||songFile) return; // a live session already has state — never clobber it
+  var file=null;
+  try{ var h=await opfsRoot.getFileHandle(rec.opfsName); file=await h.getFile(); }catch(e){ file=null; }
+  if(!file||!file.size){
+    log('Retained result: the recorded file '+rec.opfsName+' is no longer in OPFS — dropping the stale retention record.');
+    retentionClear('retained file missing at boot');
+    return;
+  }
+  log('Retained result: restoring the previous session\'s delivered result "'+rec.opfsName+'" ('+fmtBytesMB(file.size)+') — kept across the boot sweep by the share-investigation retention (test vehicle).');
+  if(rec.size!=null&&file.size!==rec.size) log('Retained result: the file size differs from the record ('+file.size+' vs '+rec.size+' bytes) — restoring the file as found.');
+  markDiskBackedResultFile(file);
+  // Restore the editor state the result was generated with, so the
+  // result area, the diagnostics settings snapshot, and the export
+  // signature all describe the retained file (the source uploads
+  // themselves are not restored — they were never persisted).
+  try{
+    if(rec.detected!=null) detectedOffset=rec.detected;
+    if(rec.srcDur) danceDur=rec.srcDur;
+    if(rec.songDur) songDur=rec.songDur;
+    trimStartSec=rec.tStart||0;
+    trimEndSec=(rec.tEnd!=null&&rec.srcDur&&rec.tEnd<rec.srcDur-0.01)?rec.tEnd:null;
+    blendVal=rec.blend||0;
+    audioPos=-(rec.eff||0);
+    var qr=document.querySelector('input[name=quality][value="'+(rec.q||'full')+'"]'); if(qr) qr.checked=true;
+    var bl=$('blend'); if(bl) bl.value=Math.round(blendVal*100);
+    var bv=$('blendVal'); if(bv) bv.textContent=Math.round(blendVal*100)+'%';
+    syncOffsetInput();
+  }catch(e){}
+  // Arm the export cache with the retained file so showResult wires
+  // Share/Download/Open to it directly (no re-render, no source files).
+  try{ var sig=currentExportSignature(); exportCachePut(sig,{blob:file, opfsName:rec.opfsName, q:rec.q||'full'}); }catch(e){}
+  restoredResultActive=true;
+  showResult(file,{isDirect:!!rec.isDirect});
+  try{ markProgressShown(); }catch(e){}
+  diagStorage.retainedNote='retained result restored as the current result: '+rec.opfsName+' ('+fmtBytesMB(file.size)+') | delivered '+(rec.savedAt||'unknown');
+  log('Retained result recovered: "'+rec.opfsName+'" ('+file.size+' bytes, '+fmtBytesMB(file.size)+') | delivered at '+(rec.savedAt||'unknown')+' | quality='+(rec.q||'?')+' | trim '+Number(rec.tStart||0).toFixed(3)+'s to '+Number(rec.tEnd||0).toFixed(3)+'s | effective offset='+Number(rec.eff||0).toFixed(3)+'s | detected offset='+(rec.detected!=null?Number(rec.detected).toFixed(3)+'s':'?')+' | blend='+Math.round((rec.blend||0)*100)+'% — Preview + Share/Download/Open restored from the retained OPFS file (journal metadata above); no regeneration needed.');
+}
 async function opfsStartupSweep(){
   if(diagStorage.sweepDone) return;
   diagStorage.sweepDone=true;
   if(!opfsRoot) return;
-  try{ await opfsSweepStale(null,'startup — files left over from previous sessions'); }
+  try{
+    // Share-investigation retention (test vehicle): the newest
+    // DELIVERED result is kept across the boot sweep so a crashed
+    // Share becomes a retry, not a regeneration. Staged inputs and
+    // superseded results are still swept exactly as before.
+    var keep=null;
+    var rec=retentionReadRecord();
+    if(rec&&rec.opfsName){
+      keep={}; keep[rec.opfsName]=true;
+      diagStorage.retainedNote='retained result '+rec.opfsName+' ('+fmtBytesMB(rec.size)+') delivered '+(rec.savedAt||'unknown')+' — kept across the boot sweep';
+      log('storage: boot sweep keeps the retained delivered result '+rec.opfsName+' ('+fmtBytesMB(rec.size)+') — share-investigation retention (test vehicle)');
+    }
+    await opfsSweepStale(keep, keep?('startup — staged inputs + superseded results swept; newest delivered result retained'):('startup — files left over from previous sessions'));
+  }
   catch(e){ logError('opfs-startup-sweep',e); }
 }
 async function opfsCleanupAfterRender(keepOpfsName){
@@ -3560,6 +3726,7 @@ function setLiveExport(entry, sig){
   if(dlAnchorEl) dlAnchorEl.href=liveExport.url;
   if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen
   log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | share File "'+(shareFile&&shareFile.name)+'" ('+file.size+' bytes) | construction: '+shareHow+' | canShare(export File)='+String(can)+' | Download link now points at the export file (not the proxy); Open presents the Preview fullscreen');
+  try{ if(entry.opfsName) retentionSetRecord(entry.opfsName, file.size); }catch(e){}
   return liveExport;
 }
 var isExporting=false, exportToken=0, exportCancelReject=null, exportCancelPromise=null, pendingExportAction=null;
@@ -3828,10 +3995,16 @@ async function ensureExport(action){
   // them) so a cached export's Share keeps its transient user activation:
   // navigator.share() is effectively the first real action of the tap.
   if(isGenerating||pipelineRunning){ log('Export tap ('+action+') while the proxy is still generating — ignored until generation finishes.'); showError('Still generating the preview — Share/Download/Open will export once it finishes.'); return; }
-  if(!danceFile||!songFile){ log('Export tap ('+action+') with no source files loaded — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files.'); return; }
-  if(isExporting){ pendingExportAction=action; log('Export already processing — the pending action is now '+action+'.'); return; }
+  // Fast path BEFORE the source-files guard: an up-to-date live export
+  // delivers with no render, so it needs no source files. In a normal
+  // session liveExport only exists while the files are loaded (Start
+  // over clears both together), so this ordering changes nothing there —
+  // it is what lets a RESTORED retained result (no uploads in memory)
+  // deliver through the normal Share/Download/Open buttons.
   var sig=currentExportSignature();
   if(liveExport&&liveExport.sig===sig){ performExportAction(action); return; }
+  if(!danceFile||!songFile){ log('Export tap ('+action+') with no source files loaded — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files.'); return; }
+  if(isExporting){ pendingExportAction=action; log('Export already processing — the pending action is now '+action+'.'); return; }
   var cached=exportCacheGet(sig);
   if(cached){ setLiveExport(cached, sig); log('Export cache hit for current settings + export quality — no re-render.'); performExportAction(action); return; }
   isExporting=true; pendingExportAction=action; exportToken++; var tok=exportToken; newExportCancelSignal();
@@ -3992,6 +4165,91 @@ function saveResult(){
   log('Save/Share tapped → fallback shown (share unavailable): canShare=false → fallback shown | '+why);
   log(msg); showError(msg);
 }
+// ---------- share investigation probes (this build's test vehicle) ----------
+// Three probe arms in Details, visible whenever a result is present.
+// They exist to bracket WHY navigator.share() kills the tab on a ~1 GB
+// result: (a) the full file — the control, the same File and the same
+// call the normal Share button makes; (b) a 300 MB slice; (c) a 600 MB
+// slice. Slices are lazy references: Blob.slice of the delivered result
+// file wrapped in a File shell — no bytes are read or copied at
+// construction. Every probe journals arm + payload byte size +
+// construction BEFORE the call, re-arms the crash journal to the
+// delivery stage (the B15 journalDeliveryPending machinery), and runs
+// a ~100 ms localStorage heartbeat while the share is in flight; the
+// settle path journals the outcome + the final heartbeat count and
+// clears the heartbeat. If the tab dies mid-probe, the leftover
+// heartbeat is recovered at boot (journal block above) and the
+// recovered-session diagnostics name the arm and how long preparation
+// ran (≈ heartbeat count × 100 ms).
+function updateShareProbePanel(){
+  var p=$('shareProbePanel'); if(!p) return;
+  var has=(typeof resultBlob!=='undefined'&&!!resultBlob);
+  p.style.display=has?'':'none';
+}
+function probeJournalPush(line){
+  try{ probeJournal.push(line); if(probeJournal.length>24) probeJournal=probeJournal.slice(probeJournal.length-24); }catch(e){}
+}
+var probeHbTimer=null, probeHbCount=0, probeHbArm=null, probeHbT0=0;
+function probeHeartbeatStart(arm){
+  if(probeHbTimer){ try{ clearInterval(probeHbTimer); }catch(e){} probeHbTimer=null; }
+  probeHbCount=0; probeHbArm=arm; probeHbT0=Date.now();
+  try{ localStorage.setItem(PROBE_HB_KEY, JSON.stringify({arm:arm,count:0,startedAt:new Date(probeHbT0).toISOString(),updatedAt:new Date(probeHbT0).toISOString()})); }catch(e){}
+  probeHbTimer=setInterval(function(){
+    probeHbCount++;
+    try{ localStorage.setItem(PROBE_HB_KEY, JSON.stringify({arm:probeHbArm,count:probeHbCount,startedAt:new Date(probeHbT0).toISOString(),updatedAt:new Date().toISOString()})); }catch(e){}
+  },100);
+}
+function probeHeartbeatStop(){
+  if(probeHbTimer){ try{ clearInterval(probeHbTimer); }catch(e){} probeHbTimer=null; }
+  probeLastHeartbeatFinal=probeHbCount;
+  try{ localStorage.removeItem(PROBE_HB_KEY); }catch(e){}
+  return probeHbCount;
+}
+function probeSettle(arm, file, outcome, err){
+  var fc=probeHeartbeatStop();
+  var elapsedSec=((Date.now()-probeHbT0)/1000).toFixed(1);
+  var line='probe outcome | arm='+arm+' | '+outcome+(err?(' | error='+(err.name||'Error')+': '+(err.message||'')):'')+' | payload='+(file?file.size:0)+' bytes | final heartbeat count='+fc+' | in flight ≈'+elapsedSec+'s';
+  probeJournalPush(line);
+  log('Share probe ['+arm+'] → '+line);
+  if(!err||err.name==='AbortError'){ try{ journalMarkCompleted(true); }catch(e){} }
+  else { try{ journalPersistNow(); }catch(e){} shareFailed(err); }
+}
+function runShareProbe(arm){
+  var src=(liveExport&&liveExport.blob)?liveExport.blob:resultBlob;
+  if(!src){ log('Share probe ['+arm+'] tapped with no result present — nothing to probe.'); return; }
+  var file=null, construction='';
+  if(arm==='full'){
+    if(liveExport&&liveExport.file){ file=liveExport.file; construction=liveExport.how||fileConstruction(file); }
+    else if(resultFile){ file=resultFile; construction=resultFileHow||fileConstruction(file); }
+    if(!file){ log('Share probe [full]: no share File is resolved for the current result — the control arm cannot run.'); showError('Share probe: no shareable file for this result.'); return; }
+    construction+=' (control arm — the same File the normal Share button hands to navigator.share)';
+  } else {
+    var wantBytes=(arm==='slice300')?(300*1024*1024):(600*1024*1024);
+    try{ var slice=src.slice(0,wantBytes); file=new File([slice],'dance-synced.mp4',{type:'video/mp4'}); }catch(e){ log('Share probe ['+arm+']: slice/File construction threw: '+diagErrText(e)); return; }
+    construction='lazy slice of the delivered result file "'+(src.name||'(unnamed OPFS result)')+'" — resultFile.slice(0, '+wantBytes+') wrapped in a File shell (name=dance-synced.mp4, type=video/mp4); the File\'s single part references the slice — no bytes read or copied';
+  }
+  var can=null;
+  if(typeof navigator!=='undefined'&&typeof navigator.canShare==='function'){ try{ can=!!navigator.canShare({files:[file]}); }catch(e){ can='threw '+(e.name||'Error'); } }
+  diagStage='share';
+  probeJournalPush('probe start | arm='+arm+' | payload='+file.size+' bytes ('+fmtBytesMB(file.size)+') | construction: '+construction+' | canShare='+String(can));
+  log('Share probe ['+arm+'] → payload '+file.size+' bytes ('+fmtBytesMB(file.size)+') | construction: '+construction+' | canShare='+String(can)+' | crash journal re-armed to the delivery stage + heartbeat started — invoking navigator.share({files:[probe File]}) next');
+  try{ journalDeliveryPending(); }catch(e){}
+  probeHeartbeatStart(arm);
+  freeMemoryBeforeShare();
+  try{ journalPersistNow(); }catch(e){}
+  if(!(typeof navigator!=='undefined'&&typeof navigator.share==='function')){
+    var fc0=probeHeartbeatStop();
+    probeJournalPush('probe outcome | arm='+arm+' | navigator.share unavailable in this browser — no platform call made | final heartbeat count='+fc0);
+    log('Share probe ['+arm+'] → navigator.share unavailable in this browser — probe ended without a platform call. Final heartbeat count='+fc0+'.');
+    try{ journalMarkHandledError(); }catch(e){}
+    return;
+  }
+  var p=null, syncErr=null;
+  try{ p=navigator.share({files:[file]}); }catch(err){ syncErr=err; }
+  if(syncErr){ probeSettle(arm, file, 'threw synchronously', syncErr); return; }
+  if(p&&p.then) p.then(function(){ probeSettle(arm, file, 'resolved', null); }, function(err){ probeSettle(arm, file, 'rejected', err); });
+  else probeSettle(arm, file, 'resolved (share returned no promise)', null);
+}
 function showEditor(){
   // Editor (timeline / offset / trim / blend / Export quality / Re-sync)
   // appears only once a generation has completed successfully, under
@@ -4080,6 +4338,10 @@ function showResult(blob, opts){
   showEditor();
   updateNewBtn();
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
+  // Share-investigation retention + probe panel: the result just
+  // delivered becomes the retained result, and the probes appear.
+  try{ retentionSyncFromResult(blob); }catch(e){}
+  try{ updateShareProbePanel(); }catch(e){}
 }
 function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
 // A completed apply/generation becomes the applied-settings snapshot:
@@ -4102,7 +4364,7 @@ function markApplied(snap){
 // Single source of truth for the one Start over button (bottom of page):
 // the page is "active" whenever any session state exists — an uploaded
 // file is session state.
-function sessionActive(){ return !!(danceFile||songFile); }
+function sessionActive(){ return !!(danceFile||songFile||restoredResultActive); }
 function updateNewBtn(){
   var active=sessionActive();
   // The single bottom Start over and the Generate button stay hidden
@@ -4153,6 +4415,10 @@ function resetAll(){
   // genuinely fresh state.
   outCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); outCache.clear(); outOrder=[];
   exportCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); exportCache.clear(); exportOrder=[];
+  // Share-investigation retention: Start over clears the retained
+  // result too — record removed, OPFS file deleted (a no-op if the
+  // cache loops above already deleted it).
+  try{ var _retRec=retentionClear('cleared by Start over'); if(_retRec&&_retRec.opfsName) opfsDelete(_retRec.opfsName); }catch(e){}
   exportToken++;
   if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
   isExporting=false; pendingExportAction=null;
@@ -4190,6 +4456,7 @@ function resetAll(){
   diagFiles.audio={role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
   // Keep diagEntries — just note the reset in the timestamped log.
   log('Reset (Start over) — session cleared. Diagnostics log kept.');
+  try{ updateShareProbePanel(); }catch(e){}
   updateNewBtn();
 }
 $('btnNew').addEventListener('click', resetAll);
@@ -4528,6 +4795,8 @@ try{
 }catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
 try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
+try{ if(recoveredProbeHeartbeat) log('Recovered share-probe heartbeat: arm='+(recoveredProbeHeartbeat.arm||'?')+' | count='+(recoveredProbeHeartbeat.count!=null?recoveredProbeHeartbeat.count:'?')+' (≈'+((recoveredProbeHeartbeat.count||0)*100)+' ms of share preparation) | started='+(recoveredProbeHeartbeat.startedAt||'?')+' | last beat='+(recoveredProbeHeartbeat.updatedAt||'?')+' — the previous session died during that probe share (the heartbeat is only cleared when a probe settles).'); }catch(e){}
+try{ var _pb1=$('btnProbeFull'); if(_pb1) _pb1.addEventListener('click',function(){ runShareProbe('full'); }); var _pb2=$('btnProbe300'); if(_pb2) _pb2.addEventListener('click',function(){ runShareProbe('slice300'); }); var _pb3=$('btnProbe600'); if(_pb3) _pb3.addEventListener('click',function(){ runShareProbe('slice600'); }); }catch(e){ try{ logError('probe-wiring',e); }catch(_){} }
 // Global 'error' / 'unhandledrejection' handlers are registered once,
 // early, in the session-journal block above — they write synchronously
 // to the persisted journal so the error survives a dying tab. (No second
