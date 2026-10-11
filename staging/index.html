@@ -49,11 +49,6 @@ button{appearance:none;border:0;border-radius:999px;padding:11px 16px;font-weigh
 .diagBar{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
 .diagBar .secondary{padding:8px 14px;font-size:13px}
 #diagCopyStatus{font-size:12.5px;color:var(--ok)}
-.probePanel{margin-top:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
-.probeTitle{font-size:13px;font-weight:700}
-.probeNote{font-size:12px;color:var(--muted);margin:4px 0 8px}
-.probeRow{display:flex;gap:8px;flex-wrap:wrap}
-.probeRow .secondary{padding:8px 14px;font-size:13px}
 #diagFallback{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;pointer-events:none;font-size:16px}
 .errline{color:#ff8a75;font-size:13px;margin-top:8px;display:none}
 .errline.show{display:block}
@@ -219,7 +214,7 @@ input[type=range]{flex:1;accent-color:var(--accent);min-width:120px}
 
   <div class="progress" id="progWrap"><div class="barTrack"><i id="progBar"></i><span id="progText"></span></div></div>
   <div class="errline" id="errLine"></div>
-  <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea><div class="probePanel" id="shareProbePanel" style="display:none"><div class="probeTitle">Share investigation</div><p class="probeNote">Probe shares of the current result. Each tap journals the arm, payload size and construction, re-arms the crash journal to the delivery stage, and runs a ~100 ms heartbeat while the share is in flight — if the tab dies, the next diagnostics dump names the arm and how long preparation ran.</p><div class="probeRow"><button type="button" class="secondary" id="btnProbeFull">Share full file</button><button type="button" class="secondary" id="btnProbe300">Share 300 MB slice</button><button type="button" class="secondary" id="btnProbe600">Share 600 MB slice</button></div></div></details>
+  <details id="logDetails"><summary>Details</summary><div id="log">Upload both files — video generates automatically.</div><div class="diagBar"><button type="button" id="btnCopyDiag" class="secondary">Copy diagnostics</button><span id="diagCopyStatus" aria-live="polite"></span></div><textarea id="diagFallback" readonly tabindex="-1" aria-hidden="true"></textarea></details>
   <div id="newWrap"><button type="button" class="startover" id="btnNew">Start over</button></div>
 </div>
 
@@ -256,7 +251,7 @@ var diagEntries=[];
 var diagEnvAtLoad=null;
 var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:'',coreURL:'',workerURL:'',wasmURL:'',wasmGzURL:'',wasmViaBlob:false,loadStartIso:'',loadDurationMs:null,loadErrors:[],coreBytes:null};
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
-var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
+var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null};
 var diagLastEncodeMilestone=-1;
 var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet', streamOutVerdict:null, streamOutReason:'', streamOutNote:'no streamed render yet', streamOutSetupLine:'', retainedNote:'no retained result recorded yet'};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
@@ -321,16 +316,6 @@ var journalLastMemoryCheckpoint='';
 var journalLastError='';
 var journalLastStage='';
 var journalPersistTimer=null;
-// Share-investigation probes: PROBE_HB_KEY holds the in-flight probe
-// heartbeat ({arm,count,startedAt,updatedAt}, rewritten every ~100 ms
-// while a probe share is in flight and removed when it settles — a
-// leftover record at boot therefore means the tab died mid-probe).
-// probeJournal is the bounded probe event log persisted inside the
-// journal state so a recovered session reports every probe step.
-var PROBE_HB_KEY='dance-sync.share-probe-heartbeat.v1';
-var probeJournal=[];
-var probeLastHeartbeatFinal=null;
-var recoveredProbeHeartbeat=null;
 function journalTruncate(s,n){ s=String(s==null?'':s); return s.length>n?(s.slice(0,n)+'…[truncated]'):s; }
 function journalNormalizeStage(raw){
   var s=String(raw||'boot');
@@ -396,9 +381,6 @@ function journalBuildState(){
     renderTargets:renderTargets,
     lastMemoryCheckpoint:journalLastMemoryCheckpoint||'',
     lastError:journalLastError||'',
-    probeJournal:(typeof probeJournal!=='undefined'&&probeJournal)?probeJournal.slice(-24):[],
-    probeHeartbeatFinal:(typeof probeLastHeartbeatFinal!=='undefined')?probeLastHeartbeatFinal:null,
-    probeHeartbeatRecovered:(typeof recoveredProbeHeartbeat!=='undefined'&&recoveredProbeHeartbeat)?recoveredProbeHeartbeat:null,
     entries:diagEntries.slice(-200)
   };
 }
@@ -429,16 +411,15 @@ function journalMarkHandledError(){
   journalPersistNow();
 }
 function journalDeliveryPending(){
-  // B15: a Share/Download/Open tap AFTER a completed generation is a
-  // new in-flight operation. Generation success already marked the
-  // journal completed=true, and the recovery gate on the next load
-  // only surfaces journals with completed=false — so a tab death
-  // during a post-generation delivery (the Share handoff) was
-  // silently swallowed and the next dump showed a clean session.
-  // Every delivery tap re-arms the journal as not-completed (and the
-  // caller persists synchronously) BEFORE the platform call; the
-  // delivery's resolve / dismiss / handled-error paths mark it
-  // completed again. A death mid-handoff now leaves completed=false
+  // A Download tap AFTER a completed generation is a new in-flight
+  // operation. Generation success already marked the journal
+  // completed=true, and the recovery gate on the next load only
+  // surfaces journals with completed=false — so a tab death during a
+  // post-generation delivery was silently swallowed and the next dump
+  // showed a clean session. Every Download tap re-arms the journal as
+  // not-completed (and the caller persists synchronously) BEFORE the
+  // delivery; the delivery's completion / handled-error paths mark it
+  // completed again. A death mid-delivery now leaves completed=false
   // at stage=delivery with the tap line on disk.
   journalCompleted=false;
   journalPersistNow();
@@ -490,17 +471,6 @@ function journalDismissRecovered(){
   journalRecovered=null;
   journalHideRecoveredNotice();
 }
-function journalProbeHeartbeatText(r){
-  // The in-flight heartbeat of a probe that killed the tab can never be
-  // written into that session's own journal record (the tab was dead) —
-  // it survives under its own localStorage key and is read into THIS
-  // session's recoveredProbeHeartbeat at boot. Prefer the record's own
-  // field, fall back to the live recovered value.
-  var hb=(r&&r.probeHeartbeatRecovered)||((typeof recoveredProbeHeartbeat!=='undefined'&&recoveredProbeHeartbeat)?recoveredProbeHeartbeat:null);
-  if(hb) return 'IN-FLIGHT AT DEATH — arm='+(hb.arm||'?')+' | count='+(hb.count!=null?hb.count:'?')+' (≈'+((hb.count||0)*100)+' ms of share preparation) | started='+(hb.startedAt||'?')+' | last beat='+(hb.updatedAt||'?')+' — the probe share never settled; the tab died during this arm';
-  if(r&&r.probeHeartbeatFinal!=null) return 'final count='+r.probeHeartbeatFinal+' — the last probe settled (see probe journal)';
-  return 'none recorded';
-}
 function journalRecoveredText(){
   if(!journalRecovered) return '';
   var r=journalRecovered;
@@ -520,8 +490,6 @@ function journalRecoveredText(){
     'Render targets: '+JSON.stringify(r.renderTargets||{}),
     'Last memory checkpoint: '+(r.lastMemoryCheckpoint||'none recorded'),
     'Last error: '+(r.lastError||'none recorded'),
-    'Probe journal: '+(Array.isArray(r.probeJournal)&&r.probeJournal.length?('\n'+r.probeJournal.join('\n')):'(no share probes recorded)'),
-    'Last probe heartbeat: '+journalProbeHeartbeatText(r),
     '--- RECOVERED RUN STATE ---',
     JSON.stringify(stateCopy,null,2),
     '--- RECOVERED PIPELINE LOG ---',
@@ -584,16 +552,6 @@ try{
     if(_keptRecovered&&_keptRecovered.completed===false&&journalSessionDidWork(_keptRecovered)) journalRecovered=_keptRecovered;
     else if(_keptRecovered&&!journalSessionDidWork(_keptRecovered)) journalSafeClearRecovered();
   }
-}catch(e){}
-// A share-probe heartbeat that was never cleared means the previous
-// session died (or was killed) while a probe share was in flight:
-// capture it NOW, before any probe in this session can overwrite or
-// clear it. It is surfaced in the recovered-session diagnostics and in
-// a boot log line, naming the arm that died and how long share
-// preparation ran (≈ count × 100 ms).
-try{
-  var _hbRaw=localStorage.getItem(PROBE_HB_KEY);
-  if(_hbRaw){ var _hbParsed=JSON.parse(_hbRaw); if(_hbParsed&&typeof _hbParsed==='object') recoveredProbeHeartbeat=_hbParsed; }
 }catch(e){}
 // Global error handlers: registered early and writing SYNCHRONOUSLY to
 // the journal, so an uncaught error / unhandled rejection is on disk
@@ -694,8 +652,6 @@ function buildDiagnosticsText(){
     if(typeof songFile!=='undefined'&&songFile){ diagFiles.audio.name=songFile.name; diagFiles.audio.sizeBytes=songFile.size; diagFiles.audio.type=songFile.type||''; if(typeof songDur!=='undefined'&&songDur) diagFiles.audio.durationSec=songDur; if(typeof songPCM!=='undefined'&&songPCM){ diagFiles.audio.sampleCount=songPCM.length; diagFiles.audio.sampleRate=TARGET_SR; } }
     if(typeof resultBlob!=='undefined'&&resultBlob){ diagResult.blobSize=resultBlob.size; diagResult.blobType=resultBlob.type||'video/mp4'; }
     if(typeof resultURL!=='undefined'){ diagResult.hasObjectURL=!!resultURL; diagResult.urlPrefix=resultURL?(String(resultURL).split(':')[0]+': (blob URL, full URL omitted)'):'none'; }
-    if(typeof resultCanShare!=='undefined') diagResult.canShare=resultCanShare;
-    if(typeof resultFile!=='undefined') diagResult.shareFileBuilt=!!resultFile;
   }catch(e){}
   var qNow='unknown'; try{ var qe=document.querySelector('input[name=quality]:checked'); qNow=qe?qe.value:'unknown'; }catch(e){}
   var settingsText='(no generation yet)';
@@ -721,8 +677,6 @@ function buildDiagnosticsText(){
     'Output blob MIME type: '+(diagResult.blobType||'n/a'),
     'Object URL created: '+(diagResult.hasObjectURL?'yes':'no'),
     'Object URL prefix/scheme: '+(diagResult.urlPrefix||'none'),
-    'Share File pre-built at generation: '+String(diagResult.shareFileBuilt),
-    'resultCanShare (canShare with real output File): '+(diagResult.canShare==null?'unknown':String(diagResult.canShare)),
     'Settings used: '+settingsText,
     'Analysis state: '+String((typeof analysisState!=='undefined')?analysisState:'?')+' | confidence: '+String((typeof confidence!=='undefined')?confidence:'?')
   ].join('\n');
@@ -756,7 +710,7 @@ function buildDiagnosticsText(){
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a')
     ].concat(areaLines).concat([
       'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
-      'Retained result (share-investigation test vehicle): '+(diagStorage.retainedNote||'n/a'),
+      'Retained result: '+(diagStorage.retainedNote||'n/a'),
       'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'n/a')+(diagProxy.webcodecs?(' | webcodecs stages: demux '+(diagProxy.webcodecs.timings.demuxMs/1000).toFixed(2)+'s · decode+encode '+(diagProxy.webcodecs.timings.decodeEncodeMs/1000).toFixed(1)+'s · audio '+(diagProxy.webcodecs.timings.audioMs/1000).toFixed(1)+'s · mux '+(diagProxy.webcodecs.timings.muxMs/1000).toFixed(1)+'s · '+diagProxy.webcodecs.frames+' frames · '+diagProxy.webcodecs.outW+'x'+diagProxy.webcodecs.outH+' @ '+diagProxy.webcodecs.fps+' fps · '+diagProxy.webcodecs.srcCodec+' → '+diagProxy.webcodecs.encCodec):''),
       'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
     ].join('\n'));
@@ -802,7 +756,7 @@ async function copyDiagnostics(){
     }catch(e3){ copyErr=e3; try{ logError('diagnostics-copy-fallback',e3); }catch(_){} }
   }
   if(copied){
-    setDiagStatus('Copied ✓ — paste it anywhere to share.');
+    setDiagStatus('Copied ✓ — paste it anywhere.');
     try{ log('Diagnostics copied via '+copyMethod+' ('+text.length+' chars).'); }catch(e){}
   } else {
     setDiagStatus('Copy failed — the text is selected in the box; press Copy.');
@@ -913,7 +867,7 @@ function withFFmpegLock(fn){
 }
 // Edits NEVER touch the generated result: once a result video exists it stays
 // visible until a new Generate/auto-run completes and replaces it.
-function invalidateDownload(){ invalidateExport('settings edit'); if(generatedOnce) log('Edits changed — proxy preview stays on screen until you tap Generate; any cached export is now stale and will re-render on the next Share/Download/Open.'); }
+function invalidateDownload(){ invalidateExport('settings edit'); if(generatedOnce) log('Edits changed — proxy preview stays on screen until you tap Generate; any cached export is now stale and will re-render on the next Download.'); }
 function editorDur(){ return danceDur||0; }
 function editorSongDur(){ return songDur||0; }
 function trimEnd(){ return trimEndSec==null?editorDur():trimEndSec; }
@@ -1486,7 +1440,7 @@ function runAnalysis(){
       log('Confidence gate: accepted via '+(standardPath?'standard':'quiet-consistency')+' path — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — analysis accepted.');
       analysisState="done"; analysisVersion=ver;
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
-      // The Preview block (header, subheading, player, Share/Download/Open)
+      // The Preview block (header, subheading, player, Download)
       // is revealed ONLY by showResult, once a generation is fully complete
       // — never here at analysis-done (~50-90%), where it used to pop in
       // early. On a re-generation the previous result stays visible because
@@ -1731,7 +1685,7 @@ $('btnResync').addEventListener('click',function(){
 window.addEventListener('resize',function(){ layoutTimeline(); buildFilmstrip(); });
 
 // ---------- settings ----------
-document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); updatePreviewSub(); updateApplyEditsState(); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — any direct-export result is now invalidated like a cached export; no render happens until Share/Download/Open or the next Generate (which will use the direct-export path only if the new quality is Full with no trim, otherwise the proxy path).'); }); });
+document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); updatePreviewSub(); updateApplyEditsState(); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — any direct-export result is now invalidated like a cached export; no render happens until Download or the next Generate (which will use the direct-export path only if the new quality is Full with no trim, otherwise the proxy path).'); }); });
 $('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.value,10)/100; $('blendVal').textContent=e.target.value+'%'; updateApplyEditsState(); });
 
 // ---------- Apply edits enablement + Preview subheading ----------
@@ -1768,8 +1722,8 @@ $('blend').addEventListener('change',invalidateDownload);
 
 // ---------- storage (OPFS) + proxy/export architecture ----------
 // PROXY-FIRST: Generate renders only a 480p-max proxy (fast encode) for
-// editing; the full-quality file is rendered ON DEMAND by Share/Download/
-// Open at the selected Export quality and cached by settings signature.
+// editing; the full-quality file is rendered ON DEMAND by Download at
+// the selected Export quality and cached by settings signature.
 // STORAGE: OPFS (navigator.storage.getDirectory) is feature-detected. When
 // available, uploaded inputs are staged into OPFS files and every render
 // output is streamed out of the converter into an OPFS file in chunks and
@@ -2261,15 +2215,15 @@ async function opfsSweepStale(keepNames, reason){
   log('storage: OPFS sweep '+note);
   return {removed:removed, bytes:bytes};
 }
-// ---------- retained result (share-investigation test vehicle) ----------
+// ---------- retained result ----------
 // The newest DELIVERED result is retained across reloads/crashes: its
 // OPFS file is kept by the boot sweep (below) and its metadata record
 // (localStorage, a few hundred bytes) lets the next boot restore the
-// result area — Preview + Share/Download/Open — from the file itself,
-// so a save attempt that kills the tab becomes a retry instead of a
-// full regeneration. Staged inputs and superseded results are still
-// swept exactly as before; Start over clears the retained result, and
-// every newly delivered result supersedes the record.
+// result area — Preview + Download — from the file itself, so a save
+// attempt that kills the tab becomes a retry instead of a full
+// regeneration. Staged inputs and superseded results are still swept
+// exactly as before; Start over clears the retained result, and every
+// newly delivered result supersedes the record.
 var RETAINED_KEY='dance-sync.retained-result.v1';
 var restoredResultActive=false;
 var retainedRestoreChecked=false;
@@ -2342,7 +2296,7 @@ async function tryRestoreRetainedResult(){
     retentionClear('retained file missing at boot');
     return;
   }
-  log('Retained result: restoring the previous session\'s delivered result "'+rec.opfsName+'" ('+fmtBytesMB(file.size)+') — kept across the boot sweep by the share-investigation retention (test vehicle).');
+  log('Retained result: restoring the previous session\'s delivered result "'+rec.opfsName+'" ('+fmtBytesMB(file.size)+') — kept across the boot sweep by result retention.');
   if(rec.size!=null&&file.size!==rec.size) log('Retained result: the file size differs from the record ('+file.size+' vs '+rec.size+' bytes) — restoring the file as found.');
   markDiskBackedResultFile(file);
   // Restore the editor state the result was generated with, so the
@@ -2363,29 +2317,29 @@ async function tryRestoreRetainedResult(){
     syncOffsetInput();
   }catch(e){}
   // Arm the export cache with the retained file so showResult wires
-  // Share/Download/Open to it directly (no re-render, no source files).
+  // Download to it directly (no re-render, no source files).
   try{ var sig=currentExportSignature(); exportCachePut(sig,{blob:file, opfsName:rec.opfsName, q:rec.q||'full'}); }catch(e){}
   restoredResultActive=true;
   showResult(file,{isDirect:!!rec.isDirect});
   try{ markProgressShown(); }catch(e){}
   diagStorage.retainedNote='retained result restored as the current result: '+rec.opfsName+' ('+fmtBytesMB(file.size)+') | delivered '+(rec.savedAt||'unknown');
-  log('Retained result recovered: "'+rec.opfsName+'" ('+file.size+' bytes, '+fmtBytesMB(file.size)+') | delivered at '+(rec.savedAt||'unknown')+' | quality='+(rec.q||'?')+' | trim '+Number(rec.tStart||0).toFixed(3)+'s to '+Number(rec.tEnd||0).toFixed(3)+'s | effective offset='+Number(rec.eff||0).toFixed(3)+'s | detected offset='+(rec.detected!=null?Number(rec.detected).toFixed(3)+'s':'?')+' | blend='+Math.round((rec.blend||0)*100)+'% — Preview + Share/Download/Open restored from the retained OPFS file (journal metadata above); no regeneration needed.');
+  log('Retained result recovered: "'+rec.opfsName+'" ('+file.size+' bytes, '+fmtBytesMB(file.size)+') | delivered at '+(rec.savedAt||'unknown')+' | quality='+(rec.q||'?')+' | trim '+Number(rec.tStart||0).toFixed(3)+'s to '+Number(rec.tEnd||0).toFixed(3)+'s | effective offset='+Number(rec.eff||0).toFixed(3)+'s | detected offset='+(rec.detected!=null?Number(rec.detected).toFixed(3)+'s':'?')+' | blend='+Math.round((rec.blend||0)*100)+'% — Preview + Download restored from the retained OPFS file (journal metadata above); no regeneration needed.');
 }
 async function opfsStartupSweep(){
   if(diagStorage.sweepDone) return;
   diagStorage.sweepDone=true;
   if(!opfsRoot) return;
   try{
-    // Share-investigation retention (test vehicle): the newest
-    // DELIVERED result is kept across the boot sweep so a crashed
-    // Share becomes a retry, not a regeneration. Staged inputs and
-    // superseded results are still swept exactly as before.
+    // Result retention: the newest DELIVERED result is kept across
+    // the boot sweep so a crashed save becomes a retry, not a
+    // regeneration. Staged inputs and superseded results are still
+    // swept exactly as before.
     var keep=null;
     var rec=retentionReadRecord();
     if(rec&&rec.opfsName){
       keep={}; keep[rec.opfsName]=true;
       diagStorage.retainedNote='retained result '+rec.opfsName+' ('+fmtBytesMB(rec.size)+') delivered '+(rec.savedAt||'unknown')+' — kept across the boot sweep';
-      log('storage: boot sweep keeps the retained delivered result '+rec.opfsName+' ('+fmtBytesMB(rec.size)+') — share-investigation retention (test vehicle)');
+      log('storage: boot sweep keeps the retained delivered result '+rec.opfsName+' ('+fmtBytesMB(rec.size)+') — result retention');
     }
     await opfsSweepStale(keep, keep?('startup — staged inputs + superseded results swept; newest delivered result retained'):('startup — files left over from previous sessions'));
   }
@@ -3366,8 +3320,8 @@ async function freeConverterInputs(ff, dExt, sExt){
 //      slice is written with handle.write(buffer, {at: offset}),
 //      looping over short writes, then flush() once at the end,
 //      close(), and the final size verified from getFile();
-//   3. the delivered result IS the resulting OPFS File — Preview,
-//      Share, Download and Open all serve from it.
+//   3. the delivered result IS the resulting OPFS File — Preview and
+//      Download serve from it.
 // Peak extra JS memory during delivery is ~one slice, independent of
 // the output size. The full output never exists as a JS buffer.
 // Recovery from a mid-write failure: (a) the sync handle is closed
@@ -3597,8 +3551,8 @@ async function readRenderOutput(ff, fsOutName, opfsName){
   return {blob:blob, backend:'MEMFS', opfsName:null};
 }
 // ---------- Processing progress bar (export only) ----------
-// A second, independent progress bar sitting between the Share/Download/
-// Open row and the "Edit video" header, visible only while a full-quality
+// A second, independent progress bar sitting between the Download row
+// and the "Edit video" header, visible only while a full-quality
 // export renders. Same discrete-
 // event style as the main ladder: 2% render requested · 8% inputs staged
 // to converter · 15% encode starts · ffmpeg progress 15%->95% · 96%
@@ -3616,16 +3570,16 @@ var exportProgLo=15, exportProgHi=95; // ffmpeg-progress window for the CURRENT 
 function progressForExport(ratio){ if(ratio==null) return; setExportBarPct(exportProgLo+Math.max(0,Math.min(1,ratio))*(exportProgHi-exportProgLo)); var m=Math.floor(ratio*10)*10; if(m>exportLastMilestone){ exportLastMilestone=m; log('Export progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } }
 // ---------- export cache + live export ----------
 var exportCache=new Map(), exportOrder=[];
-var liveExport=null; // {sig, file, blob, url, canShare, size, opfsName, q, how}
-var shareBtnEl=null, dlAnchorEl=null, openAnchorEl=null;
-// B14: result Files delivered from OPFS (claimRenderOutput /
-// readRenderOutput) are registered here so the Share/Download/Open
-// handoff can prove — and journal — that the platform is handed the
-// disk-backed OPFS File itself: no new File/Blob rebuild from its
-// bytes, no arrayBuffer() read, no full copy, at generation time or
-// at tap time, whatever the result's size. (Wrapping a File in
+var liveExport=null; // {sig, blob, url, size, opfsName, q, how}
+var dlAnchorEl=null;
+// Result Files delivered from OPFS (claimRenderOutput /
+// readRenderOutput) are registered here so the Download handoff can
+// prove — and journal — that the browser is handed the disk-backed
+// OPFS File itself: no new File/Blob rebuild from its bytes, no
+// arrayBuffer() read, no full copy, at generation time or at tap
+// time, whatever the result's size. (Wrapping a File in
 // `new File([file])` looks harmless but can materialize the whole
-// payload on iOS — a ~1 GB result killed the tab at the Share tap.)
+// payload on iOS.)
 var diskBackedResultFiles=(typeof WeakSet!=='undefined')?new WeakSet():null;
 function markDiskBackedResultFile(f){ try{ if(f&&diskBackedResultFiles) diskBackedResultFiles.add(f); }catch(e){} }
 function fileConstruction(f){
@@ -3633,54 +3587,6 @@ function fileConstruction(f){
   if(!(f instanceof File)) return 'in-memory Blob (not a File)';
   if(diskBackedResultFiles&&diskBackedResultFiles.has(f)) return 'disk-backed OPFS File — used directly (no Blob/File rebuild, no byte copy)';
   return 'File — used directly (no Blob/File rebuild)';
-}
-// B15: resolve the File handed to navigator.share. The delivered
-// result File is used DIRECTLY whenever the platform accepts it
-// (canShare) — the B14 behavior, unchanged. But an OPFS getFile()
-// File carries an EMPTY MIME type (OPFS stores no type; only the
-// name survives), and iOS validates shared files by type/UTI: a
-// type-less .mp4 can fail canShare / the share handoff even though
-// the bytes are a valid MP4 (the diagnostics' own 1-byte probe File
-// passes precisely because it is built with type 'video/mp4').
-// When — and only when — the delivered File fails canShare, fall
-// back to a typed shell: new File([file], 'dance-synced.mp4',
-// {type:'video/mp4'}). The shell's single blob part REFERENCES the
-// delivered File — Blob parts are lazy, no bytes are read or copied
-// at construction — it only supplies the name + type the platform
-// validates. The shell becomes the share File only if IT passes
-// canShare. Returns {file, canShare, how}.
-function resolveShareFile(file){
-  var shareFile=file, how;
-  if(file instanceof File){ how=fileConstruction(file); }
-  else { try{ shareFile=new File([file],'dance-synced.mp4',{type:'video/mp4'}); how='in-memory Blob wrapped in a new File at export-ready time (non-OPFS fallback path only)'; }catch(e){ shareFile=file; how='in-memory Blob (File construction failed)'; } }
-  var can=false;
-  if(shareFile&&typeof navigator!=='undefined'&&typeof navigator.canShare==='function'&&typeof navigator.share==='function'){
-    try{ can=!!navigator.canShare({files:[shareFile]}); }catch(e){ can=false; }
-    if(!can&&shareFile instanceof File){
-      try{
-        var shell=new File([shareFile],'dance-synced.mp4',{type:'video/mp4'});
-        var canShell=false;
-        try{ canShell=!!navigator.canShare({files:[shell]}); }catch(e){ canShell=false; }
-        log('Share File check: delivered File "'+shareFile.name+'" (type="'+(shareFile.type||'')+'") canShare=false — typed shell "dance-synced.mp4" (type="video/mp4"; blob part references the delivered File, no byte copy) canShare='+String(canShell));
-        if(canShell){ shareFile=shell; can=true; how='typed shell over the delivered File (name=dance-synced.mp4, type=video/mp4 — used because the delivered File itself failed canShare; the shell references its bytes, no copy)'; }
-      }catch(e){}
-    }
-  }
-  return {file:shareFile, canShare:can, how:how};
-}
-// B15: free the heaviest memory the page holds BEFORE the platform
-// share handoff. The ffmpeg converter worker's wasm heap is the
-// largest releasable chunk resident at delivery time, and the
-// preview video's media pipeline holds buffers of its own; on iOS a
-// ~1 GB File handoff on top of that resident memory is what kills
-// the tab at the Share tap. Terminating the converter is the
-// established cancel pattern (ffmpeg=null, ffmpegLoaded=false) and
-// it reloads on demand via ensureFFmpeg if a later render needs it.
-// Everything here is synchronous and runs BEFORE navigator.share(),
-// so the tap's transient user activation is preserved.
-function freeMemoryBeforeShare(){
-  try{ if(typeof ffmpeg!=='undefined'&&ffmpeg){ ffmpeg.terminate(); ffmpeg=null; ffmpegLoaded=false; log('Share: converter worker terminated before the platform handoff to free its wasm heap for the share sheet (it reloads on demand).'); } }catch(e){}
-  try{ if(typeof resultVideoEl!=='undefined'&&resultVideoEl&&!resultVideoEl.paused) resultVideoEl.pause(); }catch(e){}
 }
 function exportCacheTotalBytes(){ var t=0; exportCache.forEach(function(e){ if(e&&e.blob&&e.blob.size) t+=e.blob.size; }); return t; }
 function exportCachePut(sig, entry){
@@ -3704,28 +3610,21 @@ function currentExportSignature(){ var c=currentExportQuality(); return settings
 function invalidateExport(reason){
   if(liveExport){
     if(liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
-    log('Export invalidated ('+reason+') — the previous export no longer matches the current settings + export quality; the next Share/Download/Open re-renders it.');
+    log('Export invalidated ('+reason+') — the previous export no longer matches the current settings + export quality; the next Download re-renders it.');
     liveExport=null;
   }
   if(dlAnchorEl&&resultURL) dlAnchorEl.href=resultURL;
-  if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen (see openResultFullscreen)
 }
 function setLiveExport(entry, sig){
   if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
   var file=entry.blob;
-  // B14/B15: hand the delivered File to the platform DIRECTLY — never
-  // rebuild it with new File([blob]) (on a ~1 GB result that rebuild
-  // is a whole-payload materialization). resolveShareFile keeps that
-  // behavior whenever the delivered File passes canShare; only if it
-  // fails (an OPFS File's empty MIME type is the known iOS cause)
-  // does it substitute a typed shell that references the same bytes.
-  var resolved=resolveShareFile(file);
-  var shareFile=resolved.file, shareHow=resolved.how;
-  var can=resolved.canShare;
-  liveExport={sig:sig, file:shareFile, blob:file, url:URL.createObjectURL(file), canShare:can, size:file.size, opfsName:entry.opfsName||null, q:entry.q||null, how:shareHow};
+  // Hand the delivered File to the browser DIRECTLY as the download —
+  // never rebuild it with new File([blob]) (on a ~1 GB result that
+  // rebuild is a whole-payload materialization). liveExport.url is an
+  // object URL of that same File; the Download anchor points at it.
+  liveExport={sig:sig, blob:file, url:URL.createObjectURL(file), size:file.size, opfsName:entry.opfsName||null, q:entry.q||null, how:fileConstruction(file)};
   if(dlAnchorEl) dlAnchorEl.href=liveExport.url;
-  if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen
-  log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | share File "'+(shareFile&&shareFile.name)+'" ('+file.size+' bytes) | construction: '+shareHow+' | canShare(export File)='+String(can)+' | Download link now points at the export file (not the proxy); Open presents the Preview fullscreen');
+  log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | file "'+(file.name||'(unnamed)')+'" ('+file.size+' bytes) | construction: '+liveExport.how+' | Download link now points at the export file (not the proxy)');
   try{ if(entry.opfsName) retentionSetRecord(entry.opfsName, file.size); }catch(e){}
   return liveExport;
 }
@@ -3847,7 +3746,7 @@ async function renderExport(sig){
 async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff){
   diagStage='export-stage-1';
   var renderT0=Date.now();
-  log('Direct export: stage 1 renders the processed audio only, stage 2 stream-copies the video (no video re-encode) — this file becomes the result; Share/Download/Open will deliver it immediately with no Processing render.');
+  log('Direct export: stage 1 renders the processed audio only, stage 2 stream-copies the video (no video re-encode) — this file becomes the result; Download will deliver it immediately with no Processing render.');
   await detectStorageBackend();
   var directStageNum=1;
   var directLastMilestone=-1;
@@ -3933,90 +3832,49 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
   directStageLabel=''; renderProgText();
   return {blob:outRes.blob, backend:outRes.backend, opfsName:outRes.opfsName, s1Size:s1Size, s1DurSec:s1DurSec, s2DurSec:s2DurSec, totalDurSec:totalDurSec};
 }
-function performExportAction(action){
+function performExportAction(){
   if(!liveExport) return;
   diagStage='delivery';
-  // B14: EVERY Share/Download/Open tap is journaled BEFORE the
-  // platform action is invoked — action, result file name + byte
-  // size, how the handed-off File was constructed, and the canShare
-  // result — and the journal is flushed synchronously
-  // (journalPersistNow), so if the tab dies DURING the platform
-  // handoff the next diagnostics dump still shows the exact step.
-  var expHow=liveExport.how||fileConstruction(liveExport.file);
-  var expName=(liveExport.file&&liveExport.file.name)||'(unnamed)';
-  if(action==='share'){
-    diagStage='share';
-    log('Share (export) tapped → action=share | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | canShare='+String(liveExport.canShare)+' | invoking navigator.share({files:[that File]}) next — the File itself is handed to the platform; no arrayBuffer read and no Blob/File rebuild at tap time. If this share follows a Processing render, iOS may have expired the original tap activation — a NotAllowedError below means: tap Share again (export is cached, the next tap shares instantly).');
-    // B15: re-arm the journal as not-completed BEFORE the handoff —
-    // generation already marked it completed, which made a tab death
-    // during this share invisible to the next session's dump.
-    try{ journalDeliveryPending(); }catch(e){}
-    // B15: free the converter wasm heap + pause the preview BEFORE
-    // the handoff (synchronous — tap activation is preserved), then
-    // flush the journal again so that step is on disk too.
-    freeMemoryBeforeShare();
-    try{ journalPersistNow(); }catch(e){}
-    if(liveExport.file&&liveExport.canShare&&navigator.share){
-      var pr=null, syncErr=null;
-      try{ pr=navigator.share({files:[liveExport.file]}); }catch(err){ syncErr=err; }
-      if(syncErr){ log('Share (export) → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
-      if(pr&&pr.then) pr.then(function(){ log('Share (export) → navigator.share resolved.'); try{ journalMarkCompleted(true); }catch(e){} },function(err){
-        if(err&&err.name==='AbortError'){ log('Share (export) → dismissed by user (AbortError, not a failure).'); try{ journalMarkCompleted(true); }catch(e){} }
-        else { log('Share (export) → navigator.share rejected: '+diagErrText(err)); if(err&&err.name==='NotAllowedError'){ showError('Export is ready ('+fmtSize(liveExport.size)+') — tap Share again to open the share sheet.'); try{ journalMarkHandledError(); }catch(e){} } else shareFailed(err); }
-      });
-      return;
-    }
-    log('Share (export) → file sharing unavailable in this browser (canShare='+String(liveExport.canShare)+') — use Download or Open.');
-    showError('File sharing is not available in this browser — use Download or Open for the export.');
-    try{ journalMarkHandledError(); }catch(e){}
-    return;
-  }
-  if(action==='download'){
-    diagStage='download';
-    log('Download (export) tapped → action=download | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | canShare='+String(liveExport.canShare)+' | handing off via the in-DOM download anchor (object URL of that same File — no byte copy at tap time); activating the anchor next (if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).');
-    try{ journalDeliveryPending(); }catch(e){}
-    if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; try{ dlAnchorEl.click(); }catch(clickErr){ log('Download (export) → anchor activation threw: '+diagErrText(clickErr)); showError('Download could not start for the export ('+fmtSize(liveExport.size)+') — tap Download again.'); try{ journalMarkHandledError(); }catch(e){} return; } try{ journalMarkCompleted(true); }catch(e){} }
-    else { try{ journalMarkHandledError(); }catch(e){} }
-    return;
-  }
-  if(action==='open'){
-    // Open NEVER navigates to a blob URL (a large blob navigation fails
-    // with WebKitBlobResource error 1 and replaces the page). It presents
-    // the in-page Preview video in the native fullscreen player instead.
-    diagStage='open-video';
-    log('Open (export) tapped → action=open | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | canShare='+String(liveExport.canShare)+' | no file handoff: presenting the in-page Preview video fullscreen next (no blob URL navigation).');
-    try{ journalDeliveryPending(); }catch(e){}
-    openResultFullscreen();
-    return;
-  }
+  // EVERY Download tap is journaled BEFORE the delivery is invoked —
+  // result file name + byte size and how the handed-off File was
+  // constructed — and the journal is flushed synchronously
+  // (journalPersistNow via journalDeliveryPending), so if the tab
+  // dies DURING the delivery the next diagnostics dump still shows
+  // the exact step.
+  var expHow=liveExport.how||fileConstruction(liveExport.blob);
+  var expName=(liveExport.blob&&liveExport.blob.name)||'(unnamed)';
+  diagStage='download';
+  log('Download (export) tapped → action=download | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | handing off via the in-DOM download anchor (object URL of that same File — no byte copy at tap time); activating the anchor next (if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).');
+  try{ journalDeliveryPending(); }catch(e){}
+  if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; try{ dlAnchorEl.click(); }catch(clickErr){ log('Download (export) → anchor activation threw: '+diagErrText(clickErr)); showError('Download could not start for the export ('+fmtSize(liveExport.size)+') — tap Download again.'); try{ journalMarkHandledError(); }catch(e){} return; } try{ journalMarkCompleted(true); }catch(e){} }
+  else { try{ journalMarkHandledError(); }catch(e){} }
 }
-async function ensureExport(action){
-  // Fast paths run synchronously inside the tap handler (no await before
-  // them) so a cached export's Share keeps its transient user activation:
-  // navigator.share() is effectively the first real action of the tap.
-  if(isGenerating||pipelineRunning){ log('Export tap ('+action+') while the proxy is still generating — ignored until generation finishes.'); showError('Still generating the preview — Share/Download/Open will export once it finishes.'); return; }
+async function ensureExport(){
+  // Fast paths run synchronously inside the tap handler (no await
+  // before them) so a cached export delivers on the tap itself.
+  if(isGenerating||pipelineRunning){ log('Download tap while the proxy is still generating — ignored until generation finishes.'); showError('Still generating the preview — Download will export once it finishes.'); return; }
   // Fast path BEFORE the source-files guard: an up-to-date live export
   // delivers with no render, so it needs no source files. In a normal
   // session liveExport only exists while the files are loaded (Start
   // over clears both together), so this ordering changes nothing there —
   // it is what lets a RESTORED retained result (no uploads in memory)
-  // deliver through the normal Share/Download/Open buttons.
+  // deliver through the normal Download button.
   var sig=currentExportSignature();
-  if(liveExport&&liveExport.sig===sig){ performExportAction(action); return; }
-  if(!danceFile||!songFile){ log('Export tap ('+action+') with no source files loaded — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files.'); return; }
-  if(isExporting){ pendingExportAction=action; log('Export already processing — the pending action is now '+action+'.'); return; }
+  if(liveExport&&liveExport.sig===sig){ performExportAction(); return; }
+  if(!danceFile||!songFile){ log('Download tap with no source files loaded — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files.'); return; }
+  if(isExporting){ pendingExportAction='download'; log('Export already processing — the pending Download delivers when it finishes.'); return; }
   var cached=exportCacheGet(sig);
-  if(cached){ setLiveExport(cached, sig); log('Export cache hit for current settings + export quality — no re-render.'); performExportAction(action); return; }
-  isExporting=true; pendingExportAction=action; exportToken++; var tok=exportToken; newExportCancelSignal();
+  if(cached){ setLiveExport(cached, sig); log('Export cache hit for current settings + export quality — no re-render.'); performExportAction(); return; }
+  isExporting=true; pendingExportAction='download'; exportToken++; var tok=exportToken; newExportCancelSignal();
   clearError();
-  log('Export tap ('+action+') → no up-to-date export for the current settings + export quality — rendering the full-quality export first (Processing bar under the buttons).');
+  log('Download tap → no up-to-date export for the current settings + export quality — rendering the full-quality export first (Processing bar under the button).');
   try{
     var entry=await renderExport(sig);
     if(tok!==exportToken){ log('Export finished but the run was cancelled/superseded — not delivering it.'); return; }
     if(currentExportSignature()!==sig){ log('Export finished but the settings changed during processing — that export is stale; tap again to re-render.'); return; }
     setLiveExport(entry, sig);
     var act=pendingExportAction; pendingExportAction=null;
-    if(act) performExportAction(act);
+    if(act) performExportAction();
   }catch(err){
     if(isExportCancelErr(err)||tok!==exportToken){ log('Export processing cancelled.'); }
     else if(err&&err.deliveryFailure){
@@ -4080,176 +3938,15 @@ function cacheGet(sig){
   return e;
 }
 // ---------- save ----------
-// iOS Safari rules this code lives by:
-// 1) navigator.share() must be the first thing that happens inside the tap
-//    handler — any await or async step before it expires the tap's
-//    transient user activation and share() throws NotAllowedError. So the
-//    shareable File is built at generation time (in showResult) and
-//    stashed here; the click handler goes straight to share().
-// 2) Download is a real <a download> rendered in the DOM at generation
-//    time — the user's own tap on it is the download gesture. Never fake
-//    it with an off-DOM anchor + .click() after async work.
-// 3) The result object URL is revoked ONLY when a newer result replaces
-//    it or on New/reset — revoking it while it is on screen silently
-//    kills the player, the share source, and the download link at once.
-var resultBlob=null, resultFile=null, resultCanShare=false, resultFileHow='';
-var resultVideoEl=null; // the in-page Preview <video> for the current result — Open presents THIS element fullscreen; it never navigates to a blob URL (a 291 MB blob navigation dies with WebKitBlobResource error 1 and kills the tab view)
-// Open: present the existing in-page Preview video in the native
-// fullscreen player — webkitEnterFullscreen() on iOS, falling back to
-// requestFullscreen(), falling back to scrolling the Preview into view
-// and playing it. Never a navigation to the result blob URL.
-function openResultFullscreen(){
-  diagStage='open-video';
-  var v=resultVideoEl;
-  if(!v){ log('Open tapped → no Preview video on screen to present.'); return; }
-  try{
-    if(typeof v.webkitEnterFullscreen==='function'){
-      v.webkitEnterFullscreen();
-      log('Open → Preview video presented in the native fullscreen player (webkitEnterFullscreen) — no blob URL navigation.');
-      try{ var pp=v.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
-      try{ journalMarkCompleted(true); }catch(e){}
-      return;
-    }
-  }catch(e){ log('Open → webkitEnterFullscreen threw ('+(e.message||e)+') — falling back.'); }
-  function scrollAndPlay(){
-    try{ v.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){ try{ v.scrollIntoView(); }catch(_){} }
-    try{ var pp2=v.play(); if(pp2&&pp2.catch) pp2.catch(function(){}); }catch(e){}
-    log('Open → Preview scrolled into view and playing (fullscreen APIs unavailable).');
-  }
-  try{
-    if(typeof v.requestFullscreen==='function'){
-      var rp=v.requestFullscreen();
-      log('Open → Preview video presented fullscreen (requestFullscreen) — no blob URL navigation.');
-      try{ var pp3=v.play(); if(pp3&&pp3.catch) pp3.catch(function(){}); }catch(e){}
-      try{ journalMarkCompleted(true); }catch(e){}
-      if(rp&&rp.catch) rp.catch(function(){ scrollAndPlay(); });
-      return;
-    }
-  }catch(e){ log('Open → requestFullscreen threw ('+(e.message||e)+') — falling back to scroll + play.'); }
-  scrollAndPlay();
-  try{ journalMarkCompleted(true); }catch(e){}
-}
-function shareFailed(err){
-  diagStage='delivery';
-  var msg='Share failed: '+((err&&err.name)||'Error')+((err&&err.message)?' — '+err.message:'');
-  log('Save/Share attempt FAILED: '+diagErrText(err));
-  log(msg+' — use Download or Open video below the result instead.');
-  showError(msg+'. Use Download or Open video below the result.');
-  try{ journalMarkHandledError(); }catch(e){}
-}
-function saveResult(){
-  // B14: the tap is journaled (and the journal flushed synchronously)
-  // BEFORE navigator.share() is invoked — action, file name + byte
-  // size, File construction, canShare — so a tab death during the
-  // platform handoff still leaves the share step in the next dump.
-  // The share File itself was resolved at generation time (showResult)
-  // and is handed over directly; nothing is constructed at tap time.
-  diagStage='share';
-  if(resultFile&&resultCanShare&&navigator.share){
-    log('Save/Share tapped → action=share | result file "'+resultFile.name+'" ('+resultFile.size+' bytes, '+fmtBytesMB(resultFile.size)+', type='+(resultFile.type||'video/mp4')+') | construction: '+(resultFileHow||fileConstruction(resultFile))+' | canShare=true | invoking navigator.share({files:[that File]}) next — no arrayBuffer read and no Blob/File rebuild at tap time');
-    try{ journalPersistNow(); }catch(e){}
-    var p=null, syncErr=null;
-    try{ p=navigator.share({files:[resultFile]}); }
-    catch(err){ syncErr=err; }
-    if(syncErr){ log('Save/Share tapped → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
-    log('Save/Share tapped → navigator.share({files:[File "'+resultFile.name+'" '+fmtBytesMB(resultFile.size)+']}) called');
-    if(p&&p.then) p.then(function(){ log('Save/Share tapped → navigator.share resolved (user completed share sheet action).'); },function(err){
-      if(err&&err.name==='AbortError'){ log('Save/Share tapped → navigator.share rejected AbortError: user dismissed share sheet (not a failure).'); }
-      else { log('Save/Share tapped → navigator.share rejected: '+diagErrText(err)); shareFailed(err); }
-    });
-    return;
-  }
-  diagStage='share';
-  var why='resultFile='+(resultFile?('present ('+fmtBytesMB(resultFile.size)+')'):'null')+' | resultCanShare='+String(resultCanShare)+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent');
-  var msg='Save: file sharing is not available in this browser — use Download or Open video below the result.';
-  log('Save/Share tapped → fallback shown (share unavailable): canShare=false → fallback shown | '+why);
-  log(msg); showError(msg);
-}
-// ---------- share investigation probes (this build's test vehicle) ----------
-// Three probe arms in Details, visible whenever a result is present.
-// They exist to bracket WHY navigator.share() kills the tab on a ~1 GB
-// result: (a) the full file — the control, the same File and the same
-// call the normal Share button makes; (b) a 300 MB slice; (c) a 600 MB
-// slice. Slices are lazy references: Blob.slice of the delivered result
-// file wrapped in a File shell — no bytes are read or copied at
-// construction. Every probe journals arm + payload byte size +
-// construction BEFORE the call, re-arms the crash journal to the
-// delivery stage (the B15 journalDeliveryPending machinery), and runs
-// a ~100 ms localStorage heartbeat while the share is in flight; the
-// settle path journals the outcome + the final heartbeat count and
-// clears the heartbeat. If the tab dies mid-probe, the leftover
-// heartbeat is recovered at boot (journal block above) and the
-// recovered-session diagnostics name the arm and how long preparation
-// ran (≈ heartbeat count × 100 ms).
-function updateShareProbePanel(){
-  var p=$('shareProbePanel'); if(!p) return;
-  var has=(typeof resultBlob!=='undefined'&&!!resultBlob);
-  p.style.display=has?'':'none';
-}
-function probeJournalPush(line){
-  try{ probeJournal.push(line); if(probeJournal.length>24) probeJournal=probeJournal.slice(probeJournal.length-24); }catch(e){}
-}
-var probeHbTimer=null, probeHbCount=0, probeHbArm=null, probeHbT0=0;
-function probeHeartbeatStart(arm){
-  if(probeHbTimer){ try{ clearInterval(probeHbTimer); }catch(e){} probeHbTimer=null; }
-  probeHbCount=0; probeHbArm=arm; probeHbT0=Date.now();
-  try{ localStorage.setItem(PROBE_HB_KEY, JSON.stringify({arm:arm,count:0,startedAt:new Date(probeHbT0).toISOString(),updatedAt:new Date(probeHbT0).toISOString()})); }catch(e){}
-  probeHbTimer=setInterval(function(){
-    probeHbCount++;
-    try{ localStorage.setItem(PROBE_HB_KEY, JSON.stringify({arm:probeHbArm,count:probeHbCount,startedAt:new Date(probeHbT0).toISOString(),updatedAt:new Date().toISOString()})); }catch(e){}
-  },100);
-}
-function probeHeartbeatStop(){
-  if(probeHbTimer){ try{ clearInterval(probeHbTimer); }catch(e){} probeHbTimer=null; }
-  probeLastHeartbeatFinal=probeHbCount;
-  try{ localStorage.removeItem(PROBE_HB_KEY); }catch(e){}
-  return probeHbCount;
-}
-function probeSettle(arm, file, outcome, err){
-  var fc=probeHeartbeatStop();
-  var elapsedSec=((Date.now()-probeHbT0)/1000).toFixed(1);
-  var line='probe outcome | arm='+arm+' | '+outcome+(err?(' | error='+(err.name||'Error')+': '+(err.message||'')):'')+' | payload='+(file?file.size:0)+' bytes | final heartbeat count='+fc+' | in flight ≈'+elapsedSec+'s';
-  probeJournalPush(line);
-  log('Share probe ['+arm+'] → '+line);
-  if(!err||err.name==='AbortError'){ try{ journalMarkCompleted(true); }catch(e){} }
-  else { try{ journalPersistNow(); }catch(e){} shareFailed(err); }
-}
-function runShareProbe(arm){
-  var src=(liveExport&&liveExport.blob)?liveExport.blob:resultBlob;
-  if(!src){ log('Share probe ['+arm+'] tapped with no result present — nothing to probe.'); return; }
-  var file=null, construction='';
-  if(arm==='full'){
-    if(liveExport&&liveExport.file){ file=liveExport.file; construction=liveExport.how||fileConstruction(file); }
-    else if(resultFile){ file=resultFile; construction=resultFileHow||fileConstruction(file); }
-    if(!file){ log('Share probe [full]: no share File is resolved for the current result — the control arm cannot run.'); showError('Share probe: no shareable file for this result.'); return; }
-    construction+=' (control arm — the same File the normal Share button hands to navigator.share)';
-  } else {
-    var wantBytes=(arm==='slice300')?(300*1024*1024):(600*1024*1024);
-    try{ var slice=src.slice(0,wantBytes); file=new File([slice],'dance-synced.mp4',{type:'video/mp4'}); }catch(e){ log('Share probe ['+arm+']: slice/File construction threw: '+diagErrText(e)); return; }
-    construction='lazy slice of the delivered result file "'+(src.name||'(unnamed OPFS result)')+'" — resultFile.slice(0, '+wantBytes+') wrapped in a File shell (name=dance-synced.mp4, type=video/mp4); the File\'s single part references the slice — no bytes read or copied';
-  }
-  var can=null;
-  if(typeof navigator!=='undefined'&&typeof navigator.canShare==='function'){ try{ can=!!navigator.canShare({files:[file]}); }catch(e){ can='threw '+(e.name||'Error'); } }
-  diagStage='share';
-  probeJournalPush('probe start | arm='+arm+' | payload='+file.size+' bytes ('+fmtBytesMB(file.size)+') | construction: '+construction+' | canShare='+String(can));
-  log('Share probe ['+arm+'] → payload '+file.size+' bytes ('+fmtBytesMB(file.size)+') | construction: '+construction+' | canShare='+String(can)+' | crash journal re-armed to the delivery stage + heartbeat started — invoking navigator.share({files:[probe File]}) next');
-  try{ journalDeliveryPending(); }catch(e){}
-  probeHeartbeatStart(arm);
-  freeMemoryBeforeShare();
-  try{ journalPersistNow(); }catch(e){}
-  if(!(typeof navigator!=='undefined'&&typeof navigator.share==='function')){
-    var fc0=probeHeartbeatStop();
-    probeJournalPush('probe outcome | arm='+arm+' | navigator.share unavailable in this browser — no platform call made | final heartbeat count='+fc0);
-    log('Share probe ['+arm+'] → navigator.share unavailable in this browser — probe ended without a platform call. Final heartbeat count='+fc0+'.');
-    try{ journalMarkHandledError(); }catch(e){}
-    return;
-  }
-  var p=null, syncErr=null;
-  try{ p=navigator.share({files:[file]}); }catch(err){ syncErr=err; }
-  if(syncErr){ probeSettle(arm, file, 'threw synchronously', syncErr); return; }
-  if(p&&p.then) p.then(function(){ probeSettle(arm, file, 'resolved', null); }, function(err){ probeSettle(arm, file, 'rejected', err); });
-  else probeSettle(arm, file, 'resolved (share returned no promise)', null);
-}
+// Download is the only result action. Two rules this code lives by:
+// 1) Download is a real <a download> rendered in the DOM at generation
+//    time — the user's own tap on it is the download gesture. Never
+//    fake it with an off-DOM anchor + .click() after async work.
+// 2) The result object URL is revoked ONLY when a newer result
+//    replaces it or on New/reset — revoking it while it is on screen
+//    silently kills the player and the download link at once.
+var resultBlob=null;
+var resultVideoEl=null; // the in-page Preview <video> for the current result
 function showEditor(){
   // Editor (timeline / offset / trim / blend / Export quality / Re-sync)
   // appears only once a generation has completed successfully, under
@@ -4264,7 +3961,7 @@ function showResult(blob, opts){
   opts=opts||{};
   lastResultIsDirect=!!opts.isDirect;
   // Generation is fully complete — only NOW does the Preview block appear
-  // (header + subheading + player + Share/Download/Open row).
+  // (header + subheading + player + Download row).
   $('resultBox').classList.add('show');
   var _psub=$('previewSub'); if(_psub){ _psub.classList.add('show'); updatePreviewSub(); }
   // A result on screen means a generation has completed successfully:
@@ -4276,20 +3973,8 @@ function showResult(blob, opts){
   // settings — drop it (the cached-export check below re-arms it instantly
   // if an export for exactly these settings is already cached).
   try{ invalidateExport('new result shown'); }catch(e){}
-  // Resolve the shareable File NOW, at generation time — the tap handler
-  // must not spend its user activation constructing it. B14: when the
-  // delivered result already IS a File (the disk-backed OPFS File every
-  // streamed/slice-delivered render produces), use it DIRECTLY as the
-  // share File — new File([blob]) on a ~1 GB result is a whole-payload
-  // materialization and is banned at any result size. Only a non-File
-  // Blob (the small in-memory fallback path) is wrapped, as before.
-  resultBlob=blob; resultFile=null; resultCanShare=false; resultFileHow='';
-  var resolvedResult=resolveShareFile(blob);
-  resultFile=(resolvedResult.file instanceof File)?resolvedResult.file:null;
-  resultFileHow=resolvedResult.how; resultCanShare=resolvedResult.canShare;
-  if(resultFile){ log('Result: share File "'+resultFile.name+'" ('+blob.size+' bytes, '+fmtBytesMB(blob.size)+') | construction: '+resultFileHow+' | canShare with real output File → '+String(resultCanShare)); }
-  else { log('Result: no share File could be resolved — construction: '+resultFileHow+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent')+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')); }
-  diagResult.blobSize=blob.size; diagResult.blobType=blob.type||'video/mp4'; diagResult.canShare=resultCanShare; diagResult.shareFileBuilt=!!resultFile;
+  resultBlob=blob;
+  diagResult.blobSize=blob.size; diagResult.blobType=blob.type||'video/mp4';
   try{ var qe2=document.querySelector('input[name=quality]:checked'); var qv=qe2?qe2.value:'full'; diagResult.settings={q:qv,height:(qv==='full'?0:parseInt(qv,10)),tStart:trimStartSec,tEnd:trimEnd(),tDur:Math.max(0,trimEnd()-trimStartSec),eff:effOffset(),blend:blendVal}; }catch(e){}
   var oldURL=resultURL;
   resultURL=URL.createObjectURL(blob);
@@ -4303,45 +3988,29 @@ function showResult(blob, opts){
   rv.addEventListener('error',function(){ try{ var ve=rv.error; log('Result video element error: '+(ve?('code='+ve.code+' message='+(ve.message||'')):'unknown')); logError('result-video-element',(ve&&ve.message)?new Error(ve.message):new Error('video error code '+(ve?ve.code:'?'))); }catch(e){} });
   rv.addEventListener('loadedmetadata',function(){ try{ log('Result video metadata loaded: duration='+(isFinite(rv.duration)?Number(rv.duration).toFixed(3):String(rv.duration))+'s | videoWidth='+rv.videoWidth+' videoHeight='+rv.videoHeight+' | readyState='+rv.readyState); }catch(e){} });
   area.appendChild(rv);
-  var ICON_SHARE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4"/><path d="M8 7l4-4 4 4"/><path d="M5 13v6a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19v-6"/></svg>';
   var ICON_DL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M5 20h14"/></svg>';
-  var ICON_OPEN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4L10.5 13.5"/><path d="M19 13.5V19a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 19V7a1.5 1.5 0 0 1 5.5 5.5H11"/></svg>';
   var saveRow=document.createElement('div'); saveRow.className='saveRow';
-  var shareBtn=document.createElement('button'); shareBtn.type='button'; shareBtn.className='saveBtn'; shareBtn.innerHTML=ICON_SHARE+'<span>Share</span>';
   var dl=document.createElement('a'); dl.className='saveBtn'; dl.href=resultURL; dl.setAttribute('download','dance-synced.mp4'); dl.innerHTML=ICON_DL+'<span>Download</span>';
-  var openA=document.createElement('a'); openA.className='saveBtn'; openA.setAttribute('role','button'); openA.innerHTML=ICON_OPEN+'<span>Open</span>'; // deliberately NO href/target: Open must never navigate the page to a blob URL — its click presents the Preview video fullscreen (openResultFullscreen)
-  shareBtnEl=shareBtn; dlAnchorEl=dl; openAnchorEl=openA;
+  dlAnchorEl=dl;
   // If an export for exactly these settings + the selected Export quality
-  // is already cached, point the links at it immediately so the buttons
-  // deliver it with no re-render.
+  // is already cached, point the link at it immediately so Download
+  // delivers it with no re-render.
   try{ var curSig=currentExportSignature(); var ce=exportCacheGet(curSig); if(ce){ setLiveExport(ce, curSig); } }catch(e){}
   dl.addEventListener('click',function(ev){
     var sig2=currentExportSignature();
-    if(liveExport&&liveExport.sig===sig2&&liveExport.url){ diagStage='download'; log('Download tapped → action=download | result file "'+((liveExport.file&&liveExport.file.name)||'(unnamed)')+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+(liveExport.how||fileConstruction(liveExport.file))+' | canShare='+String(liveExport.canShare)+' | delivering the EXPORT file (up-to-date, no re-render) via this anchor — object URL of that same File, no byte copy | href scheme='+String(liveExport.url).split(':')[0]+': | download attr="dance-synced.mp4"'); try{ journalPersistNow(); }catch(e){} return; }
+    if(liveExport&&liveExport.sig===sig2&&liveExport.url){ diagStage='download'; log('Download tapped → action=download | result file "'+((liveExport.blob&&liveExport.blob.name)||'(unnamed)')+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+(liveExport.how||fileConstruction(liveExport.blob))+' | delivering the EXPORT file (up-to-date, no re-render) via this anchor — object URL of that same File, no byte copy | href scheme='+String(liveExport.url).split(':')[0]+': | download attr="dance-synced.mp4"'); try{ journalPersistNow(); }catch(e){} return; }
     ev.preventDefault(); diagStage='download';
     log('Download tapped → no up-to-date export — starting Processing (full-quality export render) first; the download follows when processing finishes.');
-    ensureExport('download');
+    ensureExport();
   });
-  openA.addEventListener('click',function(ev){
-    ev.preventDefault(); diagStage='open-video';
-    var sig3=currentExportSignature();
-    if(liveExport&&liveExport.sig===sig3&&liveExport.url){ log('Open tapped → action=open | result file "'+((liveExport.file&&liveExport.file.name)||'(unnamed)')+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+(liveExport.how||fileConstruction(liveExport.file))+' | canShare='+String(liveExport.canShare)+' | export is up-to-date (no re-render) — presenting the in-page Preview video in the native fullscreen player next (no blob URL navigation).'); try{ journalPersistNow(); }catch(e){} openResultFullscreen(); return; }
-    log('Open tapped → no up-to-date export — starting Processing (full-quality export render) first; when processing finishes, Open presents the Preview video fullscreen.');
-    ensureExport('open');
-  });
-  shareBtn.addEventListener('click',function(){ ensureExport('share'); });
-  saveRow.appendChild(shareBtn);
   saveRow.appendChild(dl);
-  saveRow.appendChild(openA);
   wrap.appendChild(saveRow);
-  // No explanatory text under the download buttons (item 5).
+  // No explanatory text under the download button (item 5).
   showEditor();
   updateNewBtn();
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
-  // Share-investigation retention + probe panel: the result just
-  // delivered becomes the retained result, and the probes appear.
+  // Retention: the result just delivered becomes the retained result.
   try{ retentionSyncFromResult(blob); }catch(e){}
-  try{ updateShareProbePanel(); }catch(e){}
 }
 function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
 // A completed apply/generation becomes the applied-settings snapshot:
@@ -4415,21 +4084,21 @@ function resetAll(){
   // genuinely fresh state.
   outCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); outCache.clear(); outOrder=[];
   exportCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); exportCache.clear(); exportOrder=[];
-  // Share-investigation retention: Start over clears the retained
-  // result too — record removed, OPFS file deleted (a no-op if the
-  // cache loops above already deleted it).
+  // Retention: Start over clears the retained result too — record
+  // removed, OPFS file deleted (a no-op if the cache loops above
+  // already deleted it).
   try{ var _retRec=retentionClear('cleared by Start over'); if(_retRec&&_retRec.opfsName) opfsDelete(_retRec.opfsName); }catch(e){}
   exportToken++;
   if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
   isExporting=false; pendingExportAction=null;
   if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
-  liveExport=null; shareBtnEl=null; dlAnchorEl=null; openAnchorEl=null;
+  liveExport=null; dlAnchorEl=null;
   showExportProgress(false);
   if(opfsStaged.dance) opfsDelete(opfsStaged.dance.name);
   if(opfsStaged.song) opfsDelete(opfsStaged.song.name);
   opfsStaged={dance:null, song:null};
   if(resultURL){ URL.revokeObjectURL(resultURL); resultURL=null; }
-  resultBlob=null; resultFile=null; resultCanShare=false; resultFileHow=''; resultVideoEl=null; lastResultIsDirect=false; directStageLabel='';
+  resultBlob=null; resultVideoEl=null; lastResultIsDirect=false; directStageLabel='';
   if(danceURL){ URL.revokeObjectURL(danceURL); danceURL=null; }
   vid.removeAttribute('src'); try{ vid.load(); }catch(e){}
   $('fileDance').value=''; $('fileSong').value='';
@@ -4456,7 +4125,6 @@ function resetAll(){
   diagFiles.audio={role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null};
   // Keep diagEntries — just note the reset in the timestamped log.
   log('Reset (Start over) — session cleared. Diagnostics log kept.');
-  try{ updateShareProbePanel(); }catch(e){}
   updateNewBtn();
 }
 $('btnNew').addEventListener('click', resetAll);
@@ -4502,7 +4170,7 @@ async function doGenerate(opts){
       // DIRECT EXPORT AS GENERATE: no 480p proxy at all. The two-stage
       // export (audio render + stream-copy mux) IS the generation step;
       // its file becomes the result and satisfies the export cache for
-      // these exact settings, so Share/Download/Open deliver instantly.
+      // these exact settings, so Download delivers instantly.
       // Any later edit changes the signature (same invalidation as the
       // export cache today: liveExport is cleared by invalidateExport on
       // edit), so the next Generate re-evaluates this branch fresh — if
@@ -4515,8 +4183,8 @@ async function doGenerate(opts){
         diagResult.settings=snap;
         diagExport.size=dHitBlob.size; diagExport.durationSec=0; diagExport.quality='full'; diagExport.backend=(dHitOut||dHitExp).opfsName?'OPFS':(diagExport.backend||'MEMFS'); diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate — cache hit, no re-render';
         log('Direct export skipped — cache hit for identical settings (no re-render). Direct export blob '+fmtBytesMB(dHitBlob.size)+' — the export cache for these settings is already satisfied.');
-        // Ensure both caches hold the payload so Share/Download/Open
-        // hit without rendering.
+        // Ensure both caches hold the payload so Download hits
+        // without rendering.
         var dHitOpfs=(dHitOut||dHitExp).opfsName||null;
         if(!dHitOut&&dHitBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dHitBlob, opfsName:null}); }catch(e){} }
         if(!dHitExp){ try{ exportCachePut(exportSig,{blob:dHitBlob, opfsName:dHitOpfs, q:q}); }catch(e){} }
@@ -4539,13 +4207,13 @@ async function doGenerate(opts){
       var dSecs=((Date.now()-t0)/1000).toFixed(1);
       generatedOnce=true; diagStage='result'; directStageLabel=''; setBarPct(100); markStepDone(4);
       // Satisfy the export cache BEFORE showResult so its cached-export
-      // check arms liveExport and Share/Download/Open deliver instantly
+      // check arms liveExport and Download delivers instantly
       // with no Processing-bar render step.
       try{ exportCachePut(exportSig,{blob:dBlob, opfsName:dRes.opfsName, q:q}); }catch(e){ logError('direct-export-cache',e); }
       if(dBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dBlob, opfsName:null}); }catch(e){} }
       showResult(dBlob,{isDirect:true});
       markApplied(snap);
-      log('Done — direct export ready: '+tDur.toFixed(2)+'s output, '+fmtSize(dBlob.size)+', generated in '+dSecs+'s · stage 1: size='+(dRes.s1Size!=null?fmtBytesMB(dRes.s1Size):'n/a')+' duration='+Number(dRes.s1DurSec).toFixed(1)+'s · stage 2: duration='+Number(dRes.s2DurSec).toFixed(1)+'s · audio clipped to video duration (no audio beyond video). This IS the full-quality export — Share, Download and Open deliver it immediately, no further render.');
+      log('Done — direct export ready: '+tDur.toFixed(2)+'s output, '+fmtSize(dBlob.size)+', generated in '+dSecs+'s · stage 1: size='+(dRes.s1Size!=null?fmtBytesMB(dRes.s1Size):'n/a')+' duration='+Number(dRes.s1DurSec).toFixed(1)+'s · stage 2: duration='+Number(dRes.s2DurSec).toFixed(1)+'s · audio clipped to video duration (no audio beyond video). This IS the full-quality export — Download delivers it immediately, no further render.');
       try{ journalMarkCompleted(true); }catch(e){}
       return;
     }
@@ -4566,7 +4234,7 @@ async function doGenerate(opts){
     diagStage='proxy-encode'; diagResult.settings=snap; diagLastEncodeMilestone=-1;
     log('Proxy render starts: max height 480p · fast encode (libx264 ultrafast) | audio pipeline identical to export (detected offset incl. negative-offset room-audio gap fill, trims, room blend, audio exactly the video duration) | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | proxy signature='+sig);
     log('Generating proxy preview… 480p · offset '+eff.toFixed(3)+'s · trim '+tStart.toFixed(2)+'–'+tEnd.toFixed(2)+'s'+(blendVal>0?(' · room audio '+Math.round(blendVal*100)+'%'):''));
-    log('Export quality selected: '+(height?(q+'p'):'Full')+' — no full-quality render happens during editing; the export renders on demand from Share/Download/Open.');
+    log('Export quality selected: '+(height?(q+'p'):'Full')+' — no full-quality render happens during editing; the export renders on demand from Download.');
     markStepActive(4);
     await detectStorageBackend();
     if(diagStorage.opfsAvailable&&!opfsStaged.dance){ try{ await opfsStageInput(danceFile,'dance'); }catch(e){} }
@@ -4699,7 +4367,7 @@ async function doGenerate(opts){
     await refreshStorageEstimate();
     showResult(blob);
     markApplied(snap);
-    log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Share, Download or Open.');
+    log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Download.');
     try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
@@ -4795,8 +4463,6 @@ try{
 }catch(e){ try{ logError('env-probe-load',e); }catch(_){} }
 try{ detectStorageBackend(); }catch(e){ try{ logError('storage-detect-startup',e); }catch(_){} }
 try{ var _cb=$('btnCopyDiag'); if(_cb) _cb.addEventListener('click',function(){ copyDiagnostics(); }); }catch(e){ try{ logError('diagnostics-wiring',e); }catch(_){} }
-try{ if(recoveredProbeHeartbeat) log('Recovered share-probe heartbeat: arm='+(recoveredProbeHeartbeat.arm||'?')+' | count='+(recoveredProbeHeartbeat.count!=null?recoveredProbeHeartbeat.count:'?')+' (≈'+((recoveredProbeHeartbeat.count||0)*100)+' ms of share preparation) | started='+(recoveredProbeHeartbeat.startedAt||'?')+' | last beat='+(recoveredProbeHeartbeat.updatedAt||'?')+' — the previous session died during that probe share (the heartbeat is only cleared when a probe settles).'); }catch(e){}
-try{ var _pb1=$('btnProbeFull'); if(_pb1) _pb1.addEventListener('click',function(){ runShareProbe('full'); }); var _pb2=$('btnProbe300'); if(_pb2) _pb2.addEventListener('click',function(){ runShareProbe('slice300'); }); var _pb3=$('btnProbe600'); if(_pb3) _pb3.addEventListener('click',function(){ runShareProbe('slice600'); }); }catch(e){ try{ logError('probe-wiring',e); }catch(_){} }
 // Global 'error' / 'unhandledrejection' handlers are registered once,
 // early, in the session-journal block above — they write synchronously
 // to the persisted journal so the error survives a dying tab. (No second
