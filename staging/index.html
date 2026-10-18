@@ -1423,21 +1423,74 @@ function runAnalysis(){
         log('Fine gate: passed — final offset = median of winner\'s top-half window offsets ('+winner.medianOffset.toFixed(3)+'s).');
         fine={offset:winner.medianOffset, confidence:winner.verifiedScore};
       }
-      detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(50,'Generating'); markStepDone(3); markStepActive(4); // event: fine offset ends
-      log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
-      var winnerRawPerSecond=(typeof winner.rawPerSecond==='number'&&isFinite(winner.rawPerSecond))?winner.rawPerSecond:0;
-      var bestOtherRawPerSecond=0;
-      for(var ei2=0; ei2<evals.length; ei2++){ if(evals[ei2]!==winner){ var _orps=(typeof evals[ei2].rawPerSecond==='number'&&isFinite(evals[ei2].rawPerSecond))?evals[ei2].rawPerSecond:0; if(_orps>bestOtherRawPerSecond) bestOtherRawPerSecond=_orps; } }
-      var rawRatio=(bestOtherRawPerSecond>0)?(winnerRawPerSecond/bestOtherRawPerSecond):(winnerRawPerSecond>0?Infinity:0);
-      var gateVerified=winner.verifiedScore;
-      var gateSpread=winner.spread;
-      var standardPath=gateVerified>=0.10;
-      var quietPath=gateVerified>=0.03&&isFinite(gateSpread)&&gateSpread<=0.05&&rawRatio>=1.3;
-      if(!standardPath&&!quietPath){
-        log('Confidence gate: FAILED — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — neither standard (verified ≥ 0.10) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met — analysis FAILED; no result will be presented.');
+      // CONFIDENCE GATE (A7 fallthrough): the gate judges the crowned #1
+      // candidate first, exactly as before. If it fails BOTH paths, the
+      // remaining verified candidates are judged against the SAME two
+      // paths — highest verified score first, raw/s breaking near-ties
+      // (verified within 0.02 of each other) — and the first candidate
+      // that passes either path is accepted; its median verified offset
+      // becomes the result. The analysis fails only when NO candidate
+      // passes either path.
+      var gateVerdict=function(cand){
+        var candRawPerSecond=(typeof cand.rawPerSecond==='number'&&isFinite(cand.rawPerSecond))?cand.rawPerSecond:0;
+        var bestOther=0;
+        for(var gi=0; gi<evals.length; gi++){ if(evals[gi]!==cand){ var _rps=(typeof evals[gi].rawPerSecond==='number'&&isFinite(evals[gi].rawPerSecond))?evals[gi].rawPerSecond:0; if(_rps>bestOther) bestOther=_rps; } }
+        var ratio=(bestOther>0)?(candRawPerSecond/bestOther):(candRawPerSecond>0?Infinity:0);
+        var standard=cand.verifiedScore>=0.08;
+        var quiet=cand.verifiedScore>=0.03&&isFinite(cand.spread)&&cand.spread<=0.05&&ratio>=1.3;
+        return {standard:standard, quiet:quiet, passes:(standard||quiet), rawPerSecond:candRawPerSecond, bestOther:bestOther, ratio:ratio};
+      };
+      var gateStatsText=function(cand,gv){
+        return 'verified '+cand.verifiedScore.toFixed(4)+' · spread '+(isFinite(cand.spread)?cand.spread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(gv.ratio)?gv.ratio.toFixed(2):'inf')+' (raw/s '+gv.rawPerSecond.toFixed(1)+' vs best other '+(gv.bestOther>0?gv.bestOther.toFixed(1):'n/a')+')';
+      };
+      var gateOrder=[winner];
+      var restEvals=evals.slice(1);
+      restEvals.sort(function(a,b){
+        var dv=b.verifiedScore-a.verifiedScore;
+        if(Math.abs(dv)<=0.02){
+          if(Math.abs(b.rawPerSecond-a.rawPerSecond)>1e-9) return b.rawPerSecond-a.rawPerSecond;
+          if(a.spread!==b.spread) return (a.spread<b.spread)?-1:1;
+          return 0;
+        }
+        return dv;
+      });
+      for(var go2=0; go2<restEvals.length; go2++) gateOrder.push(restEvals[go2]);
+      var accepted=null, acceptedVerdict=null, acceptedRank=0;
+      for(var go=0; go<gateOrder.length; go++){
+        var gcand=gateOrder[go], gv2=gateVerdict(gcand), grank=evals.indexOf(gcand)+1;
+        if(gv2.passes){ accepted=gcand; acceptedVerdict=gv2; acceptedRank=grank; break; }
+        if(gcand===winner){
+          log('Confidence gate: FAILED — winner '+gateStatsText(gcand,gv2)+' — neither standard (verified ≥ 0.08) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met'+(restEvals.length?(' — evaluating remaining candidates (fallthrough).'):(' — no remaining candidates.')));
+        } else {
+          log('Confidence gate: fallthrough candidate #'+grank+' (coarse '+gcand.coarseSec.toFixed(3)+'s) FAILED — '+gateStatsText(gcand,gv2)+' — neither standard (verified ≥ 0.08) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met.');
+        }
+      }
+      if(!accepted){
+        log('Confidence gate: FAILED — no candidate passed either gate path — analysis FAILED; no result will be presented.');
         throw new Error('Sync analysis failed');
       }
-      log('Confidence gate: accepted via '+(standardPath?'standard':'quiet-consistency')+' path — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — analysis accepted.');
+      if(accepted===winner){
+        log('Confidence gate: accepted via '+(acceptedVerdict.standard?'standard':'quiet-consistency')+' path — winner '+gateStatsText(accepted,acceptedVerdict)+' — analysis accepted.');
+      } else {
+        log('Confidence gate: ACCEPTED via fallthrough — candidate #'+acceptedRank+' (coarse '+accepted.coarseSec.toFixed(3)+'s) accepted via '+(acceptedVerdict.standard?'standard':'quiet-consistency')+' path — '+gateStatsText(accepted,acceptedVerdict)+' — analysis accepted.');
+        log('Fallthrough winner: coarse candidate '+accepted.coarseSec.toFixed(3)+'s · verified '+accepted.verifiedScore.toFixed(4)+' — per-window table:');
+        accepted.wins.forEach(function(w){ log('  win @ '+w.start.toFixed(1)+'s: offset '+w.offset.toFixed(3)+'s · score '+w.score.toFixed(4)+' · RMS '+w.rms.toFixed(4)); });
+        if(accepted.wins.length<2){
+          log('Fine gate: ABSTAINED — fallthrough winner has only '+accepted.wins.length+' usable window(s) (< 2); falling back to fallthrough winner coarse value '+accepted.coarseSec.toFixed(3)+'s.');
+          fine={offset:accepted.coarseSec, confidence: accepted.wins.length?accepted.wins[0].score:0};
+        } else if(!(accepted.bestScore>=0.02)){
+          log('Fine gate: ABSTAINED — fallthrough winner best window score '+accepted.bestScore.toFixed(4)+' < 0.0200; falling back to fallthrough winner coarse value '+accepted.coarseSec.toFixed(3)+'s.');
+          fine={offset:accepted.coarseSec, confidence:accepted.bestScore};
+        } else if(Math.abs(accepted.medianOffset-accepted.coarseSec)>0.25){
+          log('Fine gate: fallthrough winner median '+accepted.medianOffset.toFixed(3)+'s deviates from its coarse by '+Math.abs(accepted.medianOffset-accepted.coarseSec).toFixed(3)+'s > 0.250s — distrusted; using fallthrough winner coarse value '+accepted.coarseSec.toFixed(3)+'s.');
+          fine={offset:accepted.coarseSec, confidence:accepted.verifiedScore};
+        } else {
+          log('Fine gate: passed — final offset = median of fallthrough winner\'s top-half window offsets ('+accepted.medianOffset.toFixed(3)+'s).');
+          fine={offset:accepted.medianOffset, confidence:accepted.verifiedScore};
+        }
+      }
+      detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(50,'Generating'); markStepDone(3); markStepActive(4); // event: fine offset ends
+      log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
       analysisState="done"; analysisVersion=ver;
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
       // The Preview block (header, subheading, player, Download)
