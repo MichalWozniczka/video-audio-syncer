@@ -251,9 +251,9 @@ var diagEntries=[];
 var diagEnvAtLoad=null;
 var diagConverter={attempted:false,loaded:false,version:'not loaded yet',base:'',coreURL:'',workerURL:'',wasmURL:'',wasmGzURL:'',wasmViaBlob:false,loadStartIso:'',loadDurationMs:null,loadErrors:[],coreBytes:null};
 var diagFiles={video:{role:'Video',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null},audio:{role:'Audio',name:'(none)',sizeBytes:null,type:'',durationSec:null,decodeRoute:'not decoded',decodeDurationMs:null,sampleCount:null,sampleRate:null,rms:null,peak:null}};
-var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null,canShare:null,shareFileBuilt:false};
+var diagResult={blobSize:null,blobType:'',hasObjectURL:false,urlPrefix:'',settings:null};
 var diagLastEncodeMilestone=-1;
-var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet'};
+var diagStorage={detected:false, opfsAvailable:false, note:'not detected yet', inputsBackend:'MEMFS', lastInputs:'MEMFS', lastOutput:'MEMFS', usage:null, quota:null, mountTried:false, mountSupported:false, mountNote:'no render yet', workerfsVerdict:null, workerfsReason:'', sweepNote:'not run yet', sweepDone:false, areas:null, areasTotal:null, areaNote:'not itemized yet', streamOutVerdict:null, streamOutReason:'', streamOutNote:'no streamed render yet', streamOutSetupLine:'', retainedNote:'no retained result recorded yet'};
 var diagProxy={size:null, durationSec:null, backend:null, lowres:'n/a', engine:null, webcodecs:null};
 var diagExport={size:null, durationSec:null, quality:null, backend:null, stages:'n/a'};
 function $(id){return document.getElementById(id)}
@@ -408,6 +408,20 @@ function journalMarkCompleted(clean){
 }
 function journalMarkHandledError(){
   journalCompleted=true;
+  journalPersistNow();
+}
+function journalDeliveryPending(){
+  // A Download tap AFTER a completed generation is a new in-flight
+  // operation. Generation success already marked the journal
+  // completed=true, and the recovery gate on the next load only
+  // surfaces journals with completed=false — so a tab death during a
+  // post-generation delivery was silently swallowed and the next dump
+  // showed a clean session. Every Download tap re-arms the journal as
+  // not-completed (and the caller persists synchronously) BEFORE the
+  // delivery; the delivery's completion / handled-error paths mark it
+  // completed again. A death mid-delivery now leaves completed=false
+  // at stage=delivery with the tap line on disk.
+  journalCompleted=false;
   journalPersistNow();
 }
 function journalSafeClear(){
@@ -638,8 +652,6 @@ function buildDiagnosticsText(){
     if(typeof songFile!=='undefined'&&songFile){ diagFiles.audio.name=songFile.name; diagFiles.audio.sizeBytes=songFile.size; diagFiles.audio.type=songFile.type||''; if(typeof songDur!=='undefined'&&songDur) diagFiles.audio.durationSec=songDur; if(typeof songPCM!=='undefined'&&songPCM){ diagFiles.audio.sampleCount=songPCM.length; diagFiles.audio.sampleRate=TARGET_SR; } }
     if(typeof resultBlob!=='undefined'&&resultBlob){ diagResult.blobSize=resultBlob.size; diagResult.blobType=resultBlob.type||'video/mp4'; }
     if(typeof resultURL!=='undefined'){ diagResult.hasObjectURL=!!resultURL; diagResult.urlPrefix=resultURL?(String(resultURL).split(':')[0]+': (blob URL, full URL omitted)'):'none'; }
-    if(typeof resultCanShare!=='undefined') diagResult.canShare=resultCanShare;
-    if(typeof resultFile!=='undefined') diagResult.shareFileBuilt=!!resultFile;
   }catch(e){}
   var qNow='unknown'; try{ var qe=document.querySelector('input[name=quality]:checked'); qNow=qe?qe.value:'unknown'; }catch(e){}
   var settingsText='(no generation yet)';
@@ -665,8 +677,6 @@ function buildDiagnosticsText(){
     'Output blob MIME type: '+(diagResult.blobType||'n/a'),
     'Object URL created: '+(diagResult.hasObjectURL?'yes':'no'),
     'Object URL prefix/scheme: '+(diagResult.urlPrefix||'none'),
-    'Share File pre-built at generation: '+String(diagResult.shareFileBuilt),
-    'resultCanShare (canShare with real output File): '+(diagResult.canShare==null?'unknown':String(diagResult.canShare)),
     'Settings used: '+settingsText,
     'Analysis state: '+String((typeof analysisState!=='undefined')?analysisState:'?')+' | confidence: '+String((typeof confidence!=='undefined')?confidence:'?')
   ].join('\n');
@@ -695,9 +705,12 @@ function buildDiagnosticsText(){
       'Storage backend detection: OPFS available='+String(diagStorage.opfsAvailable)+' | note: '+diagStorage.note+' | typeof navigator.storage.getDirectory='+storageGetDirectoryType(),
       'storage (last render): inputs='+diagStorage.lastInputs+' output='+diagStorage.lastOutput,
       'mount (last render): '+diagStorage.mountNote,
+      'output streaming (B13): '+(diagStorage.streamOutNote||'n/a'),
+      'output streaming probe (B13): verdict='+(diagStorage.streamOutVerdict==null?'not probed yet':String(diagStorage.streamOutVerdict))+' | worker setup report at load: '+(diagStorage.streamOutSetupLine||'NONE — the converter worker posted no [streamout] setup line at load (the loaded worker build lacks the STREAMOPFS filesystem: stock or stale class worker)')+(diagStorage.streamOutReason?(' | last probe failure: '+diagStorage.streamOutReason):''),
       'OPFS usage/quota estimate: usage='+(diagStorage.usage!=null?fmtBytesMB(diagStorage.usage):'n/a')+' | quota='+(diagStorage.quota!=null?fmtBytesMB(diagStorage.quota):'n/a')
     ].concat(areaLines).concat([
       'OPFS sweep: '+(diagStorage.sweepNote||'not run yet'),
+      'Retained result: '+(diagStorage.retainedNote||'n/a'),
       'Proxy render: size='+(diagProxy.size!=null?fmtBytesMB(diagProxy.size):'n/a')+' | duration='+(diagProxy.durationSec!=null?diagProxy.durationSec+' s':'n/a')+' | backend='+(diagProxy.backend||'n/a')+' | max height 480p, fast encode | lowres: '+diagProxy.lowres+' | engine: '+(diagProxy.engine||'n/a')+(diagProxy.webcodecs?(' | webcodecs stages: demux '+(diagProxy.webcodecs.timings.demuxMs/1000).toFixed(2)+'s · decode+encode '+(diagProxy.webcodecs.timings.decodeEncodeMs/1000).toFixed(1)+'s · audio '+(diagProxy.webcodecs.timings.audioMs/1000).toFixed(1)+'s · mux '+(diagProxy.webcodecs.timings.muxMs/1000).toFixed(1)+'s · '+diagProxy.webcodecs.frames+' frames · '+diagProxy.webcodecs.outW+'x'+diagProxy.webcodecs.outH+' @ '+diagProxy.webcodecs.fps+' fps · '+diagProxy.webcodecs.srcCodec+' → '+diagProxy.webcodecs.encCodec):''),
       'Export render: size='+(diagExport.size!=null?fmtBytesMB(diagExport.size):'n/a')+' | duration='+(diagExport.durationSec!=null?diagExport.durationSec+' s':'n/a')+' | quality='+(diagExport.quality||'n/a')+' | backend='+(diagExport.backend||'n/a')+' | stages: '+diagExport.stages
     ].join('\n'));
@@ -743,7 +756,7 @@ async function copyDiagnostics(){
     }catch(e3){ copyErr=e3; try{ logError('diagnostics-copy-fallback',e3); }catch(_){} }
   }
   if(copied){
-    setDiagStatus('Copied ✓ — paste it anywhere to share.');
+    setDiagStatus('Copied ✓ — paste it anywhere.');
     try{ log('Diagnostics copied via '+copyMethod+' ('+text.length+' chars).'); }catch(e){}
   } else {
     setDiagStatus('Copy failed — the text is selected in the box; press Copy.');
@@ -775,6 +788,7 @@ function endProgressOnFailure(){ if(barPct>=100) return; var w=$('progWrap'); if
 function clearError(){ surfacedErrorMsg=null; var el=$('errLine'); if(!el) return; el.textContent=''; el.classList.remove('show'); }
 var stepState={1:false,2:false,3:false,4:false};
 var barPct=0, barCeiling=5, progPhase='', progressEverShown=false;
+var progressSuppressed=false; // set by Start over (resetAll): every progress painter below no-ops while true, so no stale async completion can repaint the bar after a reset. Cleared only by resetProgress() at the start of a new run.
 // Progress milestone ladder — percentage ALLOCATION (not bar width; the
 // track itself stays full width): the pre-render phases together fill
 // roughly the first half of the range, and the render fills the second
@@ -798,14 +812,14 @@ var runT0=0, runClockTimer=null;
 var directStageLabel='', lastResultIsDirect=false;
 function fmtClock(ms){ var s=Math.floor(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
 function setProgPhase(p){ if(p) progPhase=p; renderProgText(); }
-function renderProgText(){ var el=$('progText'); if(!el) return; if(barPct>=100){ el.textContent='100% · Done'; return; } el.textContent=Math.round(barPct)+'%'+(progPhase?(' · '+progPhase):''); }
+function renderProgText(){ var el=$('progText'); if(!el) return; if(progressSuppressed){ el.textContent=''; return; } if(barPct>=100){ el.textContent='100% · Done'; return; } el.textContent=Math.round(barPct)+'%'+(progPhase?(' · '+progPhase):''); }
 function creepTick(){ if(barPct<100&&barCeiling>barPct){ var gap=barCeiling-barPct; var inc=gap*0.025; if(inc>0){ barPct=Math.min(barCeiling-0.05, barPct+inc); var b=$('progBar'); if(b) b.style.width=barPct+'%'; } } renderProgText(); }
-function startRunClock(){ runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(creepTick,250); renderProgText(); }
+function startRunClock(){ if(progressSuppressed) return; runT0=Date.now(); diagRunT0=runT0; diagLastEncodeMilestone=-1; if(runClockTimer) clearInterval(runClockTimer); runClockTimer=setInterval(creepTick,250); renderProgText(); }
 function stopRunClock(){ if(runClockTimer){ clearInterval(runClockTimer); runClockTimer=null; } renderProgText(); }
-function setBarPct(pct,phase){ if(phase) progPhase=phase; pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; if(barPct>=100){ progPhase='Done'; barCeiling=100; } else { barCeiling=progNextCeiling(barPct); } markProgressShown(); var w=$('progWrap'); if(w) w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); var pb=$('progBar'); if(pb) pb.style.width=pct+"%"; renderProgText(); }
+function setBarPct(pct,phase){ if(progressSuppressed) return; if(phase) progPhase=phase; pct=Math.max(0,Math.min(100,pct)); if(pct<barPct) pct=barPct; barPct=pct; if(barPct>=100){ progPhase='Done'; barCeiling=100; } else { barCeiling=progNextCeiling(barPct); } markProgressShown(); var w=$('progWrap'); if(w) w.style.display="flex"; var sr=$('stepsRow'); if(sr) sr.classList.add('show'); var pb=$('progBar'); if(pb) pb.style.width=pct+"%"; renderProgText(); }
 function markStepDone(n){ stepState[n]=true; var el=$('step'+n); if(el){ el.classList.remove('active'); el.classList.add('done'); el.textContent='\u2713 '+el.dataset.label; } var next=$('step'+(n+1)); if(next&&!stepState[n+1]) next.classList.add('active'); }
 function markStepActive(n){ var el=$('step'+n); if(el&&!stepState[n]) el.classList.add('active'); }
-function resetProgress(full){ clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); if(w) w.style.display="flex"; markProgressShown(); var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; barCeiling=progNextCeiling(0); progPhase='Loading'; var pb0=$('progBar'); if(pb0) pb0.style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=50; barCeiling=progNextCeiling(50); progPhase='Generating'; var pb1=$('progBar'); if(pb1) pb1.style.width="50%"; } startRunClock(); }
+function resetProgress(full){ progressSuppressed=false; clearError(); setCancelVisible(true); stepState={1:false,2:false,3:false,4:false}; for(var i=1;i<=4;i++){ var el=$('step'+i); if(el){ el.classList.remove('done'); el.classList.remove('active'); el.textContent=el.dataset.label; } } var w=$('progWrap'); if(w) w.style.display="flex"; markProgressShown(); var sr=$('stepsRow'); if(sr) sr.classList.add('show'); if(full){ barPct=0; barCeiling=progNextCeiling(0); progPhase='Loading'; var pb0=$('progBar'); if(pb0) pb0.style.width="0%"; markStepActive(1); } else { for(var j=1;j<=3;j++) markStepDone(j); markStepActive(4); barPct=50; barCeiling=progNextCeiling(50); progPhase='Generating'; var pb1=$('progBar'); if(pb1) pb1.style.width="50%"; } startRunClock(); }
 function progressForGenerate(ratio){ if(ratio==null) return; setBarPct(50+Math.max(0,Math.min(1,ratio))*47,'Generating'); }
 var analysisState="idle", analysisPromise=null, filesVersion=0, analysisVersion=-1, confidence=0, lastCandidates=[];
 var _scratchDanceSpec=null, _scratchSongSpec=null, _scratchCoarse=null, _scratchEvals=null;
@@ -832,6 +846,7 @@ var pipelineRestartPending=false; // a file change cancelled an in-flight run; r
 // signal (so in-flight awaits abort promptly), and terminates the ffmpeg
 // worker. ensureFFmpeg() re-creates the worker on the next run.
 var runToken=0, cancelReject=null, cancelPromise=null;
+var sessionGen=0; // bumped by Start over (resetAll) ONLY. Async work that outlives a run (filmstrip extraction above all) captures it at start and checks it at every step: a mismatch means a reset happened mid-flight and the work must stop and drop its results silently — no progress repaint, no result/preview, no further pipeline log lines.
 function newCancelSignal(){ cancelPromise=new Promise(function(_,rej){ cancelReject=rej; }); cancelPromise.catch(function(){}); }
 function cancellable(p){ return cancelPromise?Promise.race([p,cancelPromise]):p; }
 function isCancelErr(e){ return e&&e.message==='Cancelled'; }
@@ -852,7 +867,7 @@ function withFFmpegLock(fn){
 }
 // Edits NEVER touch the generated result: once a result video exists it stays
 // visible until a new Generate/auto-run completes and replaces it.
-function invalidateDownload(){ invalidateExport('settings edit'); if(generatedOnce) log('Edits changed — proxy preview stays on screen until you tap Generate; any cached export is now stale and will re-render on the next Share/Download/Open.'); }
+function invalidateDownload(){ invalidateExport('settings edit'); if(generatedOnce) log('Edits changed — proxy preview stays on screen until you tap Generate; any cached export is now stale and will re-render on the next Download.'); }
 function editorDur(){ return danceDur||0; }
 function editorSongDur(){ return songDur||0; }
 function trimEnd(){ return trimEndSec==null?editorDur():trimEndSec; }
@@ -1056,7 +1071,7 @@ async function ensureFFmpeg(onProgress){
   setBarPct(2,'Loading'); // event: converter load starts
   log('Converter load starts: FFmpegWASM present='+!!window.FFmpegWASM+' | FFmpegUtil present='+!!window.FFmpegUtil);
   ffmpeg=new FFmpegWASM.FFmpeg();
-  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&(/ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
+  try{ ffmpeg.on('log', function(m){ try{ if(m&&m.message&&/\[streamout\]/.test(m.message)&&/(setup step|mounted at \/out|setup failed|setup:)/.test(m.message)) diagStorage.streamOutSetupLine=m.message; if(m&&m.message&&(/\[streamout\]|ffmpeg version|Input #|Output #|Stream #|Duration:|error|Error|Invalid|failed|lowres/i.test(m.message))) log('ffmpeg> '+m.message); }catch(e){} }); }catch(e){}
   ffmpeg.on('progress', function(p){ if(ffmpegProgressCb&&p&&isFinite(p.progress)) ffmpegProgressCb(Math.max(0,Math.min(1,p.progress))); });
   var base=new URL('assets/ffmpeg/', document.baseURI).href;
   diagConverter.base=base; diagConverter.coreURL=base+'ffmpeg-core.js'; diagConverter.workerURL=base+'814.ffmpeg.js'; diagConverter.wasmGzURL=base+'ffmpeg-core.wasm.gz'; diagConverter.wasmURL=base+'ffmpeg-core.wasm'; diagConverter.version='ffmpeg.wasm wrapper assets/ffmpeg/ffmpeg.js + core assets/ffmpeg/ffmpeg-core.js (ffmpeg-core.wasm.gz '+ '9.8 MB compressed, same-origin) — exact core -version line appears as "ffmpeg>" lines in this log once the worker runs';
@@ -1092,18 +1107,23 @@ async function decodeViaFFmpeg(file,startPct){
     if(startPct) setBarPct(startPct,'Decoding'); // event: decode starts (converter ready, extraction begins)
     var ext=(file.name.split('.').pop()||'bin').toLowerCase().replace(/[^a-z0-9]/g,'')||'bin';
     var inName='in.'+ext, outName='out.wav';
-    log('ffmpeg: writing '+file.name+' ('+fmtSize(file.size)+')…');
-    await withTimeout(ff.writeFile(inName, await FFmpegUtil.fetchFile(file)),90000,'Writing '+file.name+' to converter');
-    log('ffmpeg: extracting audio only (mono '+TARGET_SR+' Hz, PCM WAV, no video decode)…');
+    // B12: never fetchFile/writeFile the whole user file here — mount
+    // it via WORKERFS (ffmpeg reads on demand) or, if mounting is
+    // unavailable, slice-stream it in ≤16 MB slices. The old whole-file
+    // copy (JS Uint8Array + MEMFS copy, ~2x file size) is what killed
+    // the tab on the 1 GB HEVC input at exactly this step.
+    var ingest=await ingestSingleFileForFFmpeg(ff, file, inName, 'decode');
+    var inPath=ingest.path;
+    log('ffmpeg: extracting audio only (mono '+TARGET_SR+' Hz, PCM WAV, no video decode) from '+inPath+'…');
     var execCode=null;
-    try{ execCode=await withTimeout(ff.exec(['-y','-i',inName,'-vn','-ac','1','-ar',String(TARGET_SR),'-c:a','pcm_s16le', outName]),180000,'ffmpeg audio extraction of '+file.name+' ('+fmtSize(file.size)+')'); }catch(e){ throw new Error('Could not extract audio from '+file.name+' ('+fmtSize(file.size)+') — '+(e.message||e)+'. The file may exceed what the in-browser converter can handle.'); }
-    var data; try{ data=await ff.readFile(outName); }catch(e){ throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')'); }
-    if(!data||!data.length) throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')');
+    try{ execCode=await withTimeout(ff.exec(['-y','-i',inPath,'-vn','-ac','1','-ar',String(TARGET_SR),'-c:a','pcm_s16le', outName]),180000,'ffmpeg audio extraction of '+file.name+' ('+fmtSize(file.size)+')'); }catch(e){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('Could not extract audio from '+file.name+' ('+fmtSize(file.size)+') — '+(e.message||e)+'. The file may exceed what the in-browser converter can handle.'); }
+    var data; try{ data=await ff.readFile(outName); }catch(e){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')'); }
+    if(!data||!data.length){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('No audio in '+file.name+' ('+fmtSize(file.size)+')'); }
     log('ffmpeg: extracted '+fmtSize(data.length)+' of audio — reading WAV samples directly…');
     var parsed;
-    try{ parsed=parseWavToMonoFloat32(data); }catch(pe){ throw new Error('Could not parse extracted WAV from '+file.name+': '+(pe.message||pe)); }
+    try{ parsed=parseWavToMonoFloat32(data); }catch(pe){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(_){} throw new Error('Could not parse extracted WAV from '+file.name+': '+(pe.message||pe)); }
     log('ffmpeg: parsed WAV '+parsed.duration.toFixed(2)+'s · '+parsed.sampleRate+' Hz · '+parsed.pcm.length+' samples');
-    try{ await ff.deleteFile(inName); await ff.deleteFile(outName); }catch(e){}
+    try{ await cleanupSingleFileIngest(ff, ingest); await ff.deleteFile(outName); }catch(e){}
     return parsed;
   });
 }
@@ -1403,24 +1423,77 @@ function runAnalysis(){
         log('Fine gate: passed — final offset = median of winner\'s top-half window offsets ('+winner.medianOffset.toFixed(3)+'s).');
         fine={offset:winner.medianOffset, confidence:winner.verifiedScore};
       }
-      detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(50,'Generating'); markStepDone(3); markStepActive(4); // event: fine offset ends
-      log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
-      var winnerRawPerSecond=(typeof winner.rawPerSecond==='number'&&isFinite(winner.rawPerSecond))?winner.rawPerSecond:0;
-      var bestOtherRawPerSecond=0;
-      for(var ei2=0; ei2<evals.length; ei2++){ if(evals[ei2]!==winner){ var _orps=(typeof evals[ei2].rawPerSecond==='number'&&isFinite(evals[ei2].rawPerSecond))?evals[ei2].rawPerSecond:0; if(_orps>bestOtherRawPerSecond) bestOtherRawPerSecond=_orps; } }
-      var rawRatio=(bestOtherRawPerSecond>0)?(winnerRawPerSecond/bestOtherRawPerSecond):(winnerRawPerSecond>0?Infinity:0);
-      var gateVerified=winner.verifiedScore;
-      var gateSpread=winner.spread;
-      var standardPath=gateVerified>=0.10;
-      var quietPath=gateVerified>=0.03&&isFinite(gateSpread)&&gateSpread<=0.05&&rawRatio>=1.3;
-      if(!standardPath&&!quietPath){
-        log('Confidence gate: FAILED — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — neither standard (verified ≥ 0.10) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met — analysis FAILED; no result will be presented.');
+      // CONFIDENCE GATE (A7 fallthrough): the gate judges the crowned #1
+      // candidate first, exactly as before. If it fails BOTH paths, the
+      // remaining verified candidates are judged against the SAME two
+      // paths — highest verified score first, raw/s breaking near-ties
+      // (verified within 0.02 of each other) — and the first candidate
+      // that passes either path is accepted; its median verified offset
+      // becomes the result. The analysis fails only when NO candidate
+      // passes either path.
+      var gateVerdict=function(cand){
+        var candRawPerSecond=(typeof cand.rawPerSecond==='number'&&isFinite(cand.rawPerSecond))?cand.rawPerSecond:0;
+        var bestOther=0;
+        for(var gi=0; gi<evals.length; gi++){ if(evals[gi]!==cand){ var _rps=(typeof evals[gi].rawPerSecond==='number'&&isFinite(evals[gi].rawPerSecond))?evals[gi].rawPerSecond:0; if(_rps>bestOther) bestOther=_rps; } }
+        var ratio=(bestOther>0)?(candRawPerSecond/bestOther):(candRawPerSecond>0?Infinity:0);
+        var standard=cand.verifiedScore>=0.08;
+        var quiet=cand.verifiedScore>=0.03&&isFinite(cand.spread)&&cand.spread<=0.05&&ratio>=1.3;
+        return {standard:standard, quiet:quiet, passes:(standard||quiet), rawPerSecond:candRawPerSecond, bestOther:bestOther, ratio:ratio};
+      };
+      var gateStatsText=function(cand,gv){
+        return 'verified '+cand.verifiedScore.toFixed(4)+' · spread '+(isFinite(cand.spread)?cand.spread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(gv.ratio)?gv.ratio.toFixed(2):'inf')+' (raw/s '+gv.rawPerSecond.toFixed(1)+' vs best other '+(gv.bestOther>0?gv.bestOther.toFixed(1):'n/a')+')';
+      };
+      var gateOrder=[winner];
+      var restEvals=evals.slice(1);
+      restEvals.sort(function(a,b){
+        var dv=b.verifiedScore-a.verifiedScore;
+        if(Math.abs(dv)<=0.02){
+          if(Math.abs(b.rawPerSecond-a.rawPerSecond)>1e-9) return b.rawPerSecond-a.rawPerSecond;
+          if(a.spread!==b.spread) return (a.spread<b.spread)?-1:1;
+          return 0;
+        }
+        return dv;
+      });
+      for(var go2=0; go2<restEvals.length; go2++) gateOrder.push(restEvals[go2]);
+      var accepted=null, acceptedVerdict=null, acceptedRank=0;
+      for(var go=0; go<gateOrder.length; go++){
+        var gcand=gateOrder[go], gv2=gateVerdict(gcand), grank=evals.indexOf(gcand)+1;
+        if(gv2.passes){ accepted=gcand; acceptedVerdict=gv2; acceptedRank=grank; break; }
+        if(gcand===winner){
+          log('Confidence gate: FAILED — winner '+gateStatsText(gcand,gv2)+' — neither standard (verified ≥ 0.08) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met'+(restEvals.length?(' — evaluating remaining candidates (fallthrough).'):(' — no remaining candidates.')));
+        } else {
+          log('Confidence gate: fallthrough candidate #'+grank+' (coarse '+gcand.coarseSec.toFixed(3)+'s) FAILED — '+gateStatsText(gcand,gv2)+' — neither standard (verified ≥ 0.08) nor quiet-consistency (verified ≥ 0.03, spread ≤ 0.05s, raw-ratio ≥ 1.30) path met.');
+        }
+      }
+      if(!accepted){
+        log('Confidence gate: FAILED — no candidate passed either gate path — analysis FAILED; no result will be presented.');
         throw new Error('Sync analysis failed');
       }
-      log('Confidence gate: accepted via '+(standardPath?'standard':'quiet-consistency')+' path — winner verified '+gateVerified.toFixed(4)+' · spread '+(isFinite(gateSpread)?gateSpread.toFixed(3)+'s':'n/a')+' · raw-ratio '+(isFinite(rawRatio)?rawRatio.toFixed(2):'inf')+' (raw/s '+winnerRawPerSecond.toFixed(1)+' vs best other '+(bestOtherRawPerSecond>0?bestOtherRawPerSecond.toFixed(1):'n/a')+') — analysis accepted.');
+      if(accepted===winner){
+        log('Confidence gate: accepted via '+(acceptedVerdict.standard?'standard':'quiet-consistency')+' path — winner '+gateStatsText(accepted,acceptedVerdict)+' — analysis accepted.');
+      } else {
+        log('Confidence gate: ACCEPTED via fallthrough — candidate #'+acceptedRank+' (coarse '+accepted.coarseSec.toFixed(3)+'s) accepted via '+(acceptedVerdict.standard?'standard':'quiet-consistency')+' path — '+gateStatsText(accepted,acceptedVerdict)+' — analysis accepted.');
+        log('Fallthrough winner: coarse candidate '+accepted.coarseSec.toFixed(3)+'s · verified '+accepted.verifiedScore.toFixed(4)+' — per-window table:');
+        accepted.wins.forEach(function(w){ log('  win @ '+w.start.toFixed(1)+'s: offset '+w.offset.toFixed(3)+'s · score '+w.score.toFixed(4)+' · RMS '+w.rms.toFixed(4)); });
+        if(accepted.wins.length<2){
+          log('Fine gate: ABSTAINED — fallthrough winner has only '+accepted.wins.length+' usable window(s) (< 2); falling back to fallthrough winner coarse value '+accepted.coarseSec.toFixed(3)+'s.');
+          fine={offset:accepted.coarseSec, confidence: accepted.wins.length?accepted.wins[0].score:0};
+        } else if(!(accepted.bestScore>=0.02)){
+          log('Fine gate: ABSTAINED — fallthrough winner best window score '+accepted.bestScore.toFixed(4)+' < 0.0200; falling back to fallthrough winner coarse value '+accepted.coarseSec.toFixed(3)+'s.');
+          fine={offset:accepted.coarseSec, confidence:accepted.bestScore};
+        } else if(Math.abs(accepted.medianOffset-accepted.coarseSec)>0.25){
+          log('Fine gate: fallthrough winner median '+accepted.medianOffset.toFixed(3)+'s deviates from its coarse by '+Math.abs(accepted.medianOffset-accepted.coarseSec).toFixed(3)+'s > 0.250s — distrusted; using fallthrough winner coarse value '+accepted.coarseSec.toFixed(3)+'s.');
+          fine={offset:accepted.coarseSec, confidence:accepted.verifiedScore};
+        } else {
+          log('Fine gate: passed — final offset = median of fallthrough winner\'s top-half window offsets ('+accepted.medianOffset.toFixed(3)+'s).');
+          fine={offset:accepted.medianOffset, confidence:accepted.verifiedScore};
+        }
+      }
+      detectedOffset=fine.offset; confidence=fine.confidence; audioPos=-detectedOffset; diagStage='analysis-done'; setBarPct(50,'Generating'); markStepDone(3); markStepActive(4); // event: fine offset ends
+      log('Final offset (signed): '+detectedOffset.toFixed(3)+'s | confidence='+confidence.toFixed(4));
       analysisState="done"; analysisVersion=ver;
       var rb2=$('btnResync'); if(rb2) rb2.disabled=false;
-      // The Preview block (header, subheading, player, Share/Download/Open)
+      // The Preview block (header, subheading, player, Download)
       // is revealed ONLY by showResult, once a generation is fully complete
       // — never here at analysis-done (~50-90%), where it used to pop in
       // early. On a re-generation the previous result stays visible because
@@ -1506,19 +1579,24 @@ function drawCover(ctx,img,cw,ch){
   var s=Math.max(cw/iw,ch/ih), dw=iw*s, dh=ih*s;
   ctx.drawImage(img,(cw-dw)/2,(ch-dh)/2,dw,dh);
 }
-async function extractStripTiles(N,tw,W,laneH){
+async function extractStripTiles(N,tw,W,laneH,gen){
   var file=danceFile; if(!file) return null;
   return withFFmpegLock(async function(){
+    if(gen!=null&&gen!==sessionGen) return null; // reset while queued behind the ffmpeg lock — never start
     var ff=await withTimeout(ensureFFmpeg(null),60000,'Loading ffmpeg for filmstrip');
     var ext=(file.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
     var inName='strip.'+ext;
-    await withTimeout(ff.writeFile(inName, await FFmpegUtil.fetchFile(file)),120000,'Writing '+file.name+' for filmstrip');
+    // B12: same bounded ingest as decode — mount the video via
+    // WORKERFS or slice-stream it; never a whole-file fetchFile copy.
+    var ingest=await ingestSingleFileForFFmpeg(ff, file, inName, 'filmstrip');
+    var inPath=ingest.path;
     var tiles=[];
     for(var j=0;j<N;j++){
+      if(gen!=null&&gen!==sessionGen){ try{ await cleanupSingleFileIngest(ff, ingest); }catch(e){} return null; } // Start over landed mid-extraction: stop here, don't extract or log another tile
       var time=Math.min(Math.max(0,danceDur-0.05),(j*tw/W)*danceDur);
       var outName='tile'+j+'.png';
       try{
-        await withTimeout(ff.exec(['-ss',time.toFixed(3),'-i',inName,'-frames:v','1','-vf','scale=-2:112',outName]),60000,'Filmstrip frame at '+time.toFixed(2)+'s');
+        await withTimeout(ff.exec(['-ss',time.toFixed(3),'-i',inPath,'-frames:v','1','-vf','scale=-2:112',outName]),60000,'Filmstrip frame at '+time.toFixed(2)+'s');
         var data=await ff.readFile(outName);
         if(data&&data.length){
           var blob=new Blob([data],{type:'image/png'});
@@ -1535,7 +1613,8 @@ async function extractStripTiles(N,tw,W,laneH){
       }catch(e){ tiles.push(null); }
       try{ await ff.deleteFile(outName); }catch(e){}
     }
-    try{ await ff.deleteFile(inName); }catch(e){}
+    try{ await cleanupSingleFileIngest(ff, ingest); }catch(e){}
+    if(gen!=null&&gen!==sessionGen) return null;
     return tiles;
   });
 }
@@ -1554,6 +1633,7 @@ async function buildFilmstrip(){
   if(!(tw>4)) tw=W/6;
   var N=Math.max(1,Math.ceil(W/tw));
   filmstripBuilding=true; filmstripBuiltFor=key;
+  var gen=sessionGen; // a Start over bumps sessionGen: this build then aborts in extractStripTiles and its result is dropped below without drawing or logging
   var strip=$('filmstrip'); strip.innerHTML='';
   var canvases=[];
   for(var i=0;i<N;i++){
@@ -1567,10 +1647,10 @@ async function buildFilmstrip(){
     var tiles=(cached&&cached.count===N)?cached.tiles:null;
     if(!tiles){
       log('Filmstrip: extracting '+N+' stills with ffmpeg…');
-      tiles=await extractStripTiles(N,tw,W,laneH);
-      if(tiles) stripCache[fkey]={count:N,tiles:tiles};
+      tiles=await extractStripTiles(N,tw,W,laneH,gen);
+      if(tiles&&gen===sessionGen) stripCache[fkey]={count:N,tiles:tiles};
     }
-    if(filmstripBuiltFor!==key||!tiles) { filmstripBuilding=false; return; }
+    if(gen!==sessionGen||filmstripBuiltFor!==key||!tiles) { filmstripBuilding=false; return; }
     var drawn=0;
     for(var j=0;j<N;j++){
       if(!tiles[j]||!canvases[j]) continue;
@@ -1582,7 +1662,7 @@ async function buildFilmstrip(){
     }
     if(drawn>0) log('Filmstrip: '+drawn+'/'+N+' stills drawn.');
     else log('Filmstrip: no stills could be extracted from '+danceFile.name+'.');
-  }catch(e){ logError('filmstrip',e); log('Filmstrip failed: '+(e.message||e)); }
+  }catch(e){ if(gen!==sessionGen){ filmstripBuilding=false; return; } logError('filmstrip',e); log('Filmstrip failed: '+(e.message||e)); }
   filmstripBuilding=false;
 }
 function flushFilmstrip(){ if(filmstripPending){ filmstripPending=false; buildFilmstrip(); } }
@@ -1658,7 +1738,7 @@ $('btnResync').addEventListener('click',function(){
 window.addEventListener('resize',function(){ layoutTimeline(); buildFilmstrip(); });
 
 // ---------- settings ----------
-document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); updatePreviewSub(); updateApplyEditsState(); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — any direct-export result is now invalidated like a cached export; no render happens until Share/Download/Open or the next Generate (which will use the direct-export path only if the new quality is Full with no trim, otherwise the proxy path).'); }); });
+document.querySelectorAll('input[name=quality]').forEach(function(r){ r.addEventListener('change',function(){ invalidateExport('export quality changed'); updatePreviewSub(); updateApplyEditsState(); log('Export quality changed to '+(r.value==='full'?'Full':r.value+'p')+' — any direct-export result is now invalidated like a cached export; no render happens until Download or the next Generate (which will use the direct-export path only if the new quality is Full with no trim, otherwise the proxy path).'); }); });
 $('blend').addEventListener('input',function(e){ blendVal=parseInt(e.target.value,10)/100; $('blendVal').textContent=e.target.value+'%'; updateApplyEditsState(); });
 
 // ---------- Apply edits enablement + Preview subheading ----------
@@ -1695,8 +1775,8 @@ $('blend').addEventListener('change',invalidateDownload);
 
 // ---------- storage (OPFS) + proxy/export architecture ----------
 // PROXY-FIRST: Generate renders only a 480p-max proxy (fast encode) for
-// editing; the full-quality file is rendered ON DEMAND by Share/Download/
-// Open at the selected Export quality and cached by settings signature.
+// editing; the full-quality file is rendered ON DEMAND by Download at
+// the selected Export quality and cached by settings signature.
 // STORAGE: OPFS (navigator.storage.getDirectory) is feature-detected. When
 // available, uploaded inputs are staged into OPFS files and every render
 // output is streamed out of the converter into an OPFS file in chunks and
@@ -1708,9 +1788,13 @@ $('blend').addEventListener('change',invalidateDownload);
 // uploaded Files directly into the converter via WORKERFS (see
 // mountInputsWorkerFS below) so ffmpeg reads their bytes on demand from
 // the File handles — zero input residency in the converter FS, and it
-// works over plain HTTP (no secure context needed, unlike OPFS). The
-// writeFile-into-MEMFS path above is the exact fallback when mounting is
-// unavailable, throws, or returns false.
+// works over plain HTTP (no secure context needed, unlike OPFS). When
+// mounting is unavailable, throws, or returns false, the fallback is
+// the B12 slice-streamed ingest (writeFileSliceStreamed): the file is
+// written to MEMFS in ≤16 MB slices read from the staged/selected
+// Blob and released after each write — never a whole-file copy. The
+// decode and filmstrip paths use the same mount-first, slice-streamed
+// fallback ingest via ingestSingleFileForFFmpeg.
 function hashStr(str){ var h=5381; for(var i=0;i<str.length;i++){ h=((h<<5)+h+str.charCodeAt(i))|0; } return (h>>>0).toString(36); }
 var opfsRoot=null, opfsStaged={dance:null, song:null};
 function storageGetDirectoryType(){ try{ return typeof (navigator.storage&&navigator.storage.getDirectory); }catch(e){ return 'threw '+(e.message||e); } }
@@ -1794,6 +1878,7 @@ async function detectStorageBackend(){
     await refreshStorageEstimate();
     await opfsStartupSweep();
     await refreshOpfsAreas('boot');
+    try{ await tryRestoreRetainedResult(); }catch(e){ try{ logError('retained-restore',e); }catch(_){} }
     return true;
   }catch(e){
     diagStorage.opfsAvailable=false; diagStorage.note='getDirectory threw '+(e.name||'Error')+': '+(e.message||e);
@@ -2183,11 +2268,157 @@ async function opfsSweepStale(keepNames, reason){
   log('storage: OPFS sweep '+note);
   return {removed:removed, bytes:bytes};
 }
+// ---------- retained result ----------
+// The newest DELIVERED result is retained across reloads/crashes: its
+// OPFS file is kept by the boot sweep (below) and its metadata record
+// (localStorage, a few hundred bytes) lets the next boot restore the
+// result area — Preview + Download — from the file itself, so a save
+// attempt that kills the tab becomes a retry instead of a full
+// regeneration. Staged inputs and superseded results are still swept
+// exactly as before; Start over clears the retained result, and every
+// newly delivered result supersedes the record.
+var RETAINED_KEY='dance-sync.retained-result.v1';
+var restoredResultActive=false;
+var retainedRestoreChecked=false;
+function retentionReadRecord(){
+  try{ var raw=localStorage.getItem(RETAINED_KEY); if(!raw) return null; var rec=JSON.parse(raw); return (rec&&typeof rec==='object'&&rec.opfsName)?rec:null; }catch(e){ return null; }
+}
+function retentionBuildRecord(opfsName, size){
+  var s=(typeof diagResult!=='undefined'&&diagResult.settings)||null;
+  var q='full'; try{ q=currentExportQuality().q; }catch(e){}
+  if(s&&s.q) q=s.q;
+  return {
+    v:1, opfsName:opfsName, size:size, q:q,
+    tStart:(s&&s.tStart!=null)?s.tStart:trimStartSec,
+    tEnd:(s&&s.tEnd!=null)?s.tEnd:trimEnd(),
+    tDur:(s&&s.tDur!=null)?s.tDur:Math.max(0,trimEnd()-trimStartSec),
+    eff:(s&&s.eff!=null)?s.eff:effOffset(),
+    blend:(s&&s.blend!=null)?s.blend:blendVal,
+    detected:(typeof detectedOffset!=='undefined')?detectedOffset:null,
+    srcDur:(typeof danceDur!=='undefined')?danceDur:0,
+    songDur:(typeof songDur!=='undefined')?songDur:0,
+    isDirect:(typeof lastResultIsDirect!=='undefined')?!!lastResultIsDirect:false,
+    savedAt:new Date().toISOString()
+  };
+}
+function retentionSetRecord(opfsName, size){
+  if(!opfsName) return;
+  try{
+    var prev=retentionReadRecord();
+    if(prev&&prev.opfsName===opfsName&&prev.size===size) return;
+    var rec=retentionBuildRecord(opfsName, size);
+    localStorage.setItem(RETAINED_KEY, JSON.stringify(rec));
+    diagStorage.retainedNote='newest delivered result retained: '+opfsName+' ('+fmtBytesMB(size)+') | delivered '+rec.savedAt+' | quality='+(rec.q||'?')+' — kept across reload/crash until Start over or a newer result';
+    log('Retained result: "'+opfsName+'" ('+fmtBytesMB(size)+') is now the retained delivered result — the boot sweep will keep it and the next session restores the result area from it, until Start over or a newer result supersedes it.');
+  }catch(e){}
+}
+function retentionClear(reason){
+  var rec=retentionReadRecord();
+  try{ localStorage.removeItem(RETAINED_KEY); }catch(e){}
+  restoredResultActive=false;
+  diagStorage.retainedNote='no retained result ('+reason+')';
+  return rec;
+}
+function retentionFindOpfsName(blob){
+  var found=null;
+  try{ exportCache.forEach(function(e){ if(!found&&e&&e.blob===blob&&e.opfsName) found=e.opfsName; }); }catch(e){}
+  if(!found){ try{ outCache.forEach(function(e){ if(!found&&e&&e.blob===blob&&e.opfsName) found=e.opfsName; }); }catch(e){} }
+  if(!found&&typeof liveExport!=='undefined'&&liveExport&&liveExport.blob===blob&&liveExport.opfsName) found=liveExport.opfsName;
+  return found;
+}
+function retentionSyncFromResult(blob){
+  // Called whenever a result is delivered to the screen: the newest
+  // delivered result becomes the retained one.
+  if(!blob) return;
+  var name=retentionFindOpfsName(blob);
+  if(name){ retentionSetRecord(name, blob.size); return; }
+  // In-memory (MEMFS) delivery — no OPFS file exists to retain.
+  if(retentionReadRecord()){ try{ localStorage.removeItem(RETAINED_KEY); }catch(e){} }
+  diagStorage.retainedNote='latest result was delivered in memory (no OPFS file) — nothing retained across reload';
+}
+async function tryRestoreRetainedResult(){
+  if(retainedRestoreChecked) return; retainedRestoreChecked=true;
+  var rec=retentionReadRecord();
+  if(!rec) return;
+  if(!opfsRoot||!diagStorage.opfsAvailable){ log('Retained result: a retained result is recorded ('+rec.opfsName+') but OPFS is unavailable this session — it cannot be restored.'); return; }
+  if(resultBlob||danceFile||songFile) return; // a live session already has state — never clobber it
+  var file=null;
+  try{ var h=await opfsRoot.getFileHandle(rec.opfsName); file=await h.getFile(); }catch(e){ file=null; }
+  if(!file||!file.size){
+    log('Retained result: the recorded file '+rec.opfsName+' is no longer in OPFS — dropping the stale retention record.');
+    retentionClear('retained file missing at boot');
+    return;
+  }
+  log('Retained result: restoring the previous session\'s delivered result "'+rec.opfsName+'" ('+fmtBytesMB(file.size)+') — kept across the boot sweep by result retention.');
+  if(rec.size!=null&&file.size!==rec.size) log('Retained result: the file size differs from the record ('+file.size+' vs '+rec.size+' bytes) — restoring the file as found.');
+  markDiskBackedResultFile(file);
+  // Restore the editor state the result was generated with, so the
+  // result area, the diagnostics settings snapshot, and the export
+  // signature all describe the retained file (the source uploads
+  // themselves are not restored — they were never persisted).
+  try{
+    if(rec.detected!=null) detectedOffset=rec.detected;
+    if(rec.srcDur) danceDur=rec.srcDur;
+    if(rec.songDur) songDur=rec.songDur;
+    trimStartSec=rec.tStart||0;
+    trimEndSec=(rec.tEnd!=null&&rec.srcDur&&rec.tEnd<rec.srcDur-0.01)?rec.tEnd:null;
+    blendVal=rec.blend||0;
+    audioPos=-(rec.eff||0);
+    var qr=document.querySelector('input[name=quality][value="'+(rec.q||'full')+'"]'); if(qr) qr.checked=true;
+    var bl=$('blend'); if(bl) bl.value=Math.round(blendVal*100);
+    var bv=$('blendVal'); if(bv) bv.textContent=Math.round(blendVal*100)+'%';
+    syncOffsetInput();
+  }catch(e){}
+  // Arm the export cache with the retained file so showResult wires
+  // Download to it directly (no re-render, no source files).
+  try{ var sig=currentExportSignature(); exportCachePut(sig,{blob:file, opfsName:rec.opfsName, q:rec.q||'full'}); }catch(e){}
+  restoredResultActive=true;
+  showResult(file,{isDirect:!!rec.isDirect});
+  try{ markProgressShown(); }catch(e){}
+  // Deterministic restore visibility (B17): in a fresh flow #playerSec
+  // is visible by completion time because picking the Video file showed
+  // it; a restore has no file pick, so without this the restored result
+  // sits populated inside a hidden section. Show the section explicitly
+  // so every successful restore ends in exactly the visible state a
+  // fresh completion produces (Preview header + subheading + player +
+  // Download row + editor — all wired by showResult/showEditor above —
+  // and Start over, via markProgressShown/updateNewBtn).
+  try{ var _psec=$('playerSec'); if(_psec) _psec.classList.add('show'); }catch(e){}
+  diagStorage.retainedNote='retained result restored as the current result: '+rec.opfsName+' ('+fmtBytesMB(file.size)+') | delivered '+(rec.savedAt||'unknown');
+  log('Retained result recovered: "'+rec.opfsName+'" ('+file.size+' bytes, '+fmtBytesMB(file.size)+') | delivered at '+(rec.savedAt||'unknown')+' | quality='+(rec.q||'?')+' | trim '+Number(rec.tStart||0).toFixed(3)+'s to '+Number(rec.tEnd||0).toFixed(3)+'s | effective offset='+Number(rec.eff||0).toFixed(3)+'s | detected offset='+(rec.detected!=null?Number(rec.detected).toFixed(3)+'s':'?')+' | blend='+Math.round((rec.blend||0)*100)+'% — Preview + Download restored from the retained OPFS file (journal metadata above); no regeneration needed.');
+  // B17: the restore has fully settled and is, so far, this session's
+  // ONLY activity — close the session journal cleanly. showResult set
+  // diagStage='result' (normalized to 'delivery') and its log lines
+  // persisted the journal with completed=false; left like that, the
+  // NEXT load would misread this view-only visit as a session that died
+  // mid-delivery and show the recovery notice + a recovered section.
+  // Marking completed here disarms nothing genuine: a Download tap
+  // re-arms via journalDeliveryPending() before the platform call, and
+  // starting a new generation re-arms via journalBeginRun(). clean is
+  // deliberately NOT passed, so a recovered record from an earlier
+  // genuine crash (if one is being shown) is left for dismissal or a
+  // clean run, exactly as before.
+  log('Retained result restore settled — session journal marked completed: this visit only restored/viewed the retained result and started no work, so the session closes cleanly (no recovery notice on the next load).');
+  try{ journalMarkCompleted(); }catch(e){}
+}
 async function opfsStartupSweep(){
   if(diagStorage.sweepDone) return;
   diagStorage.sweepDone=true;
   if(!opfsRoot) return;
-  try{ await opfsSweepStale(null,'startup — files left over from previous sessions'); }
+  try{
+    // Result retention: the newest DELIVERED result is kept across
+    // the boot sweep so a crashed save becomes a retry, not a
+    // regeneration. Staged inputs and superseded results are still
+    // swept exactly as before.
+    var keep=null;
+    var rec=retentionReadRecord();
+    if(rec&&rec.opfsName){
+      keep={}; keep[rec.opfsName]=true;
+      diagStorage.retainedNote='retained result '+rec.opfsName+' ('+fmtBytesMB(rec.size)+') delivered '+(rec.savedAt||'unknown')+' — kept across the boot sweep';
+      log('storage: boot sweep keeps the retained delivered result '+rec.opfsName+' ('+fmtBytesMB(rec.size)+') — result retention');
+    }
+    await opfsSweepStale(keep, keep?('startup — staged inputs + superseded results swept; newest delivered result retained'):('startup — files left over from previous sessions'));
+  }
   catch(e){ logError('opfs-startup-sweep',e); }
 }
 async function opfsCleanupAfterRender(keepOpfsName){
@@ -2251,6 +2482,191 @@ async function tryMountOPFS(ff){
     return !!r;
   }catch(e){ diagStorage.mountSupported=false; log('storage: ffmpeg mount("OPFS") threw '+(e.name||'Error')+': '+(e.message||e)+' — renders run on MEMFS with OPFS stream-out of outputs'); return false; }
 }
+// ---------- B13: streamed render output (converter → OPFS as produced) ----------
+// The converter worker (assets/ffmpeg/814.ffmpeg.js) mounts a custom
+// filesystem at /out (STREAMOPFS) backed by an OPFS sync access handle
+// it opens per render. A render whose output path is /out/<name> has
+// every byte the muxer writes forwarded positionally to the OPFS file
+// <name> in slices of at most 16 MB, synchronously as produced — the
+// output never accumulates in converter (wasm) memory, so peak render
+// memory is independent of output size. (Before B13 the output grew
+// inside MEMFS; a ~1.02 GB stage-2 copy mux on a 1,067,264,984-byte
+// HEVC input killed the iOS tab at the 60% milestone, before the
+// finished-file slice delivery could ever run.) faststart is still
+// ffmpeg's own -movflags +faststart: its second pass reads the moov
+// back and relocates it in place through the same handle (the FS
+// serves positional reads), so the delivered OPFS file is a valid
+// faststart MP4 — moov before mdat — of exactly the render's duration,
+// achieved with no whole-file re-processing on either side.
+// Fallbacks, all journal-logged: MEMFS output (dance-synced.mp4 +
+// readRenderOutput slice delivery) is used only when this browser's
+// probe found streaming unavailable at all, so the render was never
+// addressed to /out — and, since round 2, only when the render's
+// expected output is within the in-memory limit
+// (guardLargeRenderWithoutStreamOut): a large render with streaming
+// unavailable refuses before encoding instead of silently taking
+// the path that kills the tab. If /out exists but arming the stream fails for a
+// specific render, the worker refuses the exec BEFORE the mux starts
+// and the render ends with an honest error — a render planned for
+// streamed output never falls back to accumulating its output in
+// converter memory, which is the exact B13 death path. And
+// claimRenderOutput only adopts the OPFS file when this render
+// actually targeted /out, so a stale streamed file can never be
+// mistaken for a fresh result.
+// Availability is probed once per converter instance and cached in
+// diagStorage.streamOutVerdict, mirroring the OPFS / WORKERFS mount
+// probes. The worker posts [streamout] lines on the converter log
+// channel as the render proceeds (armed · slices forwarded / total
+// bytes · closed with final counts), so a diagnostics dump proves the
+// output streamed out of the converter.
+//
+// B13 round 2: round 1's probe was a single listDir('/out') whose
+// failure surfaced only as "ErrnoError: FS error" — in this core
+// build EVERY ErrnoError carries the literal message "FS error" (the
+// errno lives on a property the stock worker error channel drops),
+// so the dump could not say WHICH step failed, or even whether the
+// worker contained the filesystem at all. (In the round-2 device
+// evidence the deployed class worker was a stock build with no
+// STREAMOPFS in it: /out was never created, the probe's ENOENT was
+// reported as a bare "FS error", and the render silently took the
+// in-memory path that kills the tab.) The probe below therefore
+// verifies and journals EVERY step — the worker's own setup report
+// from converter load, the root listing (is "out" even mounted?),
+// and the /out listing — and composes the full error (name, message,
+// errno when carried, failing operation) into streamOutReason.
+var streamOutProbeFF=null;
+function streamOutErrText(e){
+  if(!e) return 'unknown error';
+  if(typeof e==='string') return e;
+  var t=(e.name||'Error')+': '+(e.message||String(e));
+  if(e.errno!==undefined&&e.errno!==null) t+=' [errno '+e.errno+']';
+  return t;
+}
+async function tryStreamOut(ff){
+  if(streamOutProbeFF===ff&&diagStorage.streamOutVerdict!=null) return diagStorage.streamOutVerdict;
+  streamOutProbeFF=ff;
+  var steps=[];
+  function step(name, ok, detail){
+    steps.push(name+'='+(ok?'ok':'FAILED'));
+    log('storage: streamed-output probe step "'+name+'": '+(ok?'ok':'FAILED')+(detail?(' — '+detail):''));
+  }
+  try{
+    if(!ff||typeof ff.listDir!=='function') throw new Error('the converter wrapper exposes no listDir()');
+    step('wrapper listDir available', true);
+    // What did the worker itself report at converter load? Its setup
+    // posts one [streamout] line per step plus a summary; the page's
+    // log handler keeps the latest setup line in
+    // diagStorage.streamOutSetupLine. NO line at all means the loaded
+    // class worker does not contain the streamed-output filesystem
+    // (stock or stale worker script) — /out then cannot exist.
+    if(diagStorage.streamOutSetupLine){
+      step('worker setup report at load', diagStorage.streamOutSetupLine.indexOf('mounted at /out')!==-1, diagStorage.streamOutSetupLine);
+    } else {
+      step('worker setup report at load', false, 'the converter worker posted NO [streamout] setup line at load — the loaded class worker (814.ffmpeg.js) does not contain the STREAMOPFS streamed-output filesystem (stock or stale worker build), so /out was never created');
+    }
+    var rootList=null;
+    try{ rootList=await ff.listDir('/'); }
+    catch(e){ step('list converter root "/"', false, 'operation listDir("/") raised '+streamOutErrText(e)); throw e; }
+    var hasOut=false, rootNames=[];
+    for(var i=0;i<rootList.length;i++){ if(rootList[i]&&rootList[i].name){ rootNames.push(rootList[i].name); if(rootList[i].name==='out') hasOut=true; } }
+    step('list converter root "/"', true, hasOut?('"out" mount point is present in the root listing'):('"out" is NOT present in the root listing (root contains: '+rootNames.join(', ')+') — the STREAMOPFS mount never happened in this worker'));
+    var outList=null;
+    try{ outList=await ff.listDir('/out'); }
+    catch(e2){ step('list "/out" (STREAMOPFS mount)', false, 'operation listDir("/out") raised '+streamOutErrText(e2)); throw e2; }
+    step('list "/out" (STREAMOPFS mount)', true, outList.length+' entr'+(outList.length===1?'y':'ies')+' listed');
+    diagStorage.streamOutVerdict=true; diagStorage.streamOutReason='';
+    log('storage: streamed output available (B13) — the converter worker has /out mounted (STREAMOPFS); renders addressed there forward their output to OPFS in ≤16 MB slices as produced, so converter memory never accumulates the output | probe steps: '+steps.join(' · '));
+    return true;
+  }catch(e){
+    diagStorage.streamOutVerdict=false; diagStorage.streamOutReason=streamOutErrText(e);
+    log('storage: streamed output unavailable ('+diagStorage.streamOutReason+') | probe steps: '+steps.join(' · ')+' — the legacy MEMFS output + slice-streamed delivery now applies ONLY to renders whose expected output is within the in-memory limit; a render expecting more refuses before encoding (B13 round 2 guard, see guardLargeRenderWithoutStreamOut)');
+    return false;
+  }
+}
+// ---------- B13 round 2: no silent killer fallback ----------
+// Round 1 fell back to MEMFS output whenever the probe failed — the
+// exact unbounded path that kills the tab mid-mux on a large render
+// (the output accumulates in converter memory faster than any
+// finished-file delivery can save it). Now: when streamed output is
+// unavailable, a render whose EXPECTED output exceeds
+// STREAM_OUT_REQUIRED_BYTES throws here — before any mux starts —
+// and the throw lands in the render's existing handled-failure path
+// (clear message, journal finished/handled, no tab death, no partial
+// result presented as success). Renders at or under the limit keep
+// the legacy MEMFS + slice-streamed delivery, and the journal says
+// which branch each render took and why.
+var STREAM_OUT_REQUIRED_BYTES=300*1024*1024;
+// Expected size of a stream-copy mux result: the video input's bytes
+// pro-rated by the trimmed fraction of the source duration, plus the
+// stage-1 AAC audio at ~192 kbps. Also used (conservatively) for the
+// full-quality single-graph encode, whose output tracks source size.
+function estimateCopiedOutputBytes(dFile, tDur){
+  var srcDur=(typeof danceDur==='number'&&danceDur>0)?danceDur:0;
+  var frac=srcDur>0?Math.max(0,Math.min(1,tDur/srcDur)):1;
+  return Math.round((dFile&&dFile.size?dFile.size:0)*frac+24000*Math.max(0,tDur));
+}
+function guardLargeRenderWithoutStreamOut(label, estBytes, streamed){
+  // The guard keys on THIS render's actual output target, not just
+  // the probe verdict: streamOutPathFor can decline /out for reasons
+  // beyond the probe (notably OPFS itself being unavailable in the
+  // browser, so there is no disk-backed destination to stream to),
+  // and any render that is not actually streamed accumulates its
+  // output in converter memory exactly like the B13 death path.
+  if(streamed) return;
+  var why=diagStorage.streamOutVerdict?('the streamed-output probe passed, but this render is not targeted at /out (OPFS available='+String(diagStorage.opfsAvailable)+')'):('the streamed-output probe failed: '+diagStorage.streamOutReason);
+  if(estBytes>STREAM_OUT_REQUIRED_BYTES){
+    log('storage: '+label+' REFUSED before encoding — expected output '+fmtBytesMB(estBytes)+' exceeds the '+fmtBytesMB(STREAM_OUT_REQUIRED_BYTES)+' in-memory limit and '+why+'. Accumulating this output in converter memory is the B13 tab-death path, so the render fails here, before any mux starts, with a handled error.');
+    throw new Error('This video is too large to render safely in this browser session: the result would be about '+fmtSize(estBytes)+', and streamed saving is unavailable ('+why+'), so the video would have to build up in the converter\u2019s memory \u2014 which crashes the tab on large videos. The render was stopped before it started. Reload the page and try again; if it keeps happening, copy the diagnostics (Details \u2192 Copy diagnostics) and send them.');
+  }
+  log('storage: '+label+' — this render is not streamed ('+why+'), but the expected output ('+fmtBytesMB(estBytes)+') is within the '+fmtBytesMB(STREAM_OUT_REQUIRED_BYTES)+' in-memory limit; using the legacy MEMFS output + slice-streamed delivery');
+}
+// The converter-FS output path a render should use for the OPFS result
+// file opfsName: the streamed /out path when streaming is available,
+// otherwise the legacy MEMFS name every caller already delivers from.
+function streamOutPathFor(opfsName){
+  if(diagStorage.streamOutVerdict&&diagStorage.opfsAvailable&&opfsName) return '/out/'+opfsName;
+  return 'dance-synced.mp4';
+}
+// Existence check that understands both output locations (root MEMFS
+// files and /out streamed files). On any doubt it answers true, like
+// the checks it replaces — a false negative would trigger a spurious
+// retry/failure, a false positive is caught by the caller's read-out.
+async function fsPathExists(ff, p){
+  try{
+    var dir='/', name=p;
+    if(p.indexOf('/out/')===0){ dir='/out'; name=p.slice(5); }
+    var list=await ff.listDir(dir);
+    for(var i=0;i<list.length;i++){ if(list[i]&&list[i].name===name) return true; }
+    return false;
+  }catch(e){ return true; }
+}
+// Delivers a render output, streamed-first. When this render targeted
+// /out (streamedTarget) and the OPFS file is present and non-empty,
+// the OPFS file IS the result — it was written slice-by-slice as the
+// render produced it; there is no converter-FS copy to read out and no
+// post-render delivery pass. Otherwise (the render never targeted
+// /out because streaming is unavailable on this browser) the legacy
+// readRenderOutput runs unchanged.
+async function claimRenderOutput(ff, fsName, opfsName, streamedTarget){
+  if(streamedTarget&&opfsName&&opfsRoot){
+    var sFile=null;
+    try{ var sh=await opfsRoot.getFileHandle(opfsName); sFile=await sh.getFile(); }catch(e){ sFile=null; }
+    if(sFile&&sFile.size>0){
+      markDiskBackedResultFile(sFile);
+      log('storage: render output delivered streamed — OPFS file '+opfsName+' ('+fmtBytesMB(sFile.size)+') was written by the converter worker in ≤16 MB slices as the render produced it (B13); no converter-FS output accumulated and no post-render slice delivery was needed');
+      diagStorage.streamOutNote='last render: streamed to OPFS '+opfsName+' ('+fmtBytesMB(sFile.size)+') via /out sync-handle slices as produced (B13)';
+      try{ await ff.deleteFile('/out/'+opfsName); }catch(e){}
+      // A same-named MEMFS output can only be a stale leftover of an
+      // earlier render (this render wrote to /out) — remove it so it
+      // is never mistaken for a later render's output.
+      try{ await ff.deleteFile(fsName); }catch(e){}
+      await opfsCleanupAfterRender(opfsName);
+      return {blob:sFile, backend:'OPFS', opfsName:opfsName, streamed:true};
+    }
+    log('storage: this render targeted streamed output ('+opfsName+') but no non-empty OPFS file was found — the streamed write did not complete; delivering '+fsName+' with the slice-streamed delivery if a converter-FS output exists');
+  }
+  return await readRenderOutput(ff, fsName, opfsName);
+}
 // ---------- WORKERFS input mounting ----------
 // mountInputsWorkerFS(ff, dFile, sFile): mounts each File at its own
 // mount point (/mnt/dance, /mnt/song) with the wrapper's mount API and
@@ -2261,8 +2677,8 @@ async function tryMountOPFS(ff){
 // both inputs (~396 MB) AND the growing ~290 MB output during the
 // encode. Returns {ok:true, danceIn, songIn} or {ok:false, reason}; a
 // failed verdict is cached for the session (diagStorage.workerfsVerdict)
-// so later renders go straight to the writeFile fallback — the caller
-// still logs the per-render mount line either way. Callers must
+// so later renders go straight to the slice-streamed fallback — the
+// caller still logs the per-render mount line either way. Callers must
 // unmountInputsWorkerFS(ff) after the render.
 var WORKERFS_DANCE_DIR='/mnt/dance', WORKERFS_SONG_DIR='/mnt/song';
 async function mountInputsWorkerFS(ff, dFile, sFile){
@@ -2292,11 +2708,138 @@ async function unmountInputsWorkerFS(ff){
   try{ await ff.unmount(WORKERFS_DANCE_DIR); }catch(e){}
   try{ await ff.unmount(WORKERFS_SONG_DIR); }catch(e){}
 }
+// ---------- B12: bounded-memory ingest of user files ----------
+// Ingesting ANY user file into the converter — decode/analysis,
+// filmstrip, and every render/export fallback — must never
+// materialize the whole file in JS or wasm memory at once (the
+// 1,067,264,984-byte HEVC input killed the tab at decode: fetchFile
+// built a whole-file Uint8Array and writeFile then copied it into
+// MEMFS, ~2x the file size at peak). Two mechanisms, both logged per
+// file so a diagnostics dump proves which one ran:
+//   1. MOUNTED (preferred): the File (selected file or its OPFS-staged
+//      copy — both are disk-backed Blob handles) is mounted via
+//      WORKERFS and ffmpeg reads it on demand; nothing is copied.
+//   2. SLICE-STREAMED (fallback when mounting is unavailable): the
+//      file is read from its (OPFS-staged, when present) Blob in
+//      slices of at most INGEST_SLICE_BYTES, each slice written to
+//      the converter FS and released before the next is read; for
+//      multi-slice files the parts are then concatenated INSIDE the
+//      converter by a raw data copy (byte-exact, no JS copy), so the
+//      peak extra JS memory stays ~one slice regardless of file size.
+var INGEST_SLICE_BYTES=16*1024*1024; // 16 MB — at most the 32 MB bound, one slice in flight
+var ingestMountSeq=0;
+async function mountSingleFileWorkerFS(ff, file, label){
+  if(diagStorage.workerfsVerdict===false) return {ok:false, reason:'WORKERFS mount already reported unsupported this session ('+diagStorage.workerfsReason+')'};
+  if(!ff||typeof ff.mount!=='function'){ diagStorage.workerfsVerdict=false; diagStorage.workerfsReason='the converter wrapper exposes no mount()'; return {ok:false, reason:diagStorage.workerfsReason}; }
+  if(!file) return {ok:false, reason:'source File is missing'};
+  var mountDir='/mnt/ingest-'+(++ingestMountSeq)+'-'+String(label||'file').replace(/[^a-z0-9]+/gi,'');
+  try{
+    try{ await ff.createDir('/mnt'); }catch(e){}
+    try{ await ff.createDir(mountDir); }catch(e){}
+    var r=await ff.mount('WORKERFS',{files:[file]},mountDir);
+    if(r===false) throw new Error('mount("WORKERFS") returned false — the bundled core does not expose the WORKERFS filesystem');
+    diagStorage.workerfsVerdict=true;
+    return {ok:true, path:mountDir+'/'+file.name, mountDir:mountDir};
+  }catch(e){
+    try{ await ff.unmount(mountDir); }catch(_){}
+    diagStorage.workerfsVerdict=false; diagStorage.workerfsReason=(e&&e.message)||String(e);
+    return {ok:false, reason:diagStorage.workerfsReason};
+  }
+}
+async function unmountSingleFileWorkerFS(ff, mountDir){
+  if(!ff||!mountDir) return;
+  try{ await ff.unmount(mountDir); }catch(e){}
+}
+// Resolve the best ingest source for a user file: the OPFS-staged copy
+// when one is staged for it (disk-backed; slice reads come from it),
+// otherwise the selected File itself (also a disk-backed Blob handle —
+// Blob.slice reads never load the whole file).
+async function resolveIngestSource(file){
+  try{
+    var role=null;
+    if(typeof danceFile!=='undefined'&&danceFile&&fileKey(file)===fileKey(danceFile)) role='dance';
+    else if(typeof songFile!=='undefined'&&songFile&&fileKey(file)===fileKey(songFile)) role='song';
+    if(role){
+      var staged=await getInputFileForRender(role);
+      if(staged) return {blob:staged, fromOpfs:(staged!==file)};
+    }
+  }catch(e){}
+  return {blob:file, fromOpfs:false};
+}
+// Slice-streamed ingest into the converter FS. execFn(args) runs one
+// ffmpeg exec with the caller's lock discipline (callers already
+// inside withFFmpegLock pass a direct exec; callers outside wrap the
+// exec in withFFmpegLock) — used only for the multi-slice byte-exact
+// assembly. Logs the mechanism + slice count for this file.
+async function writeFileSliceStreamed(ff, destName, sourceBlob, label, displayName, execFn){
+  var total=(sourceBlob&&sourceBlob.size)||0;
+  var sliceCount=Math.max(1, Math.ceil(total/INGEST_SLICE_BYTES));
+  log('ingest ['+label+']: '+(displayName||destName)+' ('+fmtBytesMB(total)+') — slice-streamed into converter FS as '+destName+' in '+sliceCount+' slice(s) of at most '+(INGEST_SLICE_BYTES/1048576)+' MB (slices read from the staged/selected Blob and released after each write; peak extra JS memory ≈ one slice; no whole-file copy)');
+  if(sliceCount===1){
+    var singleBuf=await sourceBlob.arrayBuffer();
+    var singleU8=new Uint8Array(singleBuf);
+    await withTimeout(ff.writeFile(destName, singleU8),120000,'Writing slice-streamed '+destName);
+    singleU8=null; singleBuf=null;
+    log('ingest ['+label+']: '+(displayName||destName)+' — slice-streamed ingest complete: '+sliceCount+' slice(s), '+fmtBytesMB(total)+' written to '+destName);
+    return {sliceCount:sliceCount};
+  }
+  var partNames=[];
+  for(var si=0; si<sliceCount; si++){
+    var start=si*INGEST_SLICE_BYTES, end=Math.min(total, start+INGEST_SLICE_BYTES);
+    var partName=destName+'.part'+si;
+    var sliceBlob=sourceBlob.slice(start, end);
+    var sliceBuf=await sliceBlob.arrayBuffer();
+    sliceBlob=null;
+    var sliceU8=new Uint8Array(sliceBuf);
+    await withTimeout(ff.writeFile(partName, sliceU8),120000,'Writing ingest slice '+(si+1)+'/'+sliceCount+' of '+(displayName||destName));
+    sliceU8=null; sliceBuf=null; // release this slice before reading the next
+    partNames.push(partName);
+    log('ingest ['+label+']: '+(displayName||destName)+' — slice '+(si+1)+'/'+sliceCount+' written ('+fmtBytesMB(end)+' of '+fmtBytesMB(total)+' staged in converter FS parts)');
+  }
+  // Assemble the parts into destName INSIDE the converter with a raw
+  // data stream copy (concat protocol over the part files → data
+  // muxer): byte-exact concatenation, performed by ffmpeg itself, so
+  // no whole-file buffer ever exists in JS.
+  var concatArg='concat:'+partNames.join('|');
+  var asmArgs=['-y','-protocol_whitelist','file,concat,data,crypto','-f','data','-i',concatArg,'-map','0','-c','copy','-f','data',destName];
+  log('ingest ['+label+']: '+(displayName||destName)+' — assembling '+sliceCount+' FS parts into '+destName+' inside the converter (raw data concat copy, byte-exact; no JS copy) | ffmpeg args='+asmArgs.join(' '));
+  var asmRc=await execFn(asmArgs);
+  if(asmRc!=null&&asmRc!==0) throw new Error('slice-streamed ingest assembly failed for '+(displayName||destName)+' (ffmpeg exit code '+asmRc+')');
+  for(var pi=0; pi<partNames.length; pi++){ try{ await ff.deleteFile(partNames[pi]); }catch(e){} }
+  log('ingest ['+label+']: '+(displayName||destName)+' — slice-streamed ingest complete: '+sliceCount+' slice(s), '+fmtBytesMB(total)+' assembled at '+destName+'; parts deleted; peak extra JS memory ≈ one slice');
+  return {sliceCount:sliceCount};
+}
+// Unified single-file ingest for the decode and filmstrip paths (both
+// run inside withFFmpegLock): mount first, slice-stream as fallback.
+// Returns {path, mode:'mounted'|'slice-streamed', mountDir, destName,
+// cleanup(ff)} — call cleanup after the file has been consumed.
+async function ingestSingleFileForFFmpeg(ff, file, destName, label){
+  var src=await resolveIngestSource(file);
+  var mountFile=src.blob||file;
+  var mnt=await mountSingleFileWorkerFS(ff, mountFile, label);
+  if(mnt.ok){
+    log('ingest ['+label+']: '+file.name+' ('+fmtBytesMB(file.size)+') — mounted via WORKERFS at '+mnt.path+' (source: '+(src.fromOpfs?'OPFS-staged copy':'selected File')+'; ffmpeg reads on demand; no whole-file copy in JS or converter memory)');
+    return {path:mnt.path, mode:'mounted', mountDir:mnt.mountDir, destName:destName};
+  }
+  log('ingest ['+label+']: '+file.name+' — WORKERFS mount unavailable ('+mnt.reason+'); falling back to slice-streamed ingest');
+  await writeFileSliceStreamed(ff, destName, src.blob, label, file.name, async function(args){ return await withTimeout(ff.exec(args),300000,'Assembling slice-streamed ingest of '+file.name); });
+  return {path:destName, mode:'slice-streamed', mountDir:null, destName:destName};
+}
+async function cleanupSingleFileIngest(ff, ingest){
+  if(!ff||!ingest) return;
+  if(ingest.mode==='mounted'){ await unmountSingleFileWorkerFS(ff, ingest.mountDir); }
+  else { try{ await ff.deleteFile(ingest.destName); }catch(e){} }
+}
 // Shared encode-argument builder for BOTH the proxy and the export render.
 // The audio pipeline is identical in both: detected sync offset (including
 // negative offsets with adelay + room-audio gap fill), trims, room-audio
 // blend, and audio always exactly the video duration (filter atrim/apad to
-// tDur plus the output -t tDur cap). Only the video leg differs: proxy =
+// tDur plus the output -t tDur cap). Room audio outside the clean track's
+// overlap (the leading gap, and any trailing region past the clean track's
+// end) plays at the SAME blend level as room audio in the overlap — not
+// unconditionally at full volume — so at the default 0% blend those
+// regions are silent.
+// Only the video leg differs: proxy =
 // scale to max 480p + ultrafast; export = selected quality (Full = stream
 // copy, otherwise scale + veryfast/crf20 as before).
 function buildRenderArgs(o){
@@ -2314,20 +2857,20 @@ function buildRenderArgs(o){
   if(encHeight&&!o.audioOnly) fc.push('[0:v]scale=-2:min('+encHeight+'\\,ih)[v]');
   var gapSec=songStart<0?-songStart:0;
   if(gapSec>0){
-    log('Encode: negative offset — clean audio begins '+gapSec.toFixed(3)+'s into the clip; leading gap filled with the video\'s original audio at full level'+(blendVal>0?(' · room blend '+Math.round(blendVal*100)+'% applies after the gap'):'')+'.');
+    log('Encode: negative offset — clean audio begins '+gapSec.toFixed(3)+'s into the clip; leading gap filled with room audio at blend level '+Math.round(blendVal*100)+'%'+(gapSec>=tDur?' (the gap spans the whole clip — no overlap with the clean track, so the entire clip is room audio at that level)':'')+'.');
     if(gapSec>=tDur){
-      fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[a]');
+      fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+'[a]');
     } else {
       fc.push('[1:a]adelay='+delayMs+'|'+delayMs+',apad,atrim=0:'+tDur.toFixed(3)+'[clean]');
       fc.push('[0:a]atrim=0:'+tDur.toFixed(3)+',apad,atrim=0:'+tDur.toFixed(3)+'[room]');
       if(blendVal>0){
         fc.push('[room]asplit=2[roomGap][roomTailSrc]');
-        fc.push('[roomGap]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
+        fc.push('[roomGap]atrim=0:'+gapSec.toFixed(3)+',volume='+blendVal.toFixed(2)+',asetpts=N/SR/TB[gapA]');
         fc.push('[roomTailSrc]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',volume='+blendVal.toFixed(2)+',asetpts=N/SR/TB[roomTail]');
         fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[cleanTail]');
         fc.push('[cleanTail][roomTail]amix=inputs=2:duration=first:normalize=0[tail]');
       } else {
-        fc.push('[room]atrim=0:'+gapSec.toFixed(3)+',asetpts=N/SR/TB[gapA]');
+        fc.push('[room]atrim=0:'+gapSec.toFixed(3)+',volume='+blendVal.toFixed(2)+',asetpts=N/SR/TB[gapA]');
         fc.push('[clean]atrim='+gapSec.toFixed(3)+':'+tDur.toFixed(3)+',asetpts=N/SR/TB[tail]');
       }
       fc.push('[gapA][tail]concat=n=2:v=0:a=1,apad,atrim=0:'+tDur.toFixed(3)+'[a]');
@@ -2781,13 +3324,12 @@ async function tryWebCodecsProxy(ctx){
     if(muxed.startOffsetUs>0) log('Proxy (webcodecs) mux: encoder used frame reordering — edit-list start offset '+muxed.startOffsetUs+'µs written so presentation starts at exactly 0 (no timestamps clamped).');
     await ctx.ff.writeFile('proxy-video-wc.mp4', muxed.bytes);
     wcVideoMade=true;
-    var mArgs=['-y','-i','proxy-video-wc.mp4','-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',ctx.tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
+    var mArgs=['-y','-i','proxy-video-wc.mp4','-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',ctx.tDur.toFixed(3),'-movflags','+faststart',(ctx.outFsPath||'dance-synced.mp4')];
     log('Proxy (webcodecs) mux: video-only MP4 ('+fmtBytesMB(muxed.bytes.length)+') + stage-1 audio → ffmpeg stream-copy mux (audio starts at exactly 0; video timestamps start at 0) | faststart: -movflags +faststart applied to the final mux; the hand-rolled muxer already writes moov before mdat for proxy-video-wc.mp4 | ffmpeg args='+mArgs.join(' '));
     var muxRc=null;
     await cancellable(withFFmpegLock(async function(){ muxRc=await withTimeout(ctx.ff.exec(mArgs),600000,'WebCodecs proxy final mux'); }));
     if(muxRc!=null&&muxRc!==0) throw wcFail('the final stream-copy mux failed (ffmpeg exit code '+muxRc+')');
-    var chkThere=false;
-    try{ var chkDir=await ctx.ff.listDir('/'); for(var chi=0; chi<chkDir.length; chi++){ if(chkDir[chi]&&chkDir[chi].name==='dance-synced.mp4'){ chkThere=true; break; } } }catch(e){ chkThere=true; }
+    var chkThere=await fsPathExists(ctx.ff, ctx.outFsPath||'dance-synced.mp4');
     if(!chkThere) throw wcFail('the final stream-copy mux produced no output');
     try{ await ctx.ff.deleteFile('stage1-audio.m4a'); stage1Made=false; }catch(e){}
     try{ await ctx.ff.deleteFile('proxy-video-wc.mp4'); wcVideoMade=false; }catch(e){}
@@ -2854,8 +3396,8 @@ async function freeConverterInputs(ff, dExt, sExt){
 //      slice is written with handle.write(buffer, {at: offset}),
 //      looping over short writes, then flush() once at the end,
 //      close(), and the final size verified from getFile();
-//   3. the delivered result IS the resulting OPFS File — Preview,
-//      Share, Download and Open all serve from it.
+//   3. the delivered result IS the resulting OPFS File — Preview and
+//      Download serve from it.
 // Peak extra JS memory during delivery is ~one slice, independent of
 // the output size. The full output never exists as a JS buffer.
 // Recovery from a mid-write failure: (a) the sync handle is closed
@@ -3038,6 +3580,7 @@ async function readRenderOutput(ff, fsOutName, opfsName){
       // result; failed attempts' partials were already deleted inside
       // the stream-out.
       try{ await ff.deleteFile(fsOutName); log('memory: deleted FS output '+fsOutName+' ('+fmtBytesMB(res.totalBytes)+') after slice-streaming it to OPFS'); }catch(delErr){ log('memory: FS output delete after OPFS stream failed: '+(delErr.message||delErr)); }
+      markDiskBackedResultFile(res.file);
       log('memory: output delivered from the disk-backed OPFS file '+res.opfsName+' ('+fmtBytesMB(res.totalBytes)+') — slice-streamed; no full in-memory copy was built at any point');
       // Post-render cleanup keeps the current result's delivered file
       // (res.opfsName) and removes staged inputs + superseded outputs.
@@ -3084,8 +3627,8 @@ async function readRenderOutput(ff, fsOutName, opfsName){
   return {blob:blob, backend:'MEMFS', opfsName:null};
 }
 // ---------- Processing progress bar (export only) ----------
-// A second, independent progress bar sitting between the Share/Download/
-// Open row and the "Edit video" header, visible only while a full-quality
+// A second, independent progress bar sitting between the Download row
+// and the "Edit video" header, visible only while a full-quality
 // export renders. Same discrete-
 // event style as the main ladder: 2% render requested · 8% inputs staged
 // to converter · 15% encode starts · ffmpeg progress 15%->95% · 96%
@@ -3103,8 +3646,24 @@ var exportProgLo=15, exportProgHi=95; // ffmpeg-progress window for the CURRENT 
 function progressForExport(ratio){ if(ratio==null) return; setExportBarPct(exportProgLo+Math.max(0,Math.min(1,ratio))*(exportProgHi-exportProgLo)); var m=Math.floor(ratio*10)*10; if(m>exportLastMilestone){ exportLastMilestone=m; log('Export progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } }
 // ---------- export cache + live export ----------
 var exportCache=new Map(), exportOrder=[];
-var liveExport=null; // {sig, file, blob, url, canShare, size, opfsName, q}
-var shareBtnEl=null, dlAnchorEl=null, openAnchorEl=null;
+var liveExport=null; // {sig, blob, url, size, opfsName, q, how}
+var dlAnchorEl=null;
+// Result Files delivered from OPFS (claimRenderOutput /
+// readRenderOutput) are registered here so the Download handoff can
+// prove — and journal — that the browser is handed the disk-backed
+// OPFS File itself: no new File/Blob rebuild from its bytes, no
+// arrayBuffer() read, no full copy, at generation time or at tap
+// time, whatever the result's size. (Wrapping a File in
+// `new File([file])` looks harmless but can materialize the whole
+// payload on iOS.)
+var diskBackedResultFiles=(typeof WeakSet!=='undefined')?new WeakSet():null;
+function markDiskBackedResultFile(f){ try{ if(f&&diskBackedResultFiles) diskBackedResultFiles.add(f); }catch(e){} }
+function fileConstruction(f){
+  if(!f) return 'none';
+  if(!(f instanceof File)) return 'in-memory Blob (not a File)';
+  if(diskBackedResultFiles&&diskBackedResultFiles.has(f)) return 'disk-backed OPFS File — used directly (no Blob/File rebuild, no byte copy)';
+  return 'File — used directly (no Blob/File rebuild)';
+}
 function exportCacheTotalBytes(){ var t=0; exportCache.forEach(function(e){ if(e&&e.blob&&e.blob.size) t+=e.blob.size; }); return t; }
 function exportCachePut(sig, entry){
   if(exportCache.has(sig)) exportOrder=exportOrder.filter(function(k){return k!==sig});
@@ -3127,23 +3686,22 @@ function currentExportSignature(){ var c=currentExportQuality(); return settings
 function invalidateExport(reason){
   if(liveExport){
     if(liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
-    log('Export invalidated ('+reason+') — the previous export no longer matches the current settings + export quality; the next Share/Download/Open re-renders it.');
+    log('Export invalidated ('+reason+') — the previous export no longer matches the current settings + export quality; the next Download re-renders it.');
     liveExport=null;
   }
   if(dlAnchorEl&&resultURL) dlAnchorEl.href=resultURL;
-  if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen (see openResultFullscreen)
 }
 function setLiveExport(entry, sig){
   if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
   var file=entry.blob;
-  var shareFile=file;
-  if(!(shareFile instanceof File)){ try{ shareFile=new File([file],'dance-synced.mp4',{type:'video/mp4'}); }catch(e){ shareFile=file; } }
-  var can=false;
-  if(shareFile&&typeof navigator!=='undefined'&&navigator.canShare&&navigator.share){ try{ can=!!navigator.canShare({files:[shareFile]}); }catch(e){ can=false; } }
-  liveExport={sig:sig, file:shareFile, blob:file, url:URL.createObjectURL(file), canShare:can, size:file.size, opfsName:entry.opfsName||null, q:entry.q||null};
+  // Hand the delivered File to the browser DIRECTLY as the download —
+  // never rebuild it with new File([blob]) (on a ~1 GB result that
+  // rebuild is a whole-payload materialization). liveExport.url is an
+  // object URL of that same File; the Download anchor points at it.
+  liveExport={sig:sig, blob:file, url:URL.createObjectURL(file), size:file.size, opfsName:entry.opfsName||null, q:entry.q||null, how:fileConstruction(file)};
   if(dlAnchorEl) dlAnchorEl.href=liveExport.url;
-  if(openAnchorEl) openAnchorEl.removeAttribute('href'); // Open never carries a blob href — it presents the Preview fullscreen
-  log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | canShare(export File)='+String(can)+' | Download link now points at the export file (not the proxy); Open presents the Preview fullscreen');
+  log('Export ready: '+fmtBytesMB(file.size)+' | quality='+(liveExport.q==='full'?'Full':(liveExport.q?liveExport.q+'p':'?'))+' | file "'+(file.name||'(unnamed)')+'" ('+file.size+' bytes) | construction: '+liveExport.how+' | Download link now points at the export file (not the proxy)');
+  try{ if(entry.opfsName) retentionSetRecord(entry.opfsName, file.size); }catch(e){}
   return liveExport;
 }
 var isExporting=false, exportToken=0, exportCancelReject=null, exportCancelPromise=null, pendingExportAction=null;
@@ -3162,16 +3720,24 @@ async function renderExport(sig){
   showExportProgress(true); setExportBarPct(2); // event: export requested
   var ff=await cancellableExport(ensureFFmpeg(function(ratio){ progressForExport(ratio); }));
   await tryMountOPFS(ff);
+  await tryStreamOut(ff);
   var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
   var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
   var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  var exportOpfsName='export-'+hashStr(sig)+'.mp4';
+  var exportOutTarget=streamOutPathFor(exportOpfsName);
+  var exportStreamed=(exportOutTarget!=='dance-synced.mp4');
+  if(exportStreamed) log('Export: render output target is '+exportOutTarget+' — the output streams to OPFS file '+exportOpfsName+' in ≤16 MB slices as produced (B13); it never accumulates in converter memory');
+  guardLargeRenderWithoutStreamOut('Export render', estimateCopiedOutputBytes(dFile, tDur), exportStreamed);
   // TWO-STAGE EXPORT: Full quality with NO trim set is the common case
   // and never needs the video re-encoded or fully decoded — stage 1
   // renders ONLY the processed audio track (the full audio filter graph)
   // to a small AAC file, stage 2 stream-copies the video from the
   // (mounted) input and muxes it with that audio. With WORKERFS inputs
-  // the converter FS then only ever holds the small stage-1 file plus
-  // the growing output — never both inputs AND the output together.
+  // the converter FS then only ever holds the small stage-1 file — and
+  // with B13 streamed output (exportOutTarget under /out) not even the
+  // output: it is forwarded to OPFS as produced, never both inputs AND
+  // the output together, and never the output at all.
   var noTrim=(tStart<=0.001)&&(danceDur>0?(tEnd>=danceDur-0.01):(trimEndSec==null));
   var twoStage=(q==='full')&&noTrim;
   diagExport.stages=twoStage?'two-stage (stage 1 audio render + stage 2 stream-copy mux)':'single-graph encode';
@@ -3186,12 +3752,14 @@ async function renderExport(sig){
       diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
       log('mount: inputs=WORKERFS (/mnt)');
       log('Export: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+      log('ingest [export] video: '+danceFile.name+' ('+fmtBytesMB(dFile.size)+') — mounted via WORKERFS at '+danceIn+' (ffmpeg reads on demand; no whole-file copy)');
+      log('ingest [export] audio: '+songFile.name+' ('+fmtBytesMB(sFile.size)+') — mounted via WORKERFS at '+songIn+' (ffmpeg reads on demand; no whole-file copy)');
     } else {
-      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+mounted.reason;
-      log('mount: inputs=MEMFS (writeFile fallback) — '+mounted.reason);
-      log('Export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for export');
-      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for export');
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (slice-streamed fallback) — '+mounted.reason;
+      log('mount: inputs=MEMFS (slice-streamed fallback) — '+mounted.reason);
+      log('Export: slice-streaming files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await writeFileSliceStreamed(ff, 'dance.'+dExt, dFile, 'export', danceFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed export video input'); }); });
+      await writeFileSliceStreamed(ff, 'song.'+sExt, sFile, 'export', songFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed export audio input'); }); });
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
     setExportBarPct(15); // event: export encode starts
@@ -3209,16 +3777,16 @@ async function renderExport(sig){
       log('Export stage 1 (audio): size='+fmtBytesMB(s1Size)+' | duration='+s1DurSec.toFixed(1)+'s');
       setExportBarPct(50);
       exportProgLo=50; exportProgHi=95;
-      var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
+      var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart',exportOutTarget];
       diagStage='export-stage-2';
-      log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied | ffmpeg args='+s2Args.join(' '));
+      log('Export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied'+(exportStreamed?(' | output: streamed to OPFS file '+exportOpfsName+' via /out as produced (B13 — no MEMFS output accumulation)'):'')+' | ffmpeg args='+s2Args.join(' '));
       var s2T0=Date.now();
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Export stage 2 (copy mux) from '+danceFile.name); }));
       log('Export stage 2 (copy mux): duration='+((Date.now()-s2T0)/1000).toFixed(1)+'s (pure stream copy — no decode, no encode)');
       try{ await ff.deleteFile('stage1-audio.m4a'); log('memory: deleted FS stage-1 audio stage1-audio.m4a ('+fmtBytesMB(s1Size)+') after the mux'); }catch(e){}
     } else {
       exportProgLo=15; exportProgHi=95;
-      var args=buildRenderArgs({encHeight:height, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
+      var args=buildRenderArgs({encHeight:height, outName:exportOutTarget, tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:false, danceIn:danceIn, songIn:songIn});
       diagStage='export-stage-1';
       log('Export exec: ffmpeg args='+args.join(' '));
       await cancellableExport(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Exporting video from '+danceFile.name); }));
@@ -3232,7 +3800,7 @@ async function renderExport(sig){
   log('Export encode ends — freeing inputs from converter FS before reading output…');
   await freeConverterInputs(ff,dExt,sExt);
   if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }
-  var outRes=await readRenderOutput(ff,'dance-synced.mp4','export-'+hashStr(sig)+'.mp4');
+  var outRes=await claimRenderOutput(ff,'dance-synced.mp4',exportOpfsName,exportStreamed);
   setExportBarPct(100);
   var durSec=(Date.now()-renderT0)/1000;
   diagStorage.lastOutput=outRes.backend;
@@ -3254,7 +3822,7 @@ async function renderExport(sig){
 async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff){
   diagStage='export-stage-1';
   var renderT0=Date.now();
-  log('Direct export: stage 1 renders the processed audio only, stage 2 stream-copies the video (no video re-encode) — this file becomes the result; Share/Download/Open will deliver it immediately with no Processing render.');
+  log('Direct export: stage 1 renders the processed audio only, stage 2 stream-copies the video (no video re-encode) — this file becomes the result; Download will deliver it immediately with no Processing render.');
   await detectStorageBackend();
   var directStageNum=1;
   var directLastMilestone=-1;
@@ -3266,9 +3834,15 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
     if(m>directLastMilestone){ directLastMilestone=m; log('Direct export '+(directStageNum===1?'stage 1 (audio)':'stage 2 (mux)')+' progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); }
   }));
   await tryMountOPFS(ff);
+  await tryStreamOut(ff);
   var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
   var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
   var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
+  var directOpfsName='export-'+hashStr(exportSig)+'.mp4';
+  var directOutTarget=streamOutPathFor(directOpfsName);
+  var directStreamed=(directOutTarget!=='dance-synced.mp4');
+  if(directStreamed) log('Direct export: render output target is '+directOutTarget+' — stage 2 streams to OPFS file '+directOpfsName+' in ≤16 MB slices as produced (B13); the ~full-size output never accumulates in converter memory');
+  guardLargeRenderWithoutStreamOut('Direct export render', estimateCopiedOutputBytes(dFile, tDur), directStreamed);
   diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate';
   var mounted=null;
   var s1Size=null, s1DurSec=0, s2DurSec=0;
@@ -3280,12 +3854,14 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
       diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
       log('mount: inputs=WORKERFS (/mnt)');
       log('Direct export: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+      log('ingest [direct-export] video: '+danceFile.name+' ('+fmtBytesMB(dFile.size)+') — mounted via WORKERFS at '+danceIn+' (ffmpeg reads on demand; no whole-file copy)');
+      log('ingest [direct-export] audio: '+songFile.name+' ('+fmtBytesMB(sFile.size)+') — mounted via WORKERFS at '+songIn+' (ffmpeg reads on demand; no whole-file copy)');
     } else {
-      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+mounted.reason;
-      log('mount: inputs=MEMFS (writeFile fallback) — '+mounted.reason);
-      log('Direct export: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter for direct export');
-      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter for direct export');
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (slice-streamed fallback) — '+mounted.reason;
+      log('mount: inputs=MEMFS (slice-streamed fallback) — '+mounted.reason);
+      log('Direct export: slice-streaming files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await writeFileSliceStreamed(ff, 'dance.'+dExt, dFile, 'direct-export', danceFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed direct-export video input'); }); });
+      await writeFileSliceStreamed(ff, 'song.'+sExt, sFile, 'direct-export', songFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed direct-export audio input'); }); });
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
     setBarPct(50,'Generating');
@@ -3303,9 +3879,9 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
     setBarPct(75,'Exporting');
     // Stage 2 — pure stream-copy mux.
     directStageNum=2; directStageLabel=''; progPhase='Exporting'; renderProgText(); directLastMilestone=-1;
-    var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart','dance-synced.mp4'];
+    var s2Args=['-y','-i',danceIn,'-i','stage1-audio.m4a','-map','0:v:0','-map','1:a:0','-c','copy','-t',tDur.toFixed(3),'-movflags','+faststart',directOutTarget];
     diagStage='export-stage-2';
-    log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied | ffmpeg args='+s2Args.join(' '));
+    log('Direct export stage 2 (copy mux): video stream-copied from the video input + stage-1 audio, -c copy, no filters, output guarded to the video duration ('+tDur.toFixed(3)+'s) | faststart: -movflags +faststart applied'+(directStreamed?(' | output: streamed to OPFS file '+directOpfsName+' via /out as produced (B13 — no MEMFS output accumulation)'):'')+' | ffmpeg args='+s2Args.join(' '));
     var s2T0=Date.now();
     await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(s2Args),600000,'Direct export stage 2 (copy mux) from '+danceFile.name); }));
     s2DurSec=(Date.now()-s2T0)/1000;
@@ -3321,7 +3897,7 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
   log('Direct export encode ends — freeing inputs from converter FS before reading output…');
   await freeConverterInputs(ff,dExt,sExt);
   if(mounted&&mounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); }
-  var outRes=await readRenderOutput(ff,'dance-synced.mp4','export-'+hashStr(exportSig)+'.mp4');
+  var outRes=await claimRenderOutput(ff,'dance-synced.mp4',directOpfsName,directStreamed);
   var totalDurSec=(Date.now()-renderT0)/1000;
   diagStorage.lastOutput=outRes.backend;
   diagExport.size=outRes.blob.size; diagExport.durationSec=Number(totalDurSec.toFixed(2)); diagExport.quality='full'; diagExport.backend=outRes.backend;
@@ -3332,59 +3908,49 @@ async function renderDirectExportForGenerate(exportSig, tStart, tEnd, tDur, eff)
   directStageLabel=''; renderProgText();
   return {blob:outRes.blob, backend:outRes.backend, opfsName:outRes.opfsName, s1Size:s1Size, s1DurSec:s1DurSec, s2DurSec:s2DurSec, totalDurSec:totalDurSec};
 }
-function performExportAction(action){
+function performExportAction(){
   if(!liveExport) return;
   diagStage='delivery';
-  if(action==='share'){
-    if(liveExport.file&&liveExport.canShare&&navigator.share){
-      var pr=null, syncErr=null;
-      try{ pr=navigator.share({files:[liveExport.file]}); }catch(err){ syncErr=err; }
-      if(syncErr){ log('Share (export) → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
-      log('Share (export) → navigator.share({files:[export File '+fmtBytesMB(liveExport.file.size)+']}) called with the pre-built export File. If this share followed a Processing render, iOS may have expired the original tap activation — a NotAllowedError below means: tap Share again (export is cached, the next tap shares instantly).'); try{ journalMarkCompleted(true); }catch(e){}
-      if(pr&&pr.then) pr.then(function(){ log('Share (export) → navigator.share resolved.'); },function(err){
-        if(err&&err.name==='AbortError'){ log('Share (export) → dismissed by user (AbortError, not a failure).'); }
-        else { log('Share (export) → navigator.share rejected: '+diagErrText(err)); if(err&&err.name==='NotAllowedError'){ showError('Export is ready ('+fmtSize(liveExport.size)+') — tap Share again to open the share sheet.'); } else shareFailed(err); }
-      });
-      return;
-    }
-    log('Share (export) → file sharing unavailable in this browser (canShare='+String(liveExport.canShare)+') — use Download or Open.');
-    showError('File sharing is not available in this browser — use Download or Open for the export.');
-    return;
-  }
-  if(action==='download'){
-    if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; log('Download (export) → activating the in-DOM download anchor for the export file '+fmtBytesMB(liveExport.size)+' (href is the export object URL; if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).'); dlAnchorEl.click(); try{ journalMarkCompleted(true); }catch(e){} }
-    return;
-  }
-  if(action==='open'){
-    // Open NEVER navigates to a blob URL (a large blob navigation fails
-    // with WebKitBlobResource error 1 and replaces the page). It presents
-    // the in-page Preview video in the native fullscreen player instead.
-    log('Open (export) → presenting the in-page Preview video fullscreen (no blob URL navigation).');
-    openResultFullscreen();
-    return;
-  }
+  // EVERY Download tap is journaled BEFORE the delivery is invoked —
+  // result file name + byte size and how the handed-off File was
+  // constructed — and the journal is flushed synchronously
+  // (journalPersistNow via journalDeliveryPending), so if the tab
+  // dies DURING the delivery the next diagnostics dump still shows
+  // the exact step.
+  var expHow=liveExport.how||fileConstruction(liveExport.blob);
+  var expName=(liveExport.blob&&liveExport.blob.name)||'(unnamed)';
+  diagStage='download';
+  log('Download (export) tapped → action=download | result file "'+expName+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+expHow+' | handing off via the in-DOM download anchor (object URL of that same File — no byte copy at tap time); activating the anchor next (if the browser blocks a programmatic click after Processing, tap Download again — the export is cached).');
+  try{ journalDeliveryPending(); }catch(e){}
+  if(dlAnchorEl){ dlAnchorEl.href=liveExport.url; try{ dlAnchorEl.click(); }catch(clickErr){ log('Download (export) → anchor activation threw: '+diagErrText(clickErr)); showError('Download could not start for the export ('+fmtSize(liveExport.size)+') — tap Download again.'); try{ journalMarkHandledError(); }catch(e){} return; } try{ journalMarkCompleted(true); }catch(e){} }
+  else { try{ journalMarkHandledError(); }catch(e){} }
 }
-async function ensureExport(action){
-  // Fast paths run synchronously inside the tap handler (no await before
-  // them) so a cached export's Share keeps its transient user activation:
-  // navigator.share() is effectively the first real action of the tap.
-  if(isGenerating||pipelineRunning){ log('Export tap ('+action+') while the proxy is still generating — ignored until generation finishes.'); showError('Still generating the preview — Share/Download/Open will export once it finishes.'); return; }
-  if(!danceFile||!songFile){ log('Export tap ('+action+') with no source files loaded — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files.'); return; }
-  if(isExporting){ pendingExportAction=action; log('Export already processing — the pending action is now '+action+'.'); return; }
+async function ensureExport(){
+  // Fast paths run synchronously inside the tap handler (no await
+  // before them) so a cached export delivers on the tap itself.
+  if(isGenerating||pipelineRunning){ log('Download tap while the proxy is still generating — ignored until generation finishes.'); showError('Still generating the preview — Download will export once it finishes.'); return; }
+  // Fast path BEFORE the source-files guard: an up-to-date live export
+  // delivers with no render, so it needs no source files. In a normal
+  // session liveExport only exists while the files are loaded (Start
+  // over clears both together), so this ordering changes nothing there —
+  // it is what lets a RESTORED retained result (no uploads in memory)
+  // deliver through the normal Download button.
   var sig=currentExportSignature();
-  if(liveExport&&liveExport.sig===sig){ performExportAction(action); return; }
+  if(liveExport&&liveExport.sig===sig){ performExportAction(); return; }
+  if(!danceFile||!songFile){ log('Download tap with no source files loaded — an export render needs the original files.'); showError('Re-upload both files to render the export — Start over clears the source files.'); return; }
+  if(isExporting){ pendingExportAction='download'; log('Export already processing — the pending Download delivers when it finishes.'); return; }
   var cached=exportCacheGet(sig);
-  if(cached){ setLiveExport(cached, sig); log('Export cache hit for current settings + export quality — no re-render.'); performExportAction(action); return; }
-  isExporting=true; pendingExportAction=action; exportToken++; var tok=exportToken; newExportCancelSignal();
+  if(cached){ setLiveExport(cached, sig); log('Export cache hit for current settings + export quality — no re-render.'); performExportAction(); return; }
+  isExporting=true; pendingExportAction='download'; exportToken++; var tok=exportToken; newExportCancelSignal();
   clearError();
-  log('Export tap ('+action+') → no up-to-date export for the current settings + export quality — rendering the full-quality export first (Processing bar under the buttons).');
+  log('Download tap → no up-to-date export for the current settings + export quality — rendering the full-quality export first (Processing bar under the button).');
   try{
     var entry=await renderExport(sig);
     if(tok!==exportToken){ log('Export finished but the run was cancelled/superseded — not delivering it.'); return; }
     if(currentExportSignature()!==sig){ log('Export finished but the settings changed during processing — that export is stale; tap again to re-render.'); return; }
     setLiveExport(entry, sig);
     var act=pendingExportAction; pendingExportAction=null;
-    if(act) performExportAction(act);
+    if(act) performExportAction();
   }catch(err){
     if(isExportCancelErr(err)||tok!==exportToken){ log('Export processing cancelled.'); }
     else if(err&&err.deliveryFailure){
@@ -3448,87 +4014,15 @@ function cacheGet(sig){
   return e;
 }
 // ---------- save ----------
-// iOS Safari rules this code lives by:
-// 1) navigator.share() must be the first thing that happens inside the tap
-//    handler — any await or async step before it expires the tap's
-//    transient user activation and share() throws NotAllowedError. So the
-//    shareable File is built at generation time (in showResult) and
-//    stashed here; the click handler goes straight to share().
-// 2) Download is a real <a download> rendered in the DOM at generation
-//    time — the user's own tap on it is the download gesture. Never fake
-//    it with an off-DOM anchor + .click() after async work.
-// 3) The result object URL is revoked ONLY when a newer result replaces
-//    it or on New/reset — revoking it while it is on screen silently
-//    kills the player, the share source, and the download link at once.
-var resultBlob=null, resultFile=null, resultCanShare=false;
-var resultVideoEl=null; // the in-page Preview <video> for the current result — Open presents THIS element fullscreen; it never navigates to a blob URL (a 291 MB blob navigation dies with WebKitBlobResource error 1 and kills the tab view)
-// Open: present the existing in-page Preview video in the native
-// fullscreen player — webkitEnterFullscreen() on iOS, falling back to
-// requestFullscreen(), falling back to scrolling the Preview into view
-// and playing it. Never a navigation to the result blob URL.
-function openResultFullscreen(){
-  diagStage='open-video';
-  var v=resultVideoEl;
-  if(!v){ log('Open tapped → no Preview video on screen to present.'); return; }
-  try{
-    if(typeof v.webkitEnterFullscreen==='function'){
-      v.webkitEnterFullscreen();
-      log('Open → Preview video presented in the native fullscreen player (webkitEnterFullscreen) — no blob URL navigation.');
-      try{ var pp=v.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
-      try{ journalMarkCompleted(true); }catch(e){}
-      return;
-    }
-  }catch(e){ log('Open → webkitEnterFullscreen threw ('+(e.message||e)+') — falling back.'); }
-  function scrollAndPlay(){
-    try{ v.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){ try{ v.scrollIntoView(); }catch(_){} }
-    try{ var pp2=v.play(); if(pp2&&pp2.catch) pp2.catch(function(){}); }catch(e){}
-    log('Open → Preview scrolled into view and playing (fullscreen APIs unavailable).');
-  }
-  try{
-    if(typeof v.requestFullscreen==='function'){
-      var rp=v.requestFullscreen();
-      log('Open → Preview video presented fullscreen (requestFullscreen) — no blob URL navigation.');
-      try{ var pp3=v.play(); if(pp3&&pp3.catch) pp3.catch(function(){}); }catch(e){}
-      try{ journalMarkCompleted(true); }catch(e){}
-      if(rp&&rp.catch) rp.catch(function(){ scrollAndPlay(); });
-      return;
-    }
-  }catch(e){ log('Open → requestFullscreen threw ('+(e.message||e)+') — falling back to scroll + play.'); }
-  scrollAndPlay();
-  try{ journalMarkCompleted(true); }catch(e){}
-}
-function shareFailed(err){
-  diagStage='delivery';
-  var msg='Share failed: '+((err&&err.name)||'Error')+((err&&err.message)?' — '+err.message:'');
-  log('Save/Share attempt FAILED: '+diagErrText(err));
-  log(msg+' — use Download or Open video below the result instead.');
-  showError(msg+'. Use Download or Open video below the result.');
-  try{ journalMarkHandledError(); }catch(e){}
-}
-function saveResult(){
-  // iOS rule: navigator.share() must fire inside the tap's transient
-  // activation. The File was pre-built at generation time for this reason.
-  // Diagnostics logging happens AFTER the share() call returns its promise
-  // (same synchronous tap handler) so it cannot consume the activation.
-  if(resultFile&&resultCanShare&&navigator.share){
-    var p=null, syncErr=null;
-    try{ p=navigator.share({files:[resultFile]}); }
-    catch(err){ syncErr=err; }
-    diagStage='share';
-    if(syncErr){ log('Save/Share tapped → navigator.share() threw synchronously: '+diagErrText(syncErr)); shareFailed(syncErr); return; }
-    log('Save/Share tapped → navigator.share({files:[File "'+resultFile.name+'" '+fmtBytesMB(resultFile.size)+' type='+(resultFile.type||'video/mp4')+']}) called | resultCanShare=true | shareFile pre-built at generation=true');
-    if(p&&p.then) p.then(function(){ log('Save/Share tapped → navigator.share resolved (user completed share sheet action).'); },function(err){
-      if(err&&err.name==='AbortError'){ log('Save/Share tapped → navigator.share rejected AbortError: user dismissed share sheet (not a failure).'); }
-      else { log('Save/Share tapped → navigator.share rejected: '+diagErrText(err)); shareFailed(err); }
-    });
-    return;
-  }
-  diagStage='share';
-  var why='resultFile='+(resultFile?('present ('+fmtBytesMB(resultFile.size)+')'):'null')+' | resultCanShare='+String(resultCanShare)+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent');
-  var msg='Save: file sharing is not available in this browser — use Download or Open video below the result.';
-  log('Save/Share tapped → fallback shown (share unavailable): canShare=false → fallback shown | '+why);
-  log(msg); showError(msg);
-}
+// Download is the only result action. Two rules this code lives by:
+// 1) Download is a real <a download> rendered in the DOM at generation
+//    time — the user's own tap on it is the download gesture. Never
+//    fake it with an off-DOM anchor + .click() after async work.
+// 2) The result object URL is revoked ONLY when a newer result
+//    replaces it or on New/reset — revoking it while it is on screen
+//    silently kills the player and the download link at once.
+var resultBlob=null;
+var resultVideoEl=null; // the in-page Preview <video> for the current result
 function showEditor(){
   // Editor (timeline / offset / trim / blend / Export quality / Re-sync)
   // appears only once a generation has completed successfully, under
@@ -3543,7 +4037,7 @@ function showResult(blob, opts){
   opts=opts||{};
   lastResultIsDirect=!!opts.isDirect;
   // Generation is fully complete — only NOW does the Preview block appear
-  // (header + subheading + player + Share/Download/Open row).
+  // (header + subheading + player + Download row).
   $('resultBox').classList.add('show');
   var _psub=$('previewSub'); if(_psub){ _psub.classList.add('show'); updatePreviewSub(); }
   // A result on screen means a generation has completed successfully:
@@ -3555,14 +4049,8 @@ function showResult(blob, opts){
   // settings — drop it (the cached-export check below re-arms it instantly
   // if an export for exactly these settings is already cached).
   try{ invalidateExport('new result shown'); }catch(e){}
-  // Pre-build the shareable File NOW, at generation time — the tap handler
-  // must not spend its user activation constructing it.
-  resultBlob=blob; resultFile=null; resultCanShare=false;
-  try{ resultFile=new File([blob],'dance-synced.mp4',{type:'video/mp4'}); }catch(e){ resultFile=null; logError('result-file-build',e); }
-  if(resultFile&&navigator.canShare&&navigator.share){
-    try{ resultCanShare=!!navigator.canShare({files:[resultFile]}); log('Result: canShare with real output File ('+fmtBytesMB(blob.size)+') → '+String(resultCanShare)); }catch(e){ resultCanShare=false; logError('result-canShare',e); }
-  } else { log('Result: canShare check skipped — resultFile='+(resultFile?'present':'null')+' | navigator.canShare='+(typeof navigator.canShare==='function'?'present':'absent')+' | navigator.share='+(typeof navigator.share==='function'?'present':'absent')); }
-  diagResult.blobSize=blob.size; diagResult.blobType=blob.type||'video/mp4'; diagResult.canShare=resultCanShare; diagResult.shareFileBuilt=!!resultFile;
+  resultBlob=blob;
+  diagResult.blobSize=blob.size; diagResult.blobType=blob.type||'video/mp4';
   try{ var qe2=document.querySelector('input[name=quality]:checked'); var qv=qe2?qe2.value:'full'; diagResult.settings={q:qv,height:(qv==='full'?0:parseInt(qv,10)),tStart:trimStartSec,tEnd:trimEnd(),tDur:Math.max(0,trimEnd()-trimStartSec),eff:effOffset(),blend:blendVal}; }catch(e){}
   var oldURL=resultURL;
   resultURL=URL.createObjectURL(blob);
@@ -3576,41 +4064,29 @@ function showResult(blob, opts){
   rv.addEventListener('error',function(){ try{ var ve=rv.error; log('Result video element error: '+(ve?('code='+ve.code+' message='+(ve.message||'')):'unknown')); logError('result-video-element',(ve&&ve.message)?new Error(ve.message):new Error('video error code '+(ve?ve.code:'?'))); }catch(e){} });
   rv.addEventListener('loadedmetadata',function(){ try{ log('Result video metadata loaded: duration='+(isFinite(rv.duration)?Number(rv.duration).toFixed(3):String(rv.duration))+'s | videoWidth='+rv.videoWidth+' videoHeight='+rv.videoHeight+' | readyState='+rv.readyState); }catch(e){} });
   area.appendChild(rv);
-  var ICON_SHARE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4"/><path d="M8 7l4-4 4 4"/><path d="M5 13v6a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19v-6"/></svg>';
   var ICON_DL='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M5 20h14"/></svg>';
-  var ICON_OPEN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4L10.5 13.5"/><path d="M19 13.5V19a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 19V7a1.5 1.5 0 0 1 5.5 5.5H11"/></svg>';
   var saveRow=document.createElement('div'); saveRow.className='saveRow';
-  var shareBtn=document.createElement('button'); shareBtn.type='button'; shareBtn.className='saveBtn'; shareBtn.innerHTML=ICON_SHARE+'<span>Share</span>';
   var dl=document.createElement('a'); dl.className='saveBtn'; dl.href=resultURL; dl.setAttribute('download','dance-synced.mp4'); dl.innerHTML=ICON_DL+'<span>Download</span>';
-  var openA=document.createElement('a'); openA.className='saveBtn'; openA.setAttribute('role','button'); openA.innerHTML=ICON_OPEN+'<span>Open</span>'; // deliberately NO href/target: Open must never navigate the page to a blob URL — its click presents the Preview video fullscreen (openResultFullscreen)
-  shareBtnEl=shareBtn; dlAnchorEl=dl; openAnchorEl=openA;
+  dlAnchorEl=dl;
   // If an export for exactly these settings + the selected Export quality
-  // is already cached, point the links at it immediately so the buttons
-  // deliver it with no re-render.
+  // is already cached, point the link at it immediately so Download
+  // delivers it with no re-render.
   try{ var curSig=currentExportSignature(); var ce=exportCacheGet(curSig); if(ce){ setLiveExport(ce, curSig); } }catch(e){}
   dl.addEventListener('click',function(ev){
     var sig2=currentExportSignature();
-    if(liveExport&&liveExport.sig===sig2&&liveExport.url){ diagStage='download'; log('Download tapped → delivering the EXPORT file (up-to-date, no re-render) | '+fmtBytesMB(liveExport.size)+' | href scheme='+String(liveExport.url).split(':')[0]+': | download attr="dance-synced.mp4"'); return; }
+    if(liveExport&&liveExport.sig===sig2&&liveExport.url){ diagStage='download'; log('Download tapped → action=download | result file "'+((liveExport.blob&&liveExport.blob.name)||'(unnamed)')+'" ('+liveExport.size+' bytes, '+fmtBytesMB(liveExport.size)+') | construction: '+(liveExport.how||fileConstruction(liveExport.blob))+' | delivering the EXPORT file (up-to-date, no re-render) via this anchor — object URL of that same File, no byte copy | href scheme='+String(liveExport.url).split(':')[0]+': | download attr="dance-synced.mp4"'); try{ journalPersistNow(); }catch(e){} return; }
     ev.preventDefault(); diagStage='download';
     log('Download tapped → no up-to-date export — starting Processing (full-quality export render) first; the download follows when processing finishes.');
-    ensureExport('download');
+    ensureExport();
   });
-  openA.addEventListener('click',function(ev){
-    ev.preventDefault(); diagStage='open-video';
-    var sig3=currentExportSignature();
-    if(liveExport&&liveExport.sig===sig3&&liveExport.url){ log('Open tapped → export is up-to-date (no re-render) — presenting the in-page Preview video in the native fullscreen player (no blob URL navigation).'); openResultFullscreen(); return; }
-    log('Open tapped → no up-to-date export — starting Processing (full-quality export render) first; when processing finishes, Open presents the Preview video fullscreen.');
-    ensureExport('open');
-  });
-  shareBtn.addEventListener('click',function(){ ensureExport('share'); });
-  saveRow.appendChild(shareBtn);
   saveRow.appendChild(dl);
-  saveRow.appendChild(openA);
   wrap.appendChild(saveRow);
-  // No explanatory text under the download buttons (item 5).
+  // No explanatory text under the download button (item 5).
   showEditor();
   updateNewBtn();
   try{ var pp=rv.play(); if(pp&&pp.catch) pp.catch(function(){}); }catch(e){}
+  // Retention: the result just delivered becomes the retained result.
+  try{ retentionSyncFromResult(blob); }catch(e){}
 }
 function fmtClockTime(d){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2), ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+m+' '+ap; }
 // A completed apply/generation becomes the applied-settings snapshot:
@@ -3633,7 +4109,7 @@ function markApplied(snap){
 // Single source of truth for the one Start over button (bottom of page):
 // the page is "active" whenever any session state exists — an uploaded
 // file is session state.
-function sessionActive(){ return !!(danceFile||songFile); }
+function sessionActive(){ return !!(danceFile||songFile||restoredResultActive); }
 function updateNewBtn(){
   var active=sessionActive();
   // The single bottom Start over and the Generate button stay hidden
@@ -3647,19 +4123,30 @@ function updateNewBtn(){
   var gr=$('generateRow'); if(gr&&firstGenDone) gr.classList.add('show');
 }
 function resetAll(){
-  // Start over cancels any in-flight work first (generation, export, or
-  // analysis): bump tokens, terminate the converter worker (aborts the
-  // running ffmpeg exec; the WebCodecs pipeline checks runToken), and
-  // reject both cancel signals so pending stages abort.
+  // Start over cancels ALL in-flight work belonging to the current
+  // generation — generation, export, analysis, delivery, AND the
+  // post-completion background work (filmstrip extraction) that keeps
+  // running after a result lands (B11). Unconditionally: bump every
+  // token, reject both cancel signals, and terminate the converter
+  // worker even when no run is active — terminate() rejects the pending
+  // ffmpeg exec, so a filmstrip tile loop dies with its worker instead
+  // of logging tiles past this reset, and no further ffmpeg progress
+  // events can fire to repaint the bar. sessionGen is the generation
+  // guard: async work captured before this bump (filmstrip above all)
+  // checks it and drops itself silently. progressSuppressed seals the
+  // progress UI until the next run's resetProgress() clears it, so the
+  // bar reset at the bottom of this function is final — hidden, 0%,
+  // no text, under all circumstances.
   var running=isGenerating||pipelineRunning||analysisState==='running'||isExporting;
+  sessionGen++;
+  progressSuppressed=true;
   runToken++; filesVersion++;
   exportToken++;
-  if(running&&cancelReject) cancelReject(new Error('Cancelled'));
-  if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
-  if(running){
-    ffmpegChain=Promise.resolve();
-    if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; ffmpegProgressCb=null; }
-  }
+  if(cancelReject) cancelReject(new Error('Cancelled'));
+  if(exportCancelReject) exportCancelReject(new Error('Export cancelled'));
+  ffmpegChain=Promise.resolve();
+  if(ffmpeg){ try{ ffmpeg.terminate(); }catch(e){} ffmpeg=null; ffmpegLoaded=false; }
+  ffmpegProgressCb=null;
   danceFile=null; songFile=null;
   dancePCM=null; songPCM=null; danceDur=0; songDur=0; danceVideoW=0; danceVideoH=0;
   detectedOffset=0; audioPos=0; confidence=0; lastCandidates=[];
@@ -3673,17 +4160,21 @@ function resetAll(){
   // genuinely fresh state.
   outCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); outCache.clear(); outOrder=[];
   exportCache.forEach(function(e){ if(e&&e.opfsName) opfsDelete(e.opfsName); }); exportCache.clear(); exportOrder=[];
+  // Retention: Start over clears the retained result too — record
+  // removed, OPFS file deleted (a no-op if the cache loops above
+  // already deleted it).
+  try{ var _retRec=retentionClear('cleared by Start over'); if(_retRec&&_retRec.opfsName) opfsDelete(_retRec.opfsName); }catch(e){}
   exportToken++;
   if(isExporting&&exportCancelReject) exportCancelReject(new Error('Export cancelled'));
   isExporting=false; pendingExportAction=null;
   if(liveExport&&liveExport.url){ try{ URL.revokeObjectURL(liveExport.url); }catch(e){} }
-  liveExport=null; shareBtnEl=null; dlAnchorEl=null; openAnchorEl=null;
+  liveExport=null; dlAnchorEl=null;
   showExportProgress(false);
   if(opfsStaged.dance) opfsDelete(opfsStaged.dance.name);
   if(opfsStaged.song) opfsDelete(opfsStaged.song.name);
   opfsStaged={dance:null, song:null};
   if(resultURL){ URL.revokeObjectURL(resultURL); resultURL=null; }
-  resultBlob=null; resultFile=null; resultCanShare=false; resultVideoEl=null; lastResultIsDirect=false; directStageLabel='';
+  resultBlob=null; resultVideoEl=null; lastResultIsDirect=false; directStageLabel='';
   if(danceURL){ URL.revokeObjectURL(danceURL); danceURL=null; }
   vid.removeAttribute('src'); try{ vid.load(); }catch(e){}
   $('fileDance').value=''; $('fileSong').value='';
@@ -3755,7 +4246,7 @@ async function doGenerate(opts){
       // DIRECT EXPORT AS GENERATE: no 480p proxy at all. The two-stage
       // export (audio render + stream-copy mux) IS the generation step;
       // its file becomes the result and satisfies the export cache for
-      // these exact settings, so Share/Download/Open deliver instantly.
+      // these exact settings, so Download delivers instantly.
       // Any later edit changes the signature (same invalidation as the
       // export cache today: liveExport is cleared by invalidateExport on
       // edit), so the next Generate re-evaluates this branch fresh — if
@@ -3768,8 +4259,8 @@ async function doGenerate(opts){
         diagResult.settings=snap;
         diagExport.size=dHitBlob.size; diagExport.durationSec=0; diagExport.quality='full'; diagExport.backend=(dHitOut||dHitExp).opfsName?'OPFS':(diagExport.backend||'MEMFS'); diagExport.stages='two-stage (stage 1 audio render + stage 2 stream-copy mux) via direct generate — cache hit, no re-render';
         log('Direct export skipped — cache hit for identical settings (no re-render). Direct export blob '+fmtBytesMB(dHitBlob.size)+' — the export cache for these settings is already satisfied.');
-        // Ensure both caches hold the payload so Share/Download/Open
-        // hit without rendering.
+        // Ensure both caches hold the payload so Download hits
+        // without rendering.
         var dHitOpfs=(dHitOut||dHitExp).opfsName||null;
         if(!dHitOut&&dHitBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dHitBlob, opfsName:null}); }catch(e){} }
         if(!dHitExp){ try{ exportCachePut(exportSig,{blob:dHitBlob, opfsName:dHitOpfs, q:q}); }catch(e){} }
@@ -3792,13 +4283,13 @@ async function doGenerate(opts){
       var dSecs=((Date.now()-t0)/1000).toFixed(1);
       generatedOnce=true; diagStage='result'; directStageLabel=''; setBarPct(100); markStepDone(4);
       // Satisfy the export cache BEFORE showResult so its cached-export
-      // check arms liveExport and Share/Download/Open deliver instantly
+      // check arms liveExport and Download delivers instantly
       // with no Processing-bar render step.
       try{ exportCachePut(exportSig,{blob:dBlob, opfsName:dRes.opfsName, q:q}); }catch(e){ logError('direct-export-cache',e); }
       if(dBlob.size<=MAX_CACHE_BYTES){ try{ cachePut(exportSig,{blob:dBlob, opfsName:null}); }catch(e){} }
       showResult(dBlob,{isDirect:true});
       markApplied(snap);
-      log('Done — direct export ready: '+tDur.toFixed(2)+'s output, '+fmtSize(dBlob.size)+', generated in '+dSecs+'s · stage 1: size='+(dRes.s1Size!=null?fmtBytesMB(dRes.s1Size):'n/a')+' duration='+Number(dRes.s1DurSec).toFixed(1)+'s · stage 2: duration='+Number(dRes.s2DurSec).toFixed(1)+'s · audio clipped to video duration (no audio beyond video). This IS the full-quality export — Share, Download and Open deliver it immediately, no further render.');
+      log('Done — direct export ready: '+tDur.toFixed(2)+'s output, '+fmtSize(dBlob.size)+', generated in '+dSecs+'s · stage 1: size='+(dRes.s1Size!=null?fmtBytesMB(dRes.s1Size):'n/a')+' duration='+Number(dRes.s1DurSec).toFixed(1)+'s · stage 2: duration='+Number(dRes.s2DurSec).toFixed(1)+'s · audio clipped to video duration (no audio beyond video). This IS the full-quality export — Download delivers it immediately, no further render.');
       try{ journalMarkCompleted(true); }catch(e){}
       return;
     }
@@ -3819,7 +4310,7 @@ async function doGenerate(opts){
     diagStage='proxy-encode'; diagResult.settings=snap; diagLastEncodeMilestone=-1;
     log('Proxy render starts: max height 480p · fast encode (libx264 ultrafast) | audio pipeline identical to export (detected offset incl. negative-offset room-audio gap fill, trims, room blend, audio exactly the video duration) | trim '+tStart.toFixed(3)+'–'+tEnd.toFixed(3)+'s (duration '+tDur.toFixed(3)+'s) | effective offset='+eff.toFixed(3)+'s | detected offset='+detectedOffset.toFixed(3)+'s | blend='+Math.round(blendVal*100)+'% | proxy signature='+sig);
     log('Generating proxy preview… 480p · offset '+eff.toFixed(3)+'s · trim '+tStart.toFixed(2)+'–'+tEnd.toFixed(2)+'s'+(blendVal>0?(' · room audio '+Math.round(blendVal*100)+'%'):''));
-    log('Export quality selected: '+(height?(q+'p'):'Full')+' — no full-quality render happens during editing; the export renders on demand from Share/Download/Open.');
+    log('Export quality selected: '+(height?(q+'p'):'Full')+' — no full-quality render happens during editing; the export renders on demand from Download.');
     markStepActive(4);
     await detectStorageBackend();
     if(diagStorage.opfsAvailable&&!opfsStaged.dance){ try{ await opfsStageInput(danceFile,'dance'); }catch(e){} }
@@ -3828,6 +4319,7 @@ async function doGenerate(opts){
     var renderT0=Date.now();
     var ff=await cancellable(ensureFFmpeg(function(ratio){ if(ratio!=null){ progressForGenerate(ratio); var m=Math.floor(ratio*10)*10; if(m>diagLastEncodeMilestone){ diagLastEncodeMilestone=m; log('Proxy encode progress milestone: '+m+'% (ffmpeg ratio '+Number(ratio).toFixed(3)+')'); } } }));
     await tryMountOPFS(ff);
+    await tryStreamOut(ff);
     var dFile=await getInputFileForRender('dance'), sFile=await getInputFileForRender('song');
     var dExt=(danceFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
     var sExt=(songFile.name.split('.').pop()||'mp4').toLowerCase().replace(/[^a-z0-9]/g,'')||'mp4';
@@ -3838,14 +4330,25 @@ async function doGenerate(opts){
       diagStorage.lastInputs='WORKERFS'; diagStorage.mountNote='inputs=WORKERFS (/mnt)';
       log('mount: inputs=WORKERFS (/mnt)');
       log('Generate: inputs mounted via WORKERFS ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') — ffmpeg reads them on demand from the uploaded files; no writeFile copy, zero input residency in the converter FS.');
+      log('ingest [generate] video: '+danceFile.name+' ('+fmtBytesMB(dFile.size)+') — mounted via WORKERFS at '+danceIn+' (ffmpeg reads on demand; no whole-file copy)');
+      log('ingest [generate] audio: '+songFile.name+' ('+fmtBytesMB(sFile.size)+') — mounted via WORKERFS at '+songIn+' (ffmpeg reads on demand; no whole-file copy)');
     } else {
-      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (writeFile fallback) — '+proxyMounted.reason;
-      log('mount: inputs=MEMFS (writeFile fallback) — '+proxyMounted.reason);
-      log('Generate: writing files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
-      await withTimeout(ff.writeFile('dance.'+dExt, await FFmpegUtil.fetchFile(dFile)),120000,'Writing video file '+danceFile.name+' ('+fmtSize(danceFile.size)+') to converter');
-      await withTimeout(ff.writeFile('song.'+sExt, await FFmpegUtil.fetchFile(sFile)),120000,'Writing audio file '+songFile.name+' ('+fmtSize(songFile.size)+') to converter');
+      diagStorage.lastInputs=inputsBackendLabel(); diagStorage.mountNote='inputs=MEMFS (slice-streamed fallback) — '+proxyMounted.reason;
+      log('mount: inputs=MEMFS (slice-streamed fallback) — '+proxyMounted.reason);
+      log('Generate: slice-streaming files to converter ('+fmtSize(dFile.size)+' + '+fmtSize(sFile.size)+') | storage: inputs='+diagStorage.lastInputs+'…');
+      await writeFileSliceStreamed(ff, 'dance.'+dExt, dFile, 'generate', danceFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed generate video input'); }); });
+      await writeFileSliceStreamed(ff, 'song.'+sExt, sFile, 'generate', songFile.name, async function(a){ return await withFFmpegLock(async function(){ return await withTimeout(ff.exec(a),300000,'Assembling slice-streamed generate audio input'); }); });
       danceIn='dance.'+dExt; songIn='song.'+sExt;
     }
+    var proxyOpfsName='proxy-'+hashStr(sig)+'.mp4';
+    var proxyOutTarget=streamOutPathFor(proxyOpfsName);
+    var proxyStreamed=(proxyOutTarget!=='dance-synced.mp4');
+    if(proxyStreamed) log('Generate: proxy render output target is '+proxyOutTarget+' — the output streams to OPFS file '+proxyOpfsName+' in ≤16 MB slices as produced (B13); it never accumulates in converter memory');
+    // A 480p encode is small for any realistic clip (≈3 MB/s is a
+    // generous ceiling for 480p video + 192k audio), but the guard
+    // applies here too so no render path can accumulate an unbounded
+    // MEMFS output when streaming is unavailable.
+    guardLargeRenderWithoutStreamOut('Proxy render', Math.round(tDur*375000), proxyStreamed);
     // WEBCODECS PROXY ENGINE: try the hardware pipeline first (demux →
     // VideoDecoder → canvas scale → VideoEncoder → JS video mux + ffmpeg
     // stream-copy mux with the processed audio from the existing filter
@@ -3856,7 +4359,7 @@ async function doGenerate(opts){
     var wcOutcome=null, wcFailReason=null, outRes=null;
     var wcToken=runToken;
     try{
-      wcOutcome=await tryWebCodecsProxy({ff:ff, dFile:dFile, sFile:sFile, danceIn:danceIn, songIn:songIn, dExt:dExt, sExt:sExt, tStart:tStart, tEnd:tEnd, tDur:tDur, eff:eff, isCancelled:function(){ return runToken!==wcToken; }});
+      wcOutcome=await tryWebCodecsProxy({ff:ff, dFile:dFile, sFile:sFile, danceIn:danceIn, songIn:songIn, dExt:dExt, sExt:sExt, tStart:tStart, tEnd:tEnd, tDur:tDur, eff:eff, outFsPath:proxyOutTarget, opfsName:proxyOpfsName, isCancelled:function(){ return runToken!==wcToken; }});
     }catch(wcErr){
       if(isCancelErr(wcErr)) throw wcErr;
       wcFailReason=(wcErr&&wcErr.wcReason)||(wcErr&&wcErr.message)||String(wcErr);
@@ -3867,7 +4370,7 @@ async function doGenerate(opts){
       log('proxy engine: webcodecs (hardware)');
       log('Proxy (webcodecs) encode ends — freeing inputs from converter FS before reading output…');
       await freeConverterInputs(ff,dExt,sExt);
-      outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
+      outRes=await claimRenderOutput(ff,'dance-synced.mp4',proxyOpfsName,proxyStreamed);
       if(proxyMounted&&proxyMounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); proxyMounted=null; }
       var wcT=wcOutcome.timings;
       log('Proxy (webcodecs) stage timings: demux='+(wcT.demuxMs/1000).toFixed(2)+'s | decode+encode='+(wcT.decodeEncodeMs/1000).toFixed(1)+'s | audio='+(wcT.audioMs/1000).toFixed(1)+'s | mux='+(wcT.muxMs/1000).toFixed(1)+'s | output size='+fmtBytesMB(outRes.blob.size)+' | '+wcOutcome.frames+' frames · '+wcOutcome.outW+'x'+wcOutcome.outH+' @ '+wcOutcome.fps+' fps · '+wcOutcome.srcCodec+' → '+wcOutcome.encCodec);
@@ -3894,7 +4397,7 @@ async function doGenerate(opts){
       diagProxy.lowres='not used (source height '+(srcH?srcH+'p':'unknown')+')';
       log('Proxy: -lowres not used (source height '+(srcH?srcH+'p':'unknown')+' — below the 1440p threshold).');
     }
-    var args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:wantLowres});
+    var args=buildRenderArgs({encHeight:480, outName:proxyOutTarget, tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:wantLowres});
     setBarPct(50,'Generating'); // event: render starts (ffmpeg progress then interpolates 50% -> 97%)
     log('Proxy encode exec: ffmpeg args='+args.join(' '));
     var proxyExecErr=null, proxyExecRC=null;
@@ -3907,8 +4410,7 @@ async function doGenerate(opts){
         lowresFailed=true; lowresWhy='exec error: '+(proxyExecErr.message||proxyExecErr);
       } else if(proxyExecRC!=null&&proxyExecRC!==0){ lowresFailed=true; lowresWhy='ffmpeg exit code '+proxyExecRC; }
       else {
-        var outThere=false;
-        try{ var ld=await ff.listDir('/'); for(var li=0; li<ld.length; li++){ if(ld[li]&&ld[li].name==='dance-synced.mp4'){ outThere=true; break; } } }catch(le){ outThere=true; }
+        var outThere=await fsPathExists(ff, proxyOutTarget);
         if(!outThere){ lowresFailed=true; lowresWhy='exec reported success but dance-synced.mp4 is missing from the converter FS'; }
       }
       if(lowresFailed){
@@ -3916,7 +4418,7 @@ async function doGenerate(opts){
         diagProxy.lowres='failed ('+lowresWhy+') — retried without -lowres';
         try{ await ff.deleteFile('dance-synced.mp4'); }catch(e){}
         proxyExecErr=null;
-        args=buildRenderArgs({encHeight:480, outName:'dance-synced.mp4', tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:false});
+        args=buildRenderArgs({encHeight:480, outName:proxyOutTarget, tStart:tStart, tDur:tDur, eff:eff, dExt:dExt, sExt:sExt, proxy:true, danceIn:danceIn, songIn:songIn, lowres:false});
         log('Proxy encode exec (retry without -lowres): ffmpeg args='+args.join(' '));
         await cancellable(withFFmpegLock(async function(){ await withTimeout(ff.exec(args),600000,'Generating proxy video from '+danceFile.name); }));
       } else {
@@ -3927,7 +4429,7 @@ async function doGenerate(opts){
     if(proxyExecErr) throw proxyExecErr;
     log('Proxy encode ends: ffmpeg exec resolved — freeing inputs from converter FS before reading output…');
     await freeConverterInputs(ff,dExt,sExt);
-    var outRes=await readRenderOutput(ff,'dance-synced.mp4','proxy-'+hashStr(sig)+'.mp4');
+    var outRes=await claimRenderOutput(ff,'dance-synced.mp4',proxyOpfsName,proxyStreamed);
     if(proxyMounted&&proxyMounted.ok){ await unmountInputsWorkerFS(ff); log('mount: WORKERFS inputs unmounted (/mnt/dance, /mnt/song)'); proxyMounted=null; }
     }
     var blob=outRes.blob;
@@ -3941,7 +4443,7 @@ async function doGenerate(opts){
     await refreshStorageEstimate();
     showResult(blob);
     markApplied(snap);
-    log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Share, Download or Open.');
+    log('Done — proxy preview ready: '+tDur.toFixed(2)+'s output, '+fmtSize(blob.size)+', generated in '+secs+'s · audio clipped to video duration (no audio beyond video). The full-quality export ('+(height?(q+'p'):'Full')+') renders on demand when you tap Download.');
     try{ journalMarkCompleted(true); }catch(e){}
   }catch(err){
     if(isCancelErr(err)){ log('Generate cancelled (stage='+diagStage+').'); }
